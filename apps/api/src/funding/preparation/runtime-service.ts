@@ -68,6 +68,7 @@ import {
   hypercorePreparationMarket,
   hypercorePreparationPosition,
   hypercorePreparationRequirements,
+  hypercorePositionReferenceMatchesWallet,
 } from "./hypercore-adapter.js";
 import { readHip4TradeLifecycle } from "../../repos/hip4-order-admission.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
@@ -1477,6 +1478,19 @@ export class WalletPreparationRuntimeService {
             input.resolvedMarketContext?.market ?? null,
             this.clock().getTime(),
           );
+    if (
+      input.purpose === "sell" &&
+      market &&
+      !hypercorePositionReferenceMatchesWallet({
+        address,
+        tokenIds: market.sides.map((side) => side.tokenId),
+        positionActionRef: input.positionActionRef ?? null,
+      })
+    )
+      throw new PreparationContractError(
+        "binding_mismatch",
+        "SELL preparation requires the selected wallet's exact position reference",
+      );
     const refreshRequestedAt = this.clock().getTime();
     const read = await this.nativeAccountService.load(
       address,
@@ -2302,11 +2316,32 @@ export class WalletPreparationRuntimeService {
           targetVenueId,
         }),
       )
-      .flatMap((driver) =>
-        wallets
-          .filter((wallet) => driver.supportsWallet(wallet))
-          .map((wallet) => ({ driver, wallet })),
-      );
+      .flatMap((driver) => {
+        const eligible = wallets.filter((wallet) =>
+          driver.supportsWallet(wallet),
+        );
+        if (
+          driver.venueId === "hyperliquid" &&
+          input.purpose === "sell" &&
+          targetMarket?.venue === "hyperliquid"
+        ) {
+          const selected = eligible.filter((wallet) =>
+            hypercorePositionReferenceMatchesWallet({
+              address: wallet.walletAddress,
+              tokenIds: [targetMarket.token_yes, targetMarket.token_no].filter(
+                (tokenId): tokenId is string => tokenId != null,
+              ),
+              positionActionRef: input.positionActionRef ?? null,
+            }),
+          );
+          // No match still follows normal policy/ownership rejection, without
+          // provider IO. Do not turn a bad reference into authoritative absence
+          // or read every unrelated account when the selected wallet is known.
+          if (selected.length)
+            return selected.map((wallet) => ({ driver, wallet }));
+        }
+        return eligible.map((wallet) => ({ driver, wallet }));
+      });
     const outcomes = await Promise.allSettled(
       attempts.map(({ driver, wallet }) =>
         withinDestinationInspectionDeadline(

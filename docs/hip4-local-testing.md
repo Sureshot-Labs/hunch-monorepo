@@ -129,10 +129,76 @@ reuse fresh exact-destination spendability; unknown/expired evidence and the
 post-funding continuation still require an authoritative destination refresh.
 Fees and cash share one fresh `spotMeta` read within each individual
 quote/preparation/submission bundle, not across strict financial calls. The
-600-weight limit is unchanged: fresh default-mode preparation and submission
-still cost 202 weight each, so prior background/account work can require ordinary
-rolling-window recovery. Preview reuse does not promise every immediate sequence
-will fit; it must never bypass fresh financial admission to do so.
+shared default limit is 1,200 weighted units per rolling minute, matching the
+public Hyperliquid IP ceiling. Fresh default-mode preparation and submission
+still cost 202 each; even a cold quote → prepare → submit needs 609 including L2
+and its single Exchange POST credit,
+so the former 600 default could reject a single purchase without any background
+work. `backgroundRequestWeightPerMinute` independently caps aggregate background
+work at 300 by default; increasing the total does not increase indexer/history
+traffic. The interactive reserve ratio may reduce background capacity further.
+Explicit lower total limits remain respected and may not fit the whole flow.
+All processes using this DB share admission; other services sharing the outbound
+IP must be included when configuring that total. Actual exhaustion still recovers
+through rolling expiry; no cache or retry can bypass fresh financial admission.
+
+Periodic heavyweight order evidence shares the background repair quota; cheap
+status checks and explicit/post-submit owned repair retain their existing
+priority. Successful, fully validated uncapped trade/fill responses settle their
+pre-request worst-case reservation to `20 + ceil(returnedRows / 20)`, counting the
+whole wire response before local filtering. The original timestamp and budget
+class remain unchanged. Errors, malformed/capped responses and failed settlement
+retain their conservative reservation. This is request accounting, not a fee,
+trade-size limit or permission to retry an order automatically.
+
+After an exact pre-admission budget refusal, the owned unsubmitted request keeps
+its journal and offers an explicit fresh review. Generic lost responses remain
+ambiguous until reconciled; expiry or a momentary null submission alone cannot
+authorize a replacement. An uninterrupted confirmed funding session can continue
+within its reviewed order terms, while a restored session requires fresh consent.
+
+### Purchase confirmation and selling positions
+
+A newly submitted order gets one immediate best-effort observation through the
+existing owned-order observer, outside the financial admission transaction. Its
+provider reads share a three-second absolute deadline and at most one fill page.
+Only exact status and matching ledger executions with known fees can produce a
+filled receipt. A submission ACK alone remains pending; observation failure
+cannot turn a sent order into a failed submission or trigger another exchange
+POST. Replays and cancellation submissions do not start this fast path.
+
+The existing finance-worker wakes for pending status every five seconds by
+default (`hip4_account.orderObservationIntervalMs`). Costly fill history has a
+separate fifteen-second minimum interval (`orderFillRepairIntervalMs`); explicit
+owned repair bypasses this housekeeping throttle. Account batches retain their
+ordinary `workerIntervalMs` cadence (sixty seconds by default), and completed
+receipts keep their cold recheck interval. All provider reads still require the
+shared budget and active leases. Provider delays or budget exhaustion remain
+honest pending states, never fabricated success.
+
+For SELL preparation, native holdings use an opaque `hyperliquid:<hash>` position
+reference rather than a legacy position UUID. Discovery, inspection and prepare
+accept that reference only for SELL with a canonical Hyperliquid mainnet market.
+The ordinary preparation runtime still resolves the authenticated owner and
+recomputes the exact wallet/token position identity; client input never grants
+inventory or execution authority. Other venue and controller UUID contracts are
+unchanged.
+
+The first-party application normalizes an omitted `deployerFeeScale` to zero:
+this means no deployer surcharge, **not a zero trading fee**. The protocol
+multiplier remains `0 + max(1, 0) = 1`; the actual global `feeScale`, current
+account rates and referral treatment remain mandatory. The dated source hash
+and scrubbed positive-fee corroboration are in
+`fixtures/hip4/official-ui-fee-default-20261019.json` under API src. Observations
+record this compatibility provenance without pretending the API returned zero.
+This applies to the omitted share on outcome 11797 (`txyz`) too, without a
+market/venue allowlist. Invalid values are not omission. A later higher observed
+rate still requires renewed review, and receipts use the actual charged fee.
+
+If the global fee scale is missing, SELL still reports
+`hip4_fee_terms_unavailable`, not a wallet failure. A manual Refresh only obtains
+a new unsigned quote; it never submits a sale. Fresh valid global terms recover
+through the ordinary quote path.
 
 ### Reviewing first-transfer costs
 

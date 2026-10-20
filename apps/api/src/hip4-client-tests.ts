@@ -6,6 +6,22 @@ import {
   createHip4AccountClient,
 } from "./services/hip4-client.js";
 import { selectHip4Outcomes } from "./services/hip4-indexer.js";
+import { admitHip4Request } from "./services/hip4-repository.js";
+
+test("shared admission rejects invalid provider ceilings before the first-row SQL path", async () => {
+  let queries = 0;
+  const db = {
+    query: async () => {
+      queries++;
+      return { rowCount: 1 };
+    },
+  } as unknown as Parameters<typeof admitHip4Request>[0];
+  for (const maximum of [0, -1, 1.5, 1201, NaN, Infinity])
+    assert.equal(await admitHip4Request(db, "mainnet", 1, maximum), false);
+  assert.equal(queries, 0);
+  assert.equal(await admitHip4Request(db, "mainnet", 1, 1200), true);
+  assert.equal(queries, 1);
+});
 
 test("public client admits weight before fetching and uses the explicit environment", async () => {
   const weights: number[] = [];

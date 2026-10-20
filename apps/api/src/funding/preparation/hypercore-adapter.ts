@@ -74,6 +74,21 @@ export function hypercorePreparationMarket(
   };
 }
 
+/** Candidate selection only, not proof of holdings or execution authority.
+ * Reject another wallet's opaque position reference before account IO; the
+ * canonical market and fresh observed position are still checked separately. */
+export function hypercorePositionReferenceMatchesWallet(input: {
+  address: string;
+  tokenIds: readonly string[];
+  positionActionRef: string | null;
+}): boolean {
+  return input.tokenIds.some(
+    (tokenId) =>
+      hip4PortfolioPositionId("mainnet", input.address, tokenId) ===
+      input.positionActionRef,
+  );
+}
+
 /** Preparation binds SELL to the selected observed holding, never a legacy
  * six-decimal position or another controller. It does not reserve shares or
  * attest lending/remaining executable capacity; fresh native admission does. */

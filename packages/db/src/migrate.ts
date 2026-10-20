@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { Pool, PoolClient } from "pg";
 
 import { parseMigrationTargetOptions } from "./migration-target.js";
+import { runMigration } from "./migration-runner.js";
 
 function sha256(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex");
@@ -53,50 +54,8 @@ async function runSingleMigration(
   filePath: string,
 ): Promise<void> {
   const sql = await fs.readFile(filePath, "utf8");
-  const checksum = sha256(sql);
   const filename = path.basename(filePath);
-
-  // detect if previously applied with same checksum
-  const { rows } = await client.query<{ checksum: string }>(
-    `SELECT checksum FROM public.schema_migrations WHERE filename = $1`,
-    [filename],
-  );
-  if (rows.length) {
-    if (rows[0].checksum !== checksum) {
-      throw new Error(
-        `Checksum mismatch for ${filename}. A past migration was edited. ` +
-          `Never edit old migrations; create a new one.`,
-      );
-    }
-    console.log(`↷ skip ${filename}`);
-    return;
-  }
-
-  const noTx = sql.includes("/* no-transaction */");
-
-  try {
-    if (!noTx) {
-      await client.query("BEGIN");
-      await client.query(sql);
-    } else {
-      const statements = sql
-        .split(";")
-        .map((statement) => statement.trim())
-        .filter(Boolean);
-      for (const statement of statements) {
-        await client.query(statement);
-      }
-    }
-    await client.query(
-      `INSERT INTO public.schema_migrations(filename, checksum) VALUES ($1,$2)`,
-      [filename, checksum],
-    );
-    if (!noTx) await client.query("COMMIT");
-    console.log(`✅ applied ${filename}`);
-  } catch (err) {
-    if (!noTx) await client.query("ROLLBACK");
-    throw err;
-  }
+  await runMigration(client, { filename, sql });
 }
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -357,8 +357,13 @@ test("BUY runtime quotes reuse qualified stored default cash without skipping ow
     assert.equal(f.calls.includes("userRole"), true);
     assert.equal(f.calls.includes("borrowLendUserState"), true);
     assert.equal(
+      f.calls.includes("outcomeMeta"),
+      false,
+      "snapshot invalidation rereads capacity, not still-valid fee terms",
+    );
+    assert.equal(
       f.weights.reduce((sum, value) => sum + value, 0),
-      204,
+      184,
     );
   }
   observation = storedDefaultObservation();

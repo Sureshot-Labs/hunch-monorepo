@@ -8,6 +8,7 @@ import {
 } from "../funding/persistence/funding-evidence-repository.js";
 import { proveHyperliquidOrderRejectedInTransaction } from "../funding/persistence/funding-trade-attempt-repository.js";
 import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-sidecar.js";
+import { lockHip4ObservationOwner } from "../services/hip4-optional-observation.js";
 import { formatUnsignedDecimal } from "../account-value/decimal.js";
 import {
   interpretHip4ExactOrderFills,
@@ -130,6 +131,7 @@ export async function recordHip4OrderObservationInTransaction(
     retryMs: number;
     repairError?: string | null;
     phase?: "status" | "fills";
+    deadlineMs?: number;
   },
 ) {
   if (
@@ -144,8 +146,7 @@ export async function recordHip4OrderObservationInTransaction(
     input.retryMs > 3600000
   )
     throw new Error("hip4_order_observation_input_invalid");
-  await lockFundingPolicyForTransaction(db);
-  await db.query("select id from users where id=$1 for update", [input.userId]);
+  await lockHip4ObservationOwner(db, input.userId, input.deadlineMs);
   const context = await readHip4OrderObservationContext(db, input.claim);
   if (!context || context.user_id !== input.userId)
     return { saved: false as const };
@@ -500,22 +501,26 @@ export async function failHip4OrderObservation(
   claim: Hip4OrderObservationClaim,
   error: string,
   retryMs: number,
+  deadlineMs?: number,
 ) {
   // A failed repair invalidates the cached execution summary as well. Use the
   // SAME native writer order P -> U -> S/I, not a submission-first CTE that can
   // deadlock with admission. Caller supplies one transaction; even failures
   // wake the shared intent lifecycle atomically with the current lease fence.
   if (!(await readHip4OrderObservationContext(db, claim))) return false;
-  await lockFundingPolicyForTransaction(db);
+  if (deadlineMs === undefined) await lockFundingPolicyForTransaction(db);
   const context = await readHip4OrderObservationContext(db, claim);
   if (!context) return false;
-  const lockedOwner = await db.query(
-    "select id from users where id=$1 for update",
-    [context.user_id],
-  );
+  const ownerLocked =
+    deadlineMs === undefined
+      ? (
+          await db.query("select id from users where id=$1 for update", [
+            context.user_id,
+          ])
+        ).rowCount === 1
+      : await lockHip4ObservationOwner(db, context.user_id, deadlineMs);
   const current = await readHip4OrderObservationContext(db, claim);
-  if (lockedOwner.rowCount !== 1 || current?.user_id !== context.user_id)
-    return false;
+  if (!ownerLocked || current?.user_id !== context.user_id) return false;
   const saved =
     (
       await db.query(

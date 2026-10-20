@@ -3,6 +3,7 @@ import { isHip4CanaryId } from "@hunch/shared";
 import { pool } from "../db.js";
 import { readHip4Policy } from "../services/hip4-repository.js";
 import { hip4KnownStreamTokensAllowed } from "../services/hip4-stream-access.js";
+import { hip4StreamTickAllowed } from "../services/hip4-stream-tick.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { env } from "../env.js";
 import { getRedisStatus } from "../redis.js";
@@ -26,11 +27,51 @@ import {
  *  - token_id: string | comma-separated list | repeated param
  * Streams initial snapshots (if any) + live ticks from Redis pub/sub.
  */
-export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
+type PricesSseDependencies = {
+  policy: () => Promise<
+    Pick<Awaited<ReturnType<typeof readHip4Policy>>, "policy" | "revision">
+  >;
+  tokensAllowed: (
+    tokens: string[],
+    policy: Awaited<ReturnType<typeof readHip4Policy>>["policy"],
+  ) => Promise<boolean>;
+  redisStatus: () => Promise<{
+    redis: { get: (key: string) => Promise<string | null> } | null;
+    status: string;
+  }>;
+  checkRateLimit: typeof checkRateLimit;
+  acquireDistributedSlot: typeof acquireDistributedSlot;
+  releaseDistributedSlot: typeof releaseDistributedSlot;
+  markHotTokens: typeof markHotTokens;
+  markStreamHotTokens: typeof markStreamHotTokens;
+  subscribeToPriceTicks: typeof subscribeToPriceTicks;
+  subscribeToMarketStates: typeof subscribeToMarketStates;
+  subscribeToMarketUpdates: typeof subscribeToMarketUpdates;
+};
+
+async function registerPricesSseRoutes(
+  app: Parameters<FastifyPluginAsync>[0],
+  overrides: Partial<PricesSseDependencies> = {},
+): Promise<void> {
+  const dependencies: PricesSseDependencies = {
+    policy: () => readHip4Policy(pool),
+    tokensAllowed: (tokens, policy) =>
+      hip4KnownStreamTokensAllowed(pool, tokens, policy),
+    redisStatus: getRedisStatus,
+    checkRateLimit,
+    acquireDistributedSlot,
+    releaseDistributedSlot,
+    markHotTokens,
+    markStreamHotTokens,
+    subscribeToPriceTicks,
+    subscribeToMarketStates,
+    subscribeToMarketUpdates,
+    ...overrides,
+  };
   const z = app.withTypeProvider<ZodTypeProvider>();
   const contexts = new WeakMap<
     object,
-    Awaited<ReturnType<typeof readHip4Policy>>
+    Awaited<ReturnType<PricesSseDependencies["policy"]>>
   >();
 
   const parseJson = (raw: string): unknown | null => {
@@ -51,10 +92,9 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         // Public market streams use the same access model as other venues.
         // Validate effective policy and exact instrument before cache/subscribe.
         try {
-          const context = await readHip4Policy(pool);
+          const context = await dependencies.policy();
           if (
-            !(await hip4KnownStreamTokensAllowed(
-              pool,
+            !(await dependencies.tokensAllowed(
               request.query.token_id,
               context.policy,
             ))
@@ -73,7 +113,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       const activeSlotKey = `sse:prices:active:${clientIp}`;
 
       const connectsPerMinuteLimit = env.pricesSseConnectsPerMinute;
-      const canConnect = await checkRateLimit(
+      const canConnect = await dependencies.checkRateLimit(
         `sse:prices:connect:${clientIp}`,
         connectsPerMinuteLimit,
         60_000,
@@ -87,7 +127,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const maxConnectionsPerIp = env.pricesSseMaxConnectionsPerIp;
-      const hasSlot = await acquireDistributedSlot(
+      const hasSlot = await dependencies.acquireDistributedSlot(
         activeSlotKey,
         maxConnectionsPerIp,
         slotTtlMs,
@@ -100,9 +140,9 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const { redis: r, status } = await getRedisStatus();
+      const { redis: r, status } = await dependencies.redisStatus();
       if (!r) {
-        await releaseDistributedSlot(activeSlotKey, slotTtlMs);
+        await dependencies.releaseDistributedSlot(activeSlotKey, slotTtlMs);
         reply.code(503);
         return reply.send({
           error:
@@ -131,15 +171,16 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         unsubscribeTicks?.();
         unsubscribeMarketState?.();
         unsubscribeMarketUpdate?.();
-        void releaseDistributedSlot(activeSlotKey, slotTtlMs);
+        void dependencies.releaseDistributedSlot(activeSlotKey, slotTtlMs);
       };
 
       request.raw.on("close", cleanup);
       request.raw.on("error", cleanup);
 
       const ids = request.query.token_id;
-      void markHotTokens({ tokenIds: ids });
-      void markStreamHotTokens({ tokenIds: ids });
+      const requestedTokens = new Set(ids);
+      void dependencies.markHotTokens({ tokenIds: ids });
+      void dependencies.markStreamHotTokens({ tokenIds: ids });
 
       // SSE headers
       reply.raw.setHeader("Content-Type", "text/event-stream");
@@ -151,9 +192,20 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       reply.raw.flushHeaders();
 
       let writable = true;
-      const send = (evt: string, data: unknown) => {
+      const send = (evt: string, data: unknown, cachedToken?: string) => {
         if (request.raw.destroyed || !hipAllowed) return;
         if (!writable) return;
+        if (
+          evt === "tick" &&
+          !hip4StreamTickAllowed(
+            data,
+            hipContext,
+            requestedTokens,
+            Date.now(),
+            cachedToken,
+          )
+        )
+          return;
         try {
           const ok =
             reply.raw.write(`event: ${evt}\n`) &&
@@ -172,10 +224,10 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       if (hipContext) {
         const checkHipPolicy = async () => {
           try {
-            const latest = await readHip4Policy(pool);
+            const latest = await dependencies.policy();
             hipAllowed =
               latest.revision === hipContext.revision &&
-              (await hip4KnownStreamTokensAllowed(pool, ids, latest.policy));
+              (await dependencies.tokensAllowed(ids, latest.policy));
           } catch {
             hipAllowed = false;
           }
@@ -201,7 +253,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
             const top = await r.get(`top:${id}`);
             if (top) {
               const parsed = parseJson(top);
-              if (parsed) send("tick", parsed);
+              if (parsed) send("tick", parsed, id);
             }
           } catch {
             // ignore malformed cache entries
@@ -237,9 +289,12 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       );
 
       try {
-        unsubscribeTicks = await subscribeToPriceTicks(ids, (payload) => {
-          send("tick", payload);
-        });
+        unsubscribeTicks = await dependencies.subscribeToPriceTicks(
+          ids,
+          (payload) => {
+            send("tick", payload);
+          },
+        );
       } catch (err) {
         request.log.warn({ err }, "prices SSE subscribe failed");
         send("error", { error: "Prices stream unavailable" });
@@ -253,7 +308,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        unsubscribeMarketState = await subscribeToMarketStates(
+        unsubscribeMarketState = await dependencies.subscribeToMarketStates(
           ids,
           (payload) => {
             send("market_state", payload);
@@ -264,7 +319,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        unsubscribeMarketUpdate = await subscribeToMarketUpdates(
+        unsubscribeMarketUpdate = await dependencies.subscribeToMarketUpdates(
           ids,
           (payload) => {
             send("market_update", payload);
@@ -292,7 +347,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       const stickyMarkIntervalMs =
         Math.max(5, env.hotStreamMarkIntervalSec) * 1000;
       sticky = setInterval(() => {
-        void markStreamHotTokens({ tokenIds: ids });
+        void dependencies.markStreamHotTokens({ tokenIds: ids });
       }, stickyMarkIntervalMs);
 
       const maxDurationMs = maxDurationSec * 1000;
@@ -309,4 +364,12 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }
     },
   );
-};
+}
+
+export function createPricesSseRoutes(
+  overrides: Partial<PricesSseDependencies> = {},
+): FastifyPluginAsync {
+  return async (app) => registerPricesSseRoutes(app, overrides);
+}
+
+export const pricesSseRoutes = createPricesSseRoutes();

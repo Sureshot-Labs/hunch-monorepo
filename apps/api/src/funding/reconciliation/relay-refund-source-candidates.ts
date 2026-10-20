@@ -4,6 +4,12 @@ import { sameAccountAddress, sameAsset } from "../domain/asset-identity.js";
 import { assetLocationSchema, moneySchema } from "../domain/schemas.js";
 import { readFundingRefundContract } from "../domain/refund-settlement.js";
 import { readCommittedFundingIdentity } from "../domain/committed-economic-identity.js";
+import { canonicalJsonEqual } from "../persistence/canonical.js";
+import {
+  polymarketHandoffBindingSql,
+  readStoredPolymarketHandoffBinding,
+  type PolymarketHandoffBindingRow,
+} from "../persistence/polymarket-handoff-binding-repository.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "./owned-route-destination-observer.js";
 
 export type RefundSourceCursor = Readonly<{ createdAt: string; id: string }>;
@@ -31,6 +37,7 @@ export type RefundSourceCandidateRow = Readonly<{
   refund_location_snapshot: unknown;
   provider_quote_ref_lookup_hmac: string | null;
   lookup_key_version: number | null;
+  polymarket_handoff_binding?: PolymarketHandoffBindingRow | null;
 }>;
 
 /** Page the source rows BEFORE inspecting provider/asset/owner/amount. Filtering
@@ -56,7 +63,8 @@ function hydrateSourceSql(sourceSelection: string): string {
     segment_row.provider_id, segment_row.source_snapshot, segment_row.quoted_input,
     segment_row.destination_target_snapshot, segment_row.quoted_min_output,
     segment_row.refund_location_snapshot,
-    segment_row.provider_quote_ref_lookup_hmac, segment_row.lookup_key_version
+    segment_row.provider_quote_ref_lookup_hmac, segment_row.lookup_key_version,
+    to_jsonb(handoff_binding_row) as polymarket_handoff_binding
   from source_page
   left join lateral (
     select user_id,plan_kind,source_snapshot,destination_target_snapshot from funding_operations
@@ -67,6 +75,15 @@ function hydrateSourceSql(sourceSelection: string): string {
     where id=source_page.segment_id
       and operation_id=source_page.operation_id limit 1
   ) segment_row on true
+  left join lateral (
+    ${polymarketHandoffBindingSql({
+      userId: "source_page.user_id",
+      operationId: "source_page.operation_id",
+      segmentId: "source_page.segment_id",
+      sourceReservationId: "source_page.id",
+    })}
+      and source_row.location_id <> segment_row.source_snapshot#>>'{location,locationId}'
+  ) handoff_binding_row on true
   order by source_page.created_at desc,source_page.id desc`;
 }
 function sourcePageSql(resumed: boolean): string {
@@ -121,6 +138,41 @@ export type RefundSourceEnvelopeMatch =
       segmentId: string | null;
       reservationId: string;
     }>;
+
+/** Unequal locations are legitimate only for the frozen economic venue /
+ * physical controller pair, including the actual controller capacity fence.
+ * This is immutable topology, not execution or settlement evidence. */
+function hasFrozenHandoffSourceBinding(
+  userId: string,
+  row: RefundSourceCandidateRow,
+): boolean {
+  if (!row.segment_id || !row.polymarket_handoff_binding) return false;
+  const stored = readStoredPolymarketHandoffBinding(
+    row.polymarket_handoff_binding,
+    {
+      userId,
+      operationId: row.operation_id,
+      segmentId: row.segment_id,
+      sourceReservationId: row.reservation_id,
+    },
+  );
+  return Boolean(
+    stored &&
+    stored.binding.economicSource.locationId === row.location_id &&
+    canonicalJsonEqual(
+      row.operation_source_snapshot,
+      row.polymarket_handoff_binding.source_snapshot,
+    ) &&
+    canonicalJsonEqual(
+      row.source_snapshot,
+      row.polymarket_handoff_binding.segment_source,
+    ) &&
+    canonicalJsonEqual(
+      row.quoted_input,
+      row.polymarket_handoff_binding.quoted_input,
+    ),
+  );
+}
 
 /** Protocol support, not a rollout flag. Native/Solana receive events cannot
  * be classified by this EVM refund-source reader and must not scan its history. */
@@ -231,7 +283,8 @@ export function matchRefundSourceEnvelope(
   if (BigInt(event.rawAmount) > BigInt(amount.data.raw)) return unrelated;
   if (
     row.mode !== "subtract_available" ||
-    row.location_id !== source.data.locationId ||
+    (row.location_id !== source.data.locationId &&
+      !hasFrozenHandoffSourceBinding(userId, row)) ||
     !sameAsset(
       {
         networkId: row.network_id,

@@ -19,7 +19,7 @@ import {
 import { readHip4OrderFeeObservation } from "./hip4-order-fees.js";
 import { submitHip4OrderAction } from "./hip4-order-submission.js";
 import { admitHip4Request, readHip4Policy } from "./hip4-repository.js";
-import { createHip4ReadClient } from "./hip4-client.js";
+import { createHip4ReadClient, Hip4ReadError } from "./hip4-client.js";
 import {
   hip4MarketOrderQuoteRequestSchema,
   sizeHip4MarketOrder,
@@ -59,6 +59,8 @@ import {
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { createHip4QuotePreviewCache } from "./hip4-quote-preview-cache.js";
 import { createHip4OrderSpotMetadataRead } from "./hip4-order-spot-metadata.js";
+import { recheckHip4OwnedOrder } from "./hip4-owned-order-recheck.js";
+import { waitHip4OptionalObservation } from "./hip4-optional-observation.js";
 
 const uuid = z
   .string()
@@ -278,9 +280,6 @@ async function readHip4OrderContext(
         sellTradingPolicy: sellTradingPolicy
           ? { id: sellTradingPolicy.id, payload: sellTradingPolicy.payload }
           : null,
-        // An explicit post-funding account refresh changes this bounded stored
-        // observation. Reuse must not retain the old preview cash until its TTL.
-        storedAccountObservation: snapshot?.observation ?? null,
       };
       const storedQuoteCapacity = projectHip4StoredDefaultBuyQuoteCapacity({
         address: profile.address,
@@ -325,6 +324,10 @@ async function readHip4OrderContext(
             canonicalJsonHash({
               kind: "capacity",
               ...commonScope,
+              // A balance refresh invalidates preview capacity immediately,
+              // but does not re-observe market/user fee terms. Fee facts retain
+              // their own original bounded expiry and generation checks.
+              storedAccountObservation: snapshot?.observation ?? null,
               ...(input.request.side === "SELL"
                 ? {
                     marketId: input.request.marketId,
@@ -634,6 +637,19 @@ export async function submitHip4OrderWithCurrentContext(
       responseMaxBytes: policy.responseMaxBytes,
       fetcher: dependencies.fetcher,
     };
+    // Exchange and Info share the documented IP ceiling. Reserve this single
+    // action before financial admission, never after a durable submission has
+    // been created. Replays returned above do not consume another POST credit;
+    // failed preparation/admission conservatively keeps this one credit.
+    if (
+      !(await admitHip4Request(
+        pool,
+        "mainnet",
+        1,
+        policy.requestWeightPerMinute,
+      ))
+    )
+      throw new Hip4ReadError("budget_exhausted");
     if (wire) {
       const scope = {
         address: row.signer_address,
@@ -689,5 +705,28 @@ export async function submitHip4OrderWithCurrentContext(
     transport,
     dependencies.capabilityCheck,
   );
+  if (
+    !submitted.replayed &&
+    submitted.submission.state !== "rejected" &&
+    attempt.row.unsigned_envelope.action.type === "order"
+  ) {
+    // One bounded read-only confirmation of THIS newly admitted order. The
+    // common observer persists exact status/fills/fees; ACK alone never becomes
+    // a filled receipt. Replays/cancellations never start this fast path.
+    // Failure cannot turn an already-sent purchase into a retryable HTTP error.
+    try {
+      const deadlineMs = Date.now() + 3000;
+      const observation = recheckHip4OwnedOrder(
+        pool,
+        { userId: input.userId, actionId: input.actionId },
+        dependencies.fetcher,
+        { deadlineMs, maxFillPages: 1 },
+      );
+      await waitHip4OptionalObservation(observation, deadlineMs);
+    } catch {
+      // Durable submission and the ordinary worker own delayed/provider-failed
+      // recovery. No signature, second exchange POST or automatic Buy retry.
+    }
+  }
   return { ...submitted, orderId: attempt.row.order_id };
 }

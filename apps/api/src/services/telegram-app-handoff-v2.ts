@@ -51,6 +51,7 @@ import {
   telegramAppHandoffNativeRequestedAmounts,
 } from "./telegram-app-handoff-native-trade.js";
 import { HYPERCORE_MAINNET_USDC } from "../funding/domain/hypercore-identity.js";
+import { stableWalletOpaqueId } from "../account-value/canonical.js";
 import { readTelegramNativeHandoffOrder } from "../repos/telegram-native-handoff-read.js";
 
 type NativeHandoffOrder = NonNullable<
@@ -939,10 +940,17 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
     const requested = request.data.requestedDestinationAmount;
     const gross =
       telegramAppHandoffNativeRequestedAmounts(nativeTrade).grossQuoteRaw;
+    // Funding preparation identifies the economic controller by its exact
+    // network/address, not by the owned user_wallets UUID. Keep that UUID
+    // independently bound below and revalidate its ownership at execution.
     if (
       !sameAsset(destinationAsset, HYPERCORE_MAINNET_USDC) ||
       funding.destination.controllerWalletId !==
-        nativeTrade.controllerWalletRef ||
+        stableWalletOpaqueId({
+          walletType: "ethereum",
+          networkId: HYPERCORE_MAINNET_USDC.networkId,
+          address: trade.controllerWalletAddress.toLowerCase(),
+        }) ||
       !consumer ||
       consumer.venueId !== "hyperliquid" ||
       consumer.marketId !== nativeTrade.marketId ||

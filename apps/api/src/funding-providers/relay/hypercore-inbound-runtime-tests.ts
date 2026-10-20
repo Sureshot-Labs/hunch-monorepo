@@ -50,6 +50,7 @@ import type { FundingCommitPlan } from "../../funding/persistence/funding-operat
 import { maximumInternalFundingDestinationRaw } from "../../funding/planner/composite-source-options.js";
 import { validateRelayHypercoreInboundQuote } from "./hypercore-inbound-quote.js";
 import { formatUnsignedDecimal } from "../../account-value/decimal.js";
+import { verifyPlannerHandoffRefundSourceRegression } from "../../funding/tests/handoff-refund-source-regression.js";
 
 const captured = JSON.parse(
   readFileSync(
@@ -565,6 +566,10 @@ for (const [index, name] of [
       assert.ok(
         frozenBinding(selected.commitPlan),
         "final selected option retains the exact handoff binding",
+      );
+      await verifyPlannerHandoffRefundSourceRegression(
+        selected.commitPlan,
+        f.input.accountId,
       );
       assert.ok(
         readFrozenPolymarketHandoffBinding({

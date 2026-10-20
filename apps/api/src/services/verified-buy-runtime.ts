@@ -24,7 +24,7 @@ import {
   fetchPolymarketTrades,
 } from "./polymarket-clob-l2.js";
 import { createHip4AccountClient } from "./hip4-client.js";
-import { admitHip4Request } from "./hip4-repository.js";
+import { admitHip4OrderEvidenceRequest } from "./hip4-order-evidence-budget.js";
 import {
   claimHip4AccountRefresh,
   failHip4AccountRefresh,
@@ -68,7 +68,12 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
       environment: "mainnet" as const,
     };
     const read = createHip4AccountClient(policy, (weight) =>
-      admitHip4Request(pool, "mainnet", weight, policy.requestWeightPerMinute),
+      admitHip4OrderEvidenceRequest(pool, {
+        environment: "mainnet",
+        weight,
+        policy,
+        periodic: true,
+      }),
     );
     return read(request);
   };

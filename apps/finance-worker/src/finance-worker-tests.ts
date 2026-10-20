@@ -30,6 +30,10 @@ import {
 import { buildJobs } from "./main.js";
 import { InMemoryLockManager } from "./locks.js";
 import { IntervalScheduler } from "./scheduler.js";
+import {
+  createHip4ObserverRunner,
+  type Hip4ObserverCadence,
+} from "./hip4-observer-cadence.js";
 
 type TestCase = {
   name: string;
@@ -110,6 +114,273 @@ function buildFinanceJobsFixture(
 
 const tests: TestCase[] = [
   {
+    name: "HIP hot cycles preserve account batches and rotate only actual account passes",
+    run: async () => {
+      let now = 0;
+      const passes: { accountFirst: boolean; skipAccounts: boolean }[] = [];
+      const runner = createHip4ObserverRunner({
+        now: () => now,
+        readCadence: async () => ({
+          nextIntervalSeconds: 5,
+          nextAccountIntervalSeconds: 60,
+          accountPolicyRevision: "fixture-account-v1",
+          accountReadEnabled: true,
+          accountReadEnvironment: "mainnet",
+        }),
+        runPass: async (accountFirst, options) => {
+          passes.push({ accountFirst, ...options });
+        },
+      });
+      await runner.run();
+      for (now of [5000, 10000, 15000, 59000]) await runner.run();
+      now = 60000;
+      await runner.run();
+      assert.deepEqual(passes, [
+        { accountFirst: true, skipAccounts: false },
+        { accountFirst: false, skipAccounts: true },
+        { accountFirst: false, skipAccounts: true },
+        { accountFirst: false, skipAccounts: true },
+        { accountFirst: false, skipAccounts: true },
+        { accountFirst: false, skipAccounts: false },
+      ]);
+    },
+  },
+  {
+    name: "HIP account policy changes recalculate due time instead of retaining stale housekeeping",
+    run: async () => {
+      let now = 0;
+      let interval = 60;
+      const skipped: boolean[] = [];
+      const runner = createHip4ObserverRunner({
+        now: () => now,
+        readCadence: async () => ({
+          nextIntervalSeconds: 5,
+          nextAccountIntervalSeconds: interval,
+          accountPolicyRevision: "fixture-account-v1",
+          accountReadEnabled: true,
+          accountReadEnvironment: "mainnet",
+        }),
+        runPass: async (_accountFirst, options) => {
+          skipped.push(options.skipAccounts);
+        },
+      });
+      await runner.run();
+      now = 15000;
+      await runner.run();
+      interval = 10;
+      await runner.run();
+      interval = 120;
+      now = 30000;
+      await runner.run();
+      now = 135000;
+      await runner.run();
+      assert.deepEqual(skipped, [false, true, false, true, false]);
+    },
+  },
+  {
+    name: "HIP disabled account reads leave hot order cycles enabled and recover immediately on reenabling",
+    run: async () => {
+      let now = 0;
+      const cadence: Hip4ObserverCadence = {
+        nextIntervalSeconds: 5,
+        nextAccountIntervalSeconds: 60,
+        accountPolicyRevision: "fixture-account-v1",
+        accountReadEnabled: false,
+        accountReadEnvironment: "mainnet",
+      };
+      const skipped: boolean[] = [];
+      const runner = createHip4ObserverRunner({
+        now: () => now,
+        readCadence: async () => cadence,
+        runPass: async (_accountFirst, options) => {
+          skipped.push(options.skipAccounts);
+        },
+      });
+      await runner.run();
+      now = 5000;
+      cadence.accountReadEnabled = true;
+      await runner.run();
+      now = 10000;
+      cadence.accountReadEnabled = false;
+      await runner.run();
+      now = 15000;
+      cadence.accountReadEnabled = true;
+      await runner.run();
+      now = 20000;
+      cadence.accountReadEnvironment = "testnet";
+      await runner.run();
+      assert.deepEqual(skipped, [true, false, true, false, false]);
+    },
+  },
+  {
+    name: "HIP account policy repair bypasses a previous no-op batch delay without accelerating unchanged policy",
+    run: async () => {
+      let now = 0;
+      let revision = "paused-batch";
+      const skipped: boolean[] = [];
+      const runner = createHip4ObserverRunner({
+        now: () => now,
+        readCadence: async () => ({
+          nextIntervalSeconds: 5,
+          nextAccountIntervalSeconds: 60,
+          accountPolicyRevision: revision,
+          accountReadEnabled: true,
+          accountReadEnvironment: "mainnet",
+        }),
+        runPass: async (_accountFirst, options) => {
+          skipped.push(options.skipAccounts);
+        },
+      });
+      await runner.run();
+      now = 5000;
+      await runner.run();
+      revision = "resumed-batch";
+      await runner.run();
+      now = 10000;
+      await runner.run();
+      assert.deepEqual(skipped, [false, true, false, true]);
+    },
+  },
+  {
+    name: "HIP account cadence recovers from a backwards clock instead of waiting for the old timestamp",
+    run: async () => {
+      let now = 120000;
+      const skipped: boolean[] = [];
+      const runner = createHip4ObserverRunner({
+        now: () => now,
+        readCadence: async () => ({
+          nextIntervalSeconds: 5,
+          nextAccountIntervalSeconds: 60,
+          accountPolicyRevision: "fixture-account-v1",
+          accountReadEnabled: true,
+          accountReadEnvironment: "mainnet",
+        }),
+        runPass: async (_accountFirst, options) => {
+          skipped.push(options.skipAccounts);
+        },
+      });
+      await runner.run();
+      now = 1000;
+      await runner.run();
+      now = 6000;
+      await runner.run();
+      now = 61000;
+      await runner.run();
+      assert.deepEqual(skipped, [false, false, true, false]);
+    },
+  },
+  {
+    name: "HIP variable order runtimes preserve completion-based aggregate account batch spacing",
+    run: async () => {
+      let now = 0;
+      let fullPasses = 0;
+      const fullStarts: number[] = [];
+      const fullCompletions: number[] = [];
+      const runner = createHip4ObserverRunner({
+        now: () => now,
+        readCadence: async () => ({
+          nextIntervalSeconds: 5,
+          nextAccountIntervalSeconds: 60,
+          accountPolicyRevision: "fixture-account-v1",
+          accountReadEnabled: true,
+          accountReadEnvironment: "mainnet",
+        }),
+        runPass: async (_accountFirst, options) => {
+          if (!options.skipAccounts) {
+            fullStarts.push(now);
+            now += fullPasses++ === 0 ? 30000 : 45000;
+            fullCompletions.push(now);
+          }
+        },
+      });
+      await runner.run();
+      for (now of [60000, 89999, 90000, 150000, 194999, 195000])
+        await runner.run();
+      assert.deepEqual(fullStarts, [0, 90000, 195000]);
+      assert.deepEqual(fullCompletions, [30000, 135000, 240000]);
+      for (let index = 1; index < fullStarts.length; index++)
+        assert.equal(fullStarts[index] - fullCompletions[index - 1], 60000);
+    },
+  },
+  {
+    name: "HIP observer single-flight survives caller timeout without repeating reads or account decisions",
+    run: async () => {
+      let now = 0;
+      let reads = 0;
+      let passes = 0;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const runner = createHip4ObserverRunner({
+        now: () => now,
+        readCadence: async () => {
+          reads++;
+          return {
+            nextIntervalSeconds: 5,
+            nextAccountIntervalSeconds: 60,
+            accountPolicyRevision: "fixture-account-v1",
+            accountReadEnabled: true,
+            accountReadEnvironment: "mainnet",
+          };
+        },
+        runPass: async () => {
+          passes++;
+          await held;
+          return { nextIntervalSeconds: 5 };
+        },
+      });
+      const first = runner.run();
+      await setImmediate();
+      now = 120000;
+      assert.equal(runner.run(), first);
+      assert.equal(reads, 1);
+      assert.equal(passes, 1);
+      let idle = false;
+      const waiting = runner.waitForIdle().then(() => {
+        idle = true;
+      });
+      await setImmediate();
+      assert.equal(idle, false);
+      release();
+      await waiting;
+      assert.equal(idle, true);
+      assert.deepEqual(await first, { nextIntervalSeconds: 5 });
+      await runner.run();
+      assert.equal(reads, 2);
+      assert.equal(passes, 2);
+    },
+  },
+  {
+    name: "HIP observer releases failed policy single-flight and preserves startup account eligibility",
+    run: async () => {
+      let failPolicy = true;
+      let calls = 0;
+      const runner = createHip4ObserverRunner({
+        readCadence: async () => {
+          if (failPolicy) throw new Error("fixture policy unavailable");
+          return {
+            nextIntervalSeconds: 5,
+            nextAccountIntervalSeconds: 60,
+            accountPolicyRevision: "fixture-account-v1",
+            accountReadEnabled: true,
+            accountReadEnvironment: "mainnet",
+          };
+        },
+        runPass: async (accountFirst, options) => {
+          calls++;
+          assert.equal(accountFirst, true);
+          assert.equal(options.skipAccounts, false);
+        },
+      });
+      await assert.rejects(runner.run(), /fixture policy unavailable/);
+      assert.equal(calls, 0);
+      failPolicy = false;
+      await runner.run();
+      assert.equal(calls, 1);
+    },
+  },
+  {
     name: "HIP observational worker uses runtime cadence without financial execution or API-wide secrets",
     run: async () => {
       const job = buildJobs(
@@ -124,6 +395,7 @@ const tests: TestCase[] = [
           leaseLost: 0,
           budgetExhausted: 0,
           nextIntervalSeconds: 123,
+          nextAccountIntervalSeconds: 123,
         }),
       ).find((row) => row.name === "hip4_account_observer");
       assert.ok(job?.enabled);

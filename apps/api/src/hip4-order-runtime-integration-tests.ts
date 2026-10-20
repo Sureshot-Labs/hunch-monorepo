@@ -49,7 +49,9 @@ async function policy(lifecycle: "active" | "unreleased") {
   const payload = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);
   payload.venues.hyperliquid = { lifecycle, indexerMode: "off" };
   const saved = await pool.query(
-    "insert into runtime_policies(policy_key,effective_at,payload) values('venue_lifecycle',clock_timestamp(),$1) returning id",
+    // Match the millisecond clock supplied by the policy reader. A policy
+    // inserted in this same millisecond must not look microseconds future-dated.
+    "insert into runtime_policies(policy_key,effective_at,payload) values('venue_lifecycle',date_trunc('milliseconds',clock_timestamp()),$1) returning id",
     [payload],
   );
   policyIds.push(saved.rows[0].id);
@@ -464,6 +466,31 @@ try {
     (await submit(pool, budgeted.input, deps)).replayed,
     false,
     "same preparation recovers once the shared request budget becomes available",
+  );
+  const exchangeCredits = await pool.query(`
+    select count(*)::int as credit_count from pg_temp.hip4_request_budget budget_row,
+      lateral jsonb_array_elements(budget_row.admissions) credit_row
+    where credit_row->>'weight'='1'
+      and (credit_row->>'at')::numeric>extract(epoch from statement_timestamp())-60`);
+  assert.equal(
+    exchangeCredits.rows[0].credit_count,
+    1,
+    "the unbatched exchange POST shares the global IP budget",
+  );
+  const budgetBeforeReplay = (
+    await pool.query(
+      "select admissions from pg_temp.hip4_request_budget where scope='public-info'",
+    )
+  ).rows[0].admissions;
+  assert.equal((await submit(pool, budgeted.input, deps)).replayed, true);
+  assert.deepEqual(
+    (
+      await pool.query(
+        "select admissions from pg_temp.hip4_request_budget where scope='public-info'",
+      )
+    ).rows[0].admissions,
+    budgetBeforeReplay,
+    "an admitted replay consumes neither exchange nor info budget",
   );
 
   const concurrent = await preparation();

@@ -4,9 +4,11 @@ import { tx, type Pool } from "@hunch/infra";
 import { fetchActiveRuntimePolicy } from "@hunch/db";
 import { hip4ReadPolicySchema } from "@hunch/shared";
 import { createHip4AccountClient, Hip4ReadError } from "./hip4-client.js";
-import { admitHip4Request } from "./hip4-repository.js";
+import { admitHip4OrderEvidenceRequest } from "./hip4-order-evidence-budget.js";
 import { readHip4AccountPolicy } from "./hip4-account-repository.js";
 import { repairHip4ClaimedOrderFills } from "./hip4-order-fill-repair.js";
+import { hip4FillRepairSchema } from "../schemas/hip4-account.js";
+import { assertHip4ObservationDeadline } from "./hip4-optional-observation.js";
 import {
   HIP4_CLAIM_ORDER_OBSERVATION_SQL,
   HIP4_CLAIM_COMPLETED_ORDER_OBSERVATION_SQL,
@@ -16,6 +18,34 @@ import {
   type Hip4OrderObservationClaim,
 } from "../repos/hip4-order-observation.js";
 
+export type Hip4OrderObservationOptions = Readonly<{
+  deadlineMs?: number;
+  maxFillPages?: 1;
+  // Periodic heavy evidence shares the background quota; explicit repair and
+  // post-submit confirmation retain their existing financial-read priority.
+  periodic?: boolean;
+  // Periodic worker only. Explicit owned repair never waits for housekeeping.
+  fillRepairMinimumIntervalMs?: number;
+}>;
+
+export function hip4OrderFillRepairDue(
+  previous: unknown,
+  now: number,
+  minimumIntervalMs = 0,
+) {
+  if (minimumIntervalMs <= 0) return true;
+  const repair = hip4FillRepairSchema.safeParse(previous);
+  const attemptedAt = repair.success
+    ? Date.parse(repair.data.lastAttemptAt ?? "")
+    : NaN;
+  // Missing/legacy facts and a backward clock must not pin repair forever.
+  return (
+    !Number.isFinite(attemptedAt) ||
+    attemptedAt > now ||
+    attemptedAt + minimumIntervalMs <= now
+  );
+}
+
 /** Single claimed action; exported for bounded explicit repair and offline
  * transport tests. The claim is database-owned, never a public request body. */
 export async function observeHip4ClaimedOrder(
@@ -24,7 +54,9 @@ export async function observeHip4ClaimedOrder(
   maxRows: number,
   retryMs: number,
   fetcher?: typeof fetch,
+  options: Hip4OrderObservationOptions = {},
 ) {
+  assertHip4ObservationDeadline(options.deadlineMs);
   const context = await readHip4OrderObservationContext(pool, claim);
   if (!context) return { saved: false as const };
   if (context.environment !== "mainnet" || context.action_kind !== "order")
@@ -39,6 +71,7 @@ export async function observeHip4ClaimedOrder(
   const read = createHip4AccountClient(
     policy,
     async (weight) => {
+      assertHip4ObservationDeadline(options.deadlineMs);
       if (!(await readHip4OrderObservationContext(pool, claim)))
         throw new Error("order_lease_lost");
       const active = await fetchActiveRuntimePolicy(
@@ -48,15 +81,19 @@ export async function observeHip4ClaimedOrder(
         { missingTable: "error" },
       );
       const current = hip4ReadPolicySchema.parse(active?.payload ?? {});
-      return admitHip4Request(
-        pool,
-        context.environment,
+      return admitHip4OrderEvidenceRequest(pool, {
+        environment: context.environment,
         weight,
-        current.requestWeightPerMinute,
-      );
+        policy: current,
+        periodic: options.periodic === true,
+      });
     },
     fetcher,
+    options.deadlineMs === undefined
+      ? undefined
+      : { deadlineMs: options.deadlineMs },
   );
+  assertHip4ObservationDeadline(options.deadlineMs);
   const body = await read({
     type: "orderStatus",
     user: context.signer_address,
@@ -74,6 +111,7 @@ export async function observeHip4ClaimedOrder(
       maxRows,
       retryMs,
       phase: "status",
+      deadlineMs: options.deadlineMs,
     }),
   );
   if (!staged.saved) return staged;
@@ -81,15 +119,35 @@ export async function observeHip4ClaimedOrder(
   let repairError: string | null = null;
   try {
     const account = await readHip4AccountPolicy(pool);
-    repairError = (
-      await repairHip4ClaimedOrderFills({
-        pool,
-        claim,
-        policy: account.policy,
-        read,
-        throughTime: responseAt,
-      })
-    ).error;
+    if (
+      hip4OrderFillRepairDue(
+        context.fills_observation?.repair,
+        responseAt,
+        options.fillRepairMinimumIntervalMs,
+      )
+    ) {
+      repairError = (
+        await repairHip4ClaimedOrderFills({
+          pool,
+          claim,
+          policy: {
+            ...account.policy,
+            historyRepairPagesPerRefresh: Math.min(
+              account.policy.historyRepairPagesPerRefresh,
+              options.maxFillPages ??
+                account.policy.historyRepairPagesPerRefresh,
+            ),
+          },
+          read,
+          throughTime: responseAt,
+          deadlineMs: options.deadlineMs,
+        })
+      ).error;
+    } else {
+      // A skipped history attempt is not a successful repair. Preserve its
+      // failure provenance while still consuming independently valid P2 facts.
+      repairError = context.fills_observation?.repairError ?? null;
+    }
   } catch (error) {
     repairError =
       error instanceof Hip4ReadError
@@ -105,6 +163,7 @@ export async function observeHip4ClaimedOrder(
       maxRows,
       retryMs,
       repairError,
+      deadlineMs: options.deadlineMs,
     }),
   );
 }
@@ -148,7 +207,10 @@ export async function runHip4OrderObservationPass(
     claim ??= (
       await pool.query<Hip4OrderObservationClaim>(
         HIP4_CLAIM_ORDER_OBSERVATION_SQL,
-        [currentAccount.policy.leaseMs, currentAccount.policy.workerIntervalMs],
+        [
+          currentAccount.policy.leaseMs,
+          currentAccount.policy.orderObservationIntervalMs,
+        ],
       )
     ).rows[0];
     if (!claim) {
@@ -161,8 +223,13 @@ export async function runHip4OrderObservationPass(
         pool,
         claim,
         currentAccount.policy.accountingMaxRows,
-        currentAccount.policy.workerIntervalMs,
+        currentAccount.policy.orderObservationIntervalMs,
         fetcher,
+        {
+          periodic: true,
+          fillRepairMinimumIntervalMs:
+            currentAccount.policy.orderFillRepairIntervalMs,
+        },
       );
       if (!saved.saved) result.leaseLost++;
       else {
@@ -184,7 +251,7 @@ export async function runHip4OrderObservationPass(
           db,
           claim,
           code,
-          currentAccount.policy.workerIntervalMs,
+          currentAccount.policy.orderObservationIntervalMs,
         ),
       );
       if (code === "budget_exhausted") {

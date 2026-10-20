@@ -16,7 +16,7 @@ import {
   Hip4ReadError,
   type Hip4AccountInfoRequest,
 } from "./hip4-client.js";
-import { admitHip4Request, readHip4Policy } from "./hip4-repository.js";
+import { reserveHip4Request, readHip4Policy } from "./hip4-repository.js";
 import { readHip4AccountPolicy } from "./hip4-account-repository.js";
 import {
   planHip4FillRepair,
@@ -295,7 +295,7 @@ export async function collectHip4KnownWalletIntel(input: {
         current.policy.environment !== environment
       )
         throw new Error("known_wallet_reads_disabled");
-      return admitHip4Request(
+      return reserveHip4Request(
         pool,
         environment,
         weight,

@@ -17,6 +17,7 @@
     "dev:bun": "tsc -w -p tsconfig.build.json",
     "migrate": "tsx --tsconfig tsconfig.json src/migrate.ts",
     "test:migration-target": "node --import tsx src/migration-target-tests.ts",
+    "test:migration-recovery": "node --import tsx src/migration-runner-recovery-tests.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",

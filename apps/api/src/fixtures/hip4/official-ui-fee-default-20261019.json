@@ -1,0 +1,180 @@
+{
+  "rule": "official_ui_default_20261019",
+  "scope": "Outcome SELL current-rate compatibility evidence, not a lifetime fee cap, universal rounding proof or execution authorization.",
+  "officialUi": {
+    "url": "https://app.hyperliquid.xyz/assets/config-1E2uRQO0.js",
+    "sha256": "3942a353642d32b2b72c16a77572a2ff75ca22d2d88907698234926a59285c7f",
+    "inspectedOn": "2026-10-19",
+    "method": "Read public first-party JavaScript as text; never execute it or import it at runtime.",
+    "closingFunction": "_8",
+    "absentDeployerScale": "0",
+    "deployerScaleExpression": "n.deployerFeeScale??0",
+    "combinedScaleFunction": "g8(e)=e+Math.max(1,e)",
+    "limitation": "The official UI also defaults absent global feeScale to zero. That separate behavior is NOT adopted; Hunch still requires a valid live global feeScale."
+  },
+  "publicCapture": {
+    "fillsCollectedAt": "2026-10-12T18:15:15.049Z",
+    "metadataCollectedAt": "2026-10-12T18:21:11.693Z",
+    "source": "Selected fields extracted offline from the previously authorized, scrubbed public boundary audit and metadata/settlement captures of October 12, 2026.",
+    "privacy": "No addresses, account aliases, transaction hashes, order IDs or trade IDs are retained. Tests require no private or untracked source files."
+  },
+  "feeScale": "1.0",
+  "coverage": {
+    "omittedDeployerScaleClosingRecords": 12,
+    "informativePositiveFeeRecords": 8,
+    "takerSellRecords": 2,
+    "takerSettlementRecords": 6,
+    "makerRecords": 0,
+    "zeroPayoutSettlementsExcluded": 4,
+    "exactTargetCreationObserved": false,
+    "historicalFeeRateSnapshots": false,
+    "universalFeeRoundingEstablished": false
+  },
+  "limitations": [
+    "The raw outcomeSpec records deliberately omit deployerFeeScale; they do not contain an explicit provider-returned zero.",
+    "The eight positive-fee examples corroborate an effective multiplier of one when global feeScale is one; they do not prove omission semantics for every deployment or future protocol revision.",
+    "Current sampled account rates were compared with preceding-day fills, not frozen historical rate revisions.",
+    "Exact-decimal flooring matches these selected examples only. Another known-scale record in the original capture differs by one USDC atom; universal per-fill rounding is not established.",
+    "No omitted-scale maker fill is present. Four zero-payout settlements were excluded because they cannot distinguish a one-times from a two-times multiplier.",
+    "Outcome 8774 is a sportsContestWinner template, but the exact creation of outcome 11797 was not observed."
+  ],
+  "records": [
+    {
+      "outcomeSpec": {
+        "outcome": 7353,
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Sell",
+      "px": "0.95367",
+      "sz": "5.0",
+      "fee": "0.00320433",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "outcomeSpec": {
+        "outcome": 10465,
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Settlement",
+      "px": "1.0",
+      "sz": "55.0",
+      "fee": "0.03696",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "outcomeSpec": {
+        "outcome": 10472,
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Settlement",
+      "px": "1.0",
+      "sz": "1.0",
+      "fee": "0.000672",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "outcomeSpec": {
+        "outcome": 11580,
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Sell",
+      "px": "0.36643",
+      "sz": "10.0",
+      "fee": "0.0024624",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "outcomeSpec": {
+        "outcome": 8774,
+        "name": "template:sportsContestWinner",
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Settlement",
+      "px": "1.0",
+      "sz": "2.0",
+      "fee": "0.001344",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "outcomeSpec": {
+        "outcome": 10465,
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Settlement",
+      "px": "1.0",
+      "sz": "10.0",
+      "fee": "0.00672",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "outcomeSpec": {
+        "outcome": 10472,
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Settlement",
+      "px": "1.0",
+      "sz": "3.0",
+      "fee": "0.002016",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "outcomeSpec": {
+        "outcome": 10472,
+        "venue": "txyz",
+        "quoteToken": "USDC"
+      },
+      "dir": "Settlement",
+      "px": "1.0",
+      "sz": "2.0",
+      "fee": "0.0014",
+      "crossed": true,
+      "userFees": {
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.0"
+      }
+    }
+  ]
+}

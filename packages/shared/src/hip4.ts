@@ -212,10 +212,21 @@ export const hip4ReadPolicySchema = z
       .min(1024)
       .max(16_777_216)
       .default(4_194_304),
-    requestWeightPerMinute: z.number().int().min(40).max(1200).default(600),
+    // Public /info permits 1200 weighted units per rolling minute/IP. A cold
+    // default-mode quote + prepare + submit already needs 608, before display
+    // reads. Keep one shared ceiling, rather than an impossible 600-unit flow.
+    requestWeightPerMinute: z.number().int().min(40).max(1200).default(1200),
     // Background discovery/history must leave capacity for explicit account,
     // quote and receipt checks within the SAME provider-wide rolling budget.
     interactiveRequestWeightReserveRatio: z.number().min(0).max(1).default(0.5),
+    // Increasing the global ceiling must not increase background traffic and
+    // consume the new interactive headroom. The ratio may further reduce this.
+    backgroundRequestWeightPerMinute: z
+      .number()
+      .int()
+      .min(40)
+      .max(1200)
+      .default(300),
     // Quote-only fact reuse. Zero disables completed and in-flight reuse;
     // preparations and financial admission always read authoritative facts.
     quotePreviewCacheEntries: z.number().int().min(0).max(1000).default(64),
@@ -267,6 +278,7 @@ export function hip4BackgroundRequestWeightLimit(
   // budget. This is a protocol cost, not an additional provider allowance.
   return Math.min(
     policy.requestWeightPerMinute,
+    policy.backgroundRequestWeightPerMinute,
     Math.max(
       40,
       policy.requestWeightPerMinute -

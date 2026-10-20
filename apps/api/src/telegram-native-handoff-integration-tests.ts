@@ -37,6 +37,7 @@ import {
   telegramVenueFromSealedHandoffSnapshot,
 } from "./services/telegram-bot-trading.js";
 import {
+  parseTelegramAppHandoffV2Plan,
   resolveTelegramAppHandoffV2Execution,
   telegramAppHandoffV2FundingIdempotencyKey,
 } from "./services/telegram-app-handoff-v2.js";
@@ -50,6 +51,7 @@ import { submitHip4OrderWithCurrentContext } from "./services/hip4-order-runtime
 import { prepareHip4TradeSigning } from "./services/hip4-trade-signing.js";
 import { hip4FeeTestObservation } from "./hip4-fee-test-fixture.js";
 import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
+import { stableWalletOpaqueId } from "./account-value/canonical.js";
 import { lockFundingPolicyForTransaction } from "./funding/policies/funding-policy-sidecar.js";
 import {
   HIP4_CLAIM_EXACT_ORDER_OBSERVATION_SQL,
@@ -434,7 +436,11 @@ async function fixture(
                 deadline: null,
               },
               destination: {
-                controllerWalletId: native.controllerWalletRef,
+                controllerWalletId: stableWalletOpaqueId({
+                  walletType: "ethereum",
+                  networkId: HYPERCORE_MAINNET_USDC.networkId,
+                  address: base.profile.address,
+                }),
                 destinationOptionId: randomUUID(),
                 requiredAsset: HYPERCORE_MAINNET_USDC,
                 topology: "native_hypercore",
@@ -700,6 +706,22 @@ try {
   }
   const buy = await fixture("BUY", true);
   assert.ok(buy.funding);
+  for (const submission of [
+    {
+      ...buy.submission,
+      signer: "0x0000000000000000000000000000000000000002",
+    },
+    {
+      ...buy.submission,
+      nativeTrade: {
+        ...buy.native,
+        controllerWalletRef: randomUUID(),
+      },
+    },
+  ]) {
+    await assert.rejects(funded(buy, submission), scopedError);
+    assert.equal((await state(buy)).status, "funding");
+  }
   const confirmed = buy.funding.confirmedIntent;
   for (const change of [
     { marketContextId: `${confirmed.marketContextId}:wrong` },
@@ -895,6 +917,72 @@ try {
       "hyperliquid",
       "HTTP reader recognizes only the versioned native IOC plan",
     );
+    if (isFunded) {
+      const parsed = parseTelegramAppHandoffV2Plan(data.handoff.planSnapshot);
+      assert.equal(parsed.kind, "funding");
+      assert.ok(parsed.kind === "funding");
+      assert.equal(
+        parsed.funding.destination.controllerWalletId,
+        stableWalletOpaqueId({
+          walletType: "ethereum",
+          networkId: HYPERCORE_MAINNET_USDC.networkId,
+          address: data.base.profile.address,
+        }),
+      );
+      assert.notEqual(
+        parsed.funding.destination.controllerWalletId,
+        data.native.controllerWalletRef,
+        "the real funded producer uses economic IDs, not owned row UUIDs",
+      );
+      const controllerDb = await pool.connect();
+      try {
+        await controllerDb.query("begin");
+        await controllerDb.query("savepoint native_controller_guard");
+        const validate = () =>
+          telegramAppHandoffV2CurrentScope.validate({
+            action: "buy",
+            authorityFingerprint: data.authorityFingerprint,
+            db: { query: controllerDb.query.bind(controllerDb) },
+            policyRevision: data.policyRevision,
+            telegramUserId: data.telegramUserId,
+            tradeIntentId: data.intentId,
+            userId: data.base.userId,
+            venue: "hyperliquid",
+          });
+        await controllerDb.query(
+          "update user_wallets set wallet_address=$2 where id=$1",
+          [
+            data.native.controllerWalletRef,
+            "0x0000000000000000000000000000000000000002",
+          ],
+        );
+        assert.equal(
+          await validate(),
+          false,
+          "a changed current controller address is rejected",
+        );
+        await controllerDb.query(
+          "rollback to savepoint native_controller_guard",
+        );
+        const foreignOwner = randomUUID();
+        await controllerDb.query(
+          "insert into users(id,is_active) values($1,true)",
+          [foreignOwner],
+        );
+        await controllerDb.query(
+          "update user_wallets set user_id=$2 where id=$1",
+          [data.native.controllerWalletRef, foreignOwner],
+        );
+        assert.equal(
+          await validate(),
+          false,
+          "a controller row now owned by another user is rejected",
+        );
+      } finally {
+        await controllerDb.query("rollback");
+        controllerDb.release();
+      }
+    }
     const routeScopeInput = {
       db: pool,
       action: side === "BUY" ? ("buy" as const) : ("sell" as const),

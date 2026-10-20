@@ -396,6 +396,7 @@ test("metadata pair budget minimum, freshness deadlines and policy recovery", ()
   );
 });
 test("background reads reserve interactive headroom inside the same configurable budget", () => {
+  assert.equal(DEFAULT_HIP4_READ_POLICY.requestWeightPerMinute, 1200);
   assert.equal(hip4BackgroundRequestWeightLimit(DEFAULT_HIP4_READ_POLICY), 300);
   for (const maximum of [40, 42, 120, 600, 1200]) {
     for (const ratio of [0, 0.5, 0.8, 0.9, 1]) {
@@ -406,7 +407,7 @@ test("background reads reserve interactive headroom inside the same configurable
       const backgroundLimit = hip4BackgroundRequestWeightLimit(policy);
       assert.equal(
         backgroundLimit,
-        Math.max(40, maximum - Math.ceil(maximum * ratio)),
+        Math.min(300, Math.max(40, maximum - Math.ceil(maximum * ratio))),
       );
       assert.ok(backgroundLimit <= maximum);
     }
@@ -417,6 +418,17 @@ test("background reads reserve interactive headroom inside the same configurable
         interactiveRequestWeightReserveRatio: ratio,
       }),
     );
+  for (const cap of [39, 1201, NaN, Infinity])
+    assert.throws(() =>
+      hip4ReadPolicySchema.parse({ backgroundRequestWeightPerMinute: cap }),
+    );
+  assert.equal(
+    hip4BackgroundRequestWeightLimit(
+      hip4ReadPolicySchema.parse({ backgroundRequestWeightPerMinute: 400 }),
+    ),
+    400,
+    "an explicit policy can change background capacity within the global cap",
+  );
 });
 test("catalog cadence reserves bounded repair capacity without extending freshness", () => {
   assert.equal(hip4CatalogRefreshIntervalMs(DEFAULT_HIP4_READ_POLICY), 30_000);

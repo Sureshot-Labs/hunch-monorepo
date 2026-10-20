@@ -31,6 +31,7 @@ import { verifyReceiveCanonicalLocksPg } from "./funding/tests/receive-canonical
 import { verifyReceiveClassificationRetryPg } from "./funding/tests/receive-classification-retry-pg.js";
 import { verifyPolymarketHandoffPlanPg } from "./funding/tests/polymarket-handoff-plan-pg.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { hip4OrderTestFixture } from "./hip4-order-test-fixture.js";
 import {
   loadFundingAccountValueFacts,
   fundingInvalidSourceComponentIds,
@@ -1490,30 +1491,34 @@ try {
   await commit(userId, noncePlan.commitPlan);
   const collisionSigner = nonceFixture.input.profile.address.toLowerCase();
   const tradeWalletId = randomUUID();
-  const tradeMarketId = "hyperliquid:mainnet:outcome:87654321";
   await client.query(
     `insert into user_wallets(id,user_id,wallet_address,wallet_type,is_verified,
     wallet_source,is_internal_wallet,privy_profile_updated_at)
     values($1,$2,$3,'ethereum',true,'external',false,now())`,
     [tradeWalletId, userId, collisionSigner],
   );
-  await client.query(
-    `insert into unified_events(id,venue,venue_event_id,title,status)
-    values($1,'hyperliquid',$1,'Synthetic shared nonce','ACTIVE')`,
-    [tradeMarketId],
-  );
-  await client.query(
-    `insert into unified_markets(id,venue,venue_market_id,event_id,title,status,market_type)
-    values($1,'hyperliquid',$1,$1,'Synthetic shared nonce','ACTIVE','binary')`,
-    [tradeMarketId],
-  );
+  // The nonce test must pass the current native-instrument boundary first.
+  // Use the canonical synthetic market/token fixture, not a bare market row.
+  const tradeFixture = await hip4OrderTestFixture(client, collisionSigner, {
+    userId,
+    profile: {
+      walletId: tradeWalletId,
+      controllerWalletRef: tradeWalletId,
+      networkId: "hyperliquid:mainnet",
+      address: collisionSigner,
+      source: "external",
+      signingModes: ["web_client"],
+      serverWalletRef: null,
+      sponsorshipPolicyIds: [],
+    },
+  });
   await assert.rejects(
     () =>
       persistHip4OrderPreparationInTransaction(client, {
         userId,
         request: {
           requestKey: randomUUID(),
-          marketId: tradeMarketId,
+          marketId: tradeFixture.request.marketId,
           outcomeSide: "YES",
           side: "BUY",
           timeInForce: "Ioc",
@@ -1522,16 +1527,7 @@ try {
           consentedDebitCapRaw: "110000000",
           controllerWalletRef: tradeWalletId,
         },
-        profile: {
-          walletId: tradeWalletId,
-          controllerWalletRef: tradeWalletId,
-          networkId: "hyperliquid:mainnet",
-          address: collisionSigner,
-          source: "external",
-          signingModes: ["web_client"],
-          serverWalletRef: null,
-          sponsorshipPolicyIds: [],
-        },
+        profile: tradeFixture.profile,
         feeCapRaw: "0",
         marketRevision: "synthetic-1",
         accountRevision: "synthetic-1",

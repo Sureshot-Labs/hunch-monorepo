@@ -45,6 +45,7 @@ import {
   loadFundingSnapshotDebits,
 } from "../../account-value/funding-movement-feed.js";
 import type { ValuedAssetComponent } from "../domain/types.js";
+import { verifyHandoffRefundSourcePg } from "./handoff-refund-source-pg.js";
 
 /** Existing normalized pUSD inbound wire/Relay actions, new economic source
  * topology. All effects roll back. No provider, signer or wallet is invoked. */
@@ -692,6 +693,12 @@ export async function verifyPolymarketHandoffPlanPg(
       1,
     );
     const currentFacts = await loadFundingAccountValueFacts(db, input.userId);
+    await verifyHandoffRefundSourcePg(db, {
+      ...scope,
+      controllerFenceId: storedBinding.controllerFenceId,
+      plan,
+      now: input.now,
+    });
     const claim = currentFacts.inTransit.find(
       (fact) => fact.operationId === operationId,
     );

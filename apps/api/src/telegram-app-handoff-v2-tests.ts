@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { hip4Identity } from "@hunch/shared";
 import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
+import { stableWalletOpaqueId } from "./account-value/canonical.js";
 
 import type {
   FundingDiscoveryRequest,
@@ -1586,6 +1587,11 @@ assert.deepEqual(
 // legacy amount-USD/FOK receive-floor representation.
 const nativeIdentity = hip4Identity("mainnet", 123);
 const nativeControllerRef = "00000000-0000-4000-8000-000000000123";
+const nativeControllerWalletId = stableWalletOpaqueId({
+  walletType: "ethereum",
+  networkId: HYPERCORE_MAINNET_USDC.networkId,
+  address: trade.controllerWalletAddress,
+});
 const nativeTrade = {
   action: "buy",
   controllerWalletAddress: trade.controllerWalletAddress,
@@ -1662,7 +1668,7 @@ const nativeProjection: IntentLiquidityProjection = {
   venueId: "hyperliquid",
   destinationOptions: generic.destinationOptions.map((option) => ({
     ...option,
-    controllerWalletId: nativeControllerRef,
+    controllerWalletId: nativeControllerWalletId,
     requiredAsset: HYPERCORE_MAINNET_USDC,
     venueId: "hyperliquid",
   })),
@@ -1674,6 +1680,20 @@ const nativeFunded = buildTelegramAppHandoffV2Plan({
   trade: nativeTrade,
 });
 assert.deepEqual(parseTelegramAppHandoffV2Plan(nativeFunded), nativeFunded);
+assert.notEqual(
+  nativeFunded.funding.destination.controllerWalletId,
+  nativeControllerRef,
+  "economic wallet IDs and owned user_wallets UUID references are distinct",
+);
+assert.doesNotThrow(() =>
+  parseTelegramAppHandoffV2Plan({
+    ...nativeFunded,
+    trade: {
+      ...nativeFunded.trade,
+      controllerWalletAddress: trade.controllerWalletAddress.toUpperCase(),
+    },
+  }),
+);
 const nativeShortfallIdentity = {
   userId: "native-linked-user",
   requiredSpend: nativeSpend,
@@ -1806,6 +1826,47 @@ for (const legacyKey of [
   );
 }
 for (const mutate of [
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    trade: {
+      ...plan.trade,
+      controllerWalletAddress: "0x0000000000000000000000000000000000000002",
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      destination: {
+        ...plan.funding.destination,
+        controllerWalletId: nativeControllerRef,
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      destination: {
+        ...plan.funding.destination,
+        controllerWalletId: stableWalletOpaqueId({
+          walletType: "ethereum",
+          networkId: "evm:1",
+          address: trade.controllerWalletAddress,
+        }),
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    trade: {
+      ...plan.trade,
+      nativeTrade: {
+        ...nativeTrade.nativeTrade,
+        controllerWalletRef: "00000000-0000-4000-8000-000000000124",
+      },
+    },
+  }),
   (plan: typeof nativeFunded) => ({
     ...plan,
     funding: {

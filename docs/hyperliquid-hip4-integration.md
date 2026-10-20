@@ -557,6 +557,13 @@ user stream per tracked wallet or repeatedly replay accepted actions to repair
 read-side lag.
 [Rate and user limits](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)
 
+REST accounting includes the single Exchange POST, not only Info. Variable-row
+trade/fill reads reserve their transport bound first and settle only successful,
+fully validated uncapped responses to the documented returned-row weight. This
+preserves the original rolling-window timestamp and consumer class; failed or
+uncertain reads keep the conservative charge. Periodic heavyweight order
+evidence must not bypass the shared background quota.
+
 Use bounded batch writes, consistent token/event membership updates and existing
 source generation contracts. Snapshot publication must not expose half-written
 market/side mappings. Avoid holding a single unbounded transaction while doing
@@ -841,6 +848,39 @@ Use authoritative complete balance snapshots plus canonical executions and
 settlement events. Missing/incomplete history cannot prove a zero position;
 an explicit zero in a complete fresh snapshot can flatten one. Bound provider
 pagination/cursor repair and preserve full-history completeness.
+
+History-only catch-up recomputes current-lot basis against the exact retained,
+row-locked balance observation. It must not renew balance freshness. Reads of
+that past range can use its historical identity with current ownership/policy
+checks, but never confer current financial capacity. A failed later extension
+does not revoke already proven coverage; newer uncovered snapshots and actual
+gaps remain unknown. Retained recent history is not proof of lifetime realized
+PnL, and provider-reported gross entry notional is not a silent substitute for
+fee-inclusive verified economic basis.
+
+A validated, uncapped, unfiltered most-recent fill page may bridge an older
+proven interval through the exact current balance snapshot when it overlaps
+that interval. Its separate private proof retains the original snapshot/request
+times, account, environment and coverage epoch. Every intervening HIP fill is
+persisted, including fills before the moving display lookback. This does not
+move the ByTime cursor, clear gaps/conflicts, replace independent ledger coverage
+or authorize reuse for a newer snapshot with the same share quantity. Empty,
+capped, malformed or disconnected tails establish no such bridge.
+
+Bare `USDC` in a native ledger send is not a generic token-identity fallback.
+Accounting can reuse an already canonical/finalized incoming Funding receipt
+whose exact native evidence fingerprint matches that ledger event and the owned
+recipient, canonical asset/precision, amount, nonce, time, parties, DEXes and
+fee observation. This only proves that the cash credit does not change an
+existing outcome lot's basis. It neither proves a sender debit nor subtracts the
+transfer fee again, grants spendability, or resumes a purchase. Missing,
+conflicting or mismatched receipt proof leaves the economic event unknown.
+
+Portfolio price demand uses the existing bounded visible-price stream, including
+canonical pairs for native holdings. Native ticks can invalidate the ordinary
+read-only position/PnL queries at a bounded cadence; they do not invent marks,
+force account-provider refreshes or bypass the shared book-repair budget. Hidden
+or quiet pages must release that demand like other venue consumers.
 
 Fills and final settlement alone are not a complete cost-basis ledger. Read
 supported native non-funding ledger events (`userNonFundingLedgerUpdates`)
@@ -1918,9 +1958,13 @@ identify this exact dated source, not a stable API to import or call.
 - If the quote is aligned, the taker protocol share receives the 20% discount,
   not the deployer share. The inspected mainnet aligned list was empty; neither
   that list nor fee multipliers should become permanent application constants.
-- Do not copy the UI's missing-multiplier-to-zero fallback into a financial
-  adapter. Missing terms mean unknown fees. This is a rate contract, not proof
-  of rounded debit, builder fees, supported signing permissions or spendability.
+- October 19 compatibility correction: an omitted **deployer share** follows
+  the current first-party UI default of zero, retaining a 1x protocol multiplier.
+  This is not permission to default a missing global `feeScale` to zero. The
+  dated source and eight informative positive-fee corroborations are pinned in
+  `fixtures/hip4/official-ui-fee-default-20261019.json` under API src. This remains
+  a current-rate estimate, not proof of exact rounding, a lifetime fee cap,
+  builder support, signing authority or spendability.
 
 The [native error reference](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses)
 documents `MinTradeSpotNtl` at 10 quote units. It does not establish a HIP floor:
@@ -2337,8 +2381,15 @@ The dated official UI source and its SHA-256 are pinned in section 18.
 - With both scales equal to 1, tier-zero rates and no discounts, the examples
   are maker SELL **0.08%**, taker SELL **0.14%**, and observed settlement **0.14%**
   of gross payout, not profit. These are conditional examples, not policy defaults.
-- Missing deployer scale remains unknown. Some sampled deployments omit it and
-  have different fees; neither zero nor a universal 2x factor is a safe fallback.
+- October 19 correction: current first-party UI treats an omitted deployer scale
+  as zero, giving a 1x base protocol multiplier, not a free close. Eight positive
+  public closing records with omitted scales corroborate this, including the
+  `sportsContestWinner` template family. Preserve that source provenance and
+  fresh actual global/account rates; do not apply a universal 2x factor or erase
+  the fee by defaulting a missing global scale. Maker omission behavior follows
+  the first-party source; the selected positive public sample covers taker SELLs
+  and settlements, not maker fills. Exact creation terms for outcome 11797 were
+  not located in the bounded, capped creator histories.
 - `builder.f` is in tenths of a basis point (`10` = `0.01%`). Outcome-specific
   builder rules can include BUY; generic spot BUY exclusions are not a substitute.
   The selected fills contain no nonzero builder fee, so builder remains disabled
@@ -8232,3 +8283,44 @@ valuation consumes only the server-qualified owned-cash witness; it does not
 manufacture a send capability. No migration, new feed SQL, public REST shape,
 signing permission, automatic historical Buy, account-mode mutation or policy
 activation is part of this patch.
+
+## 90. Complete canonical cash refresh admission — October 19, 2026
+
+Treating the active user's owned-account API reads as background repair let
+optional history starve their current balance despite unused global capacity.
+The owned-account API now uses ordinary interactive admission while respecting
+the existing snapshot TTL. Only the finance observer's background work uses the
+background allocation. Optional history retains that allocation in both paths.
+Stale balances remain explicitly last-known, never current cash by fallback.
+
+The mandatory owned-account cash phase reserves its complete182-weight
+transport bound before starting provider IO. This covers the more expensive
+default-mode branch without trusting a retained mode as a current selector.
+Standard mode consumes124 and settles only the unattempted remainder. Each
+transport retains existing requested ownership checks and rechecks effective
+policy; individual clients
+receive boolean prepaid admission, not the aggregate settlement receipt.
+
+Before every prepaid transport, the original resource reservation is renewed at
+the final asynchronous boundary. Its full weight remains counted for60seconds
+after the latest attempted dispatch. Expired, replaced or settled reservations
+cannot be revived. The phase also keeps a bounded deadline; failed HTTP, parse
+or timeout attempts remain charged. This changes resource accounting only, not
+account observation timestamps or financial consent.
+
+Optional history remains independently background-admitted. No provider limit,
+interactive reserve, freshness deadline, mode, valuation rule or financial
+admission path is expanded. Foreground reads whose global ceiling is below182
+retain per-request admission: a124-weight Standard observation can still recover
+under a160-weight global ceiling even when worst-case prepayment cannot fit.
+Exhausted global limits still defer work safely; explicit owned-account refresh
+is the recovery path. This prevents both prefix starvation and active balance
+starvation by optional history. It does not promise uninterrupted freshness under
+saturated global budgets or change the existing cash/history worker cadence.
+
+`test:hip4:cash-budget` covers admission, recovery and transport-boundary
+invariants with mocked IO. `test:hip4:cash-budget:db` requires an explicitly
+guarded disposable PostgreSQL16 target and checks fragmentation, races,
+settlement, expired/foreign renewal rejection and the bounded renewal query
+plan against a full1200-weight resource fixture. It never uses live provider
+transport or the local user's account data.

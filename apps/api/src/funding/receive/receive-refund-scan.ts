@@ -49,7 +49,9 @@ type RetryIdentity = Pick<
   FundingReceiveClassificationRetry,
   "eventId" | "leaseToken" | "boundSessionId" | "boundVariantId"
 >;
-export const RECEIVE_ROLE_SCAN_CONTRACT_VERSION = 5;
+// Re-enumerate pre-handoff-membership checkpoints through the normal bounded
+// restart/upsert path; their derived invalid envelopes are not immutable facts.
+export const RECEIVE_ROLE_SCAN_CONTRACT_VERSION = 6;
 type ScanRow = {
   event_fingerprint: string | null;
   contract_version: number;
@@ -377,7 +379,7 @@ async function advanceLockedReceiveRoleScan(
     await db.query<ScanRow>(READ_RECEIVE_REFUND_SCAN_SQL, [retry.eventId])
   ).rows[0];
   if (
-    ![1, 2, 3, 4, RECEIVE_ROLE_SCAN_CONTRACT_VERSION].includes(
+    ![1, 2, 3, 4, 5, RECEIVE_ROLE_SCAN_CONTRACT_VERSION].includes(
       scan.contract_version,
     ) ||
     !scanContextMatches(scan, input.userId, retry)

@@ -559,6 +559,47 @@ export async function verifyReceiveRefundScanPg(
       oldRevision,
     );
 
+    // Pre-handoff-membership checkpoints can retain an immutable-looking but
+    // derived invalid envelope. The next lease repairs it without deleting any
+    // dependency or reviving the historical operation's execution.
+    await pool.query(
+      "update funding_receive_refund_scans set contract_version=5 where event_id=$1",
+      [eventId],
+    );
+    await pool.query(
+      "update funding_receive_refund_candidates set envelope_kind='invalid',action_result=null where event_id=$1 and reservation_id=$2",
+      [eventId, identity.reservationId],
+    );
+    assert.equal((await run()).kind, "source_restart");
+    assert.equal((await candidates()).length, 3);
+    assert.equal((await run()).kind, "source_page");
+    assert.equal(
+      (await candidates()).find(
+        (r) => r.reservation_id === identity.reservationId,
+      ).envelope_kind,
+      "candidate",
+    );
+    assert.equal(
+      (await header()).contract_version,
+      RECEIVE_ROLE_SCAN_CONTRACT_VERSION,
+    );
+
+    for (
+      let i = 0;
+      i < 100 &&
+      !(await candidates()).find(
+        (r) => r.reservation_id === identity.reservationId,
+      ).action_result;
+      i++
+    )
+      await run();
+    assert.equal(
+      (await candidates()).find(
+        (r) => r.reservation_id === identity.reservationId,
+      ).action_result.facts.revision,
+      oldRevision,
+    );
+
     // Repair enumeration never purges dependencies. Unchanged rows keep their
     // revision-bound results, while newly valid envelopes can be rediscovered.
     assert.equal(

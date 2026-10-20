@@ -22,6 +22,12 @@ import {
 } from "./services/hip4-account-service.js";
 import { hip4AccountProtectedRefsSql } from "./services/hip4-retention.js";
 import { admitHip4Request } from "./services/hip4-repository.js";
+import {
+  advanceHip4FillRepair,
+  planHip4FillRepair,
+  advanceHip4LedgerRepair,
+  planHip4LedgerRepair,
+} from "./services/hip4-account-history.js";
 
 const pool = await createIntegrationTestPool({
   max: 4,
@@ -29,6 +35,8 @@ const pool = await createIntegrationTestPool({
 });
 const address = "0x0000000000000000000000000000000000000001";
 const budgetAddress = "0x0000000000000000000000000000000000000002";
+const longGapAddress = "0x0000000000000000000000000000000000000003";
+const smallBudgetAddress = "0x0000000000000000000000000000000000000004";
 const backgroundOwnerId = randomUUID();
 const now = Date.now();
 const quote = {
@@ -353,6 +361,10 @@ try {
         time: Date.now(),
       });
     if (request.type === "userFillsByTime") return Response.json([]);
+    if (request.type === "spotClearinghouseState")
+      return Response.json({
+        balances: [{ ...position, total: "2", hold: "0" }],
+      });
     return provider(url, options);
   };
   const budgetService = createHip4OwnedAccountService(pool, budgetFetcher);
@@ -411,6 +423,14 @@ try {
     );
   await expireBudgetWindow();
   budgetRequests.length = 0;
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 20, 600, {
+      scope: "background_repair",
+      maximum: 220,
+      backgroundMaximum: 300,
+    }),
+    true,
+  );
   const repairProgress = await refreshBudgetAccount();
   assert.equal(repairProgress.state, "fresh");
   assert.equal(repairProgress.observation?.perpsCash?.state, "verified");
@@ -418,11 +438,11 @@ try {
     budgetRequests.filter((type) => type === "userFillsByTime").length,
     1,
   );
-  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(budgetRequests.includes("userFills"), true);
   assert.equal(
-    repairProgress.history.executionsObservedAt,
-    null,
-    "repair success must not fabricate a fresh live-tail observation",
+    repairProgress.history.executionsObservedAt != null,
+    true,
+    "a separately successful live tail publishes its own observation",
   );
   assert.deepEqual(repairRequests[0], {
     startTime: deferredHistory.history.fillRepair?.nextTime,
@@ -437,25 +457,43 @@ try {
     "repair exhausts only its original fixed provider-visible interval",
   );
   assert.equal(repairProgress.history.allTimeComplete, false);
-  assert.equal(await usedBudgetWeight(), 284);
+  assert.equal(await usedBudgetWeight(), 250);
+  assert.equal(
+    repairProgress.history.positionAccounting?.positions[0].costBasis,
+    null,
+    "initial ledger catch-up exhausts its older fixed range, not the newer snapshot",
+  );
 
   await expireBudgetWindow();
   budgetRequests.length = 0;
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 20, 600, {
+      scope: "background_repair",
+      maximum: 220,
+      backgroundMaximum: 300,
+    }),
+    true,
+  );
   const tailProgress = await refreshBudgetAccount();
   assert.ok(tailProgress.history.executionsObservedAt);
   assert.equal(budgetRequests.filter((type) => type === "userFills").length, 1);
-  assert.equal(budgetRequests.includes("userFillsByTime"), false);
-  assert.equal(
-    tailProgress.history.fillRepair?.lastSuccessAt,
-    repairProgress.history.fillRepair?.lastSuccessAt,
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.ok(
+    Date.parse(tailProgress.history.fillRepair?.lastSuccessAt ?? "") >=
+      Date.parse(repairProgress.history.fillRepair?.lastSuccessAt ?? ""),
   );
+  const tailCoveredThrough = tailProgress.history.fillRepair?.coveredThrough;
+  const repairCoveredThrough =
+    repairProgress.history.fillRepair?.coveredThrough;
+  assert.ok(tailCoveredThrough != null && repairCoveredThrough != null);
+  assert.ok(tailCoveredThrough >= repairCoveredThrough);
+  assert.equal(await usedBudgetWeight(), 250);
   assert.equal(
-    tailProgress.history.fillRepair?.coveredThrough,
-    repairProgress.history.fillRepair?.coveredThrough,
+    tailProgress.history.positionAccounting?.positions[0].costBasis,
+    "1.01",
   );
-  assert.equal(await usedBudgetWeight(), 284);
 
-  // An admitted but failing repair consumes the same 120 weight as success.
+  // An admitted failing repair retains its entire 120-weight reservation.
   // Rotation is scheduling state, not a successful-observation timestamp, so
   // that failure cannot deny a healthy live tail in every subsequent window.
   await expireBudgetWindow();
@@ -478,31 +516,31 @@ try {
     tailProgress.history.executionsObservedAt,
   );
   const failedRepairRequest = repairRequests.at(-1);
-  assert.equal(await usedBudgetWeight(), 284);
+  assert.equal(await usedBudgetWeight(), 309);
 
   await expireBudgetWindow();
   budgetRequests.length = 0;
   failingHistoryRequest = null;
   const tailAfterFailedRepair = await refreshBudgetAccount();
   assert.equal(budgetRequests.includes("userFills"), true);
-  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
   assert.ok(tailAfterFailedRepair.history.executionsObservedAt);
   assert.equal(
     tailAfterFailedRepair.history.fillRepair?.nextTime,
-    failedRepair.history.fillRepair?.nextTime,
-    "a deferred retry retains the failed repair's inclusive unread boundary",
+    null,
+    "exact successful tail settlement leaves room for the bounded repair retry",
   );
-  assert.equal(await usedBudgetWeight(), 284);
+  assert.deepEqual(repairRequests.at(-1), failedRepairRequest);
+  assert.equal(await usedBudgetWeight(), 230);
 
   await expireBudgetWindow();
   budgetRequests.length = 0;
   const repairedAfterFailure = await refreshBudgetAccount();
   assert.equal(budgetRequests.includes("userFillsByTime"), true);
-  assert.equal(budgetRequests.includes("userFills"), false);
-  assert.deepEqual(repairRequests.at(-1), failedRepairRequest);
+  assert.equal(budgetRequests.includes("userFills"), true);
   assert.equal(repairedAfterFailure.history.fillRepair?.lastError, null);
   assert.equal(repairedAfterFailure.history.fillRepair?.nextTime, null);
-  assert.equal(await usedBudgetWeight(), 284);
+  assert.equal(await usedBudgetWeight(), 230);
 
   // The reverse direction is equally important: admitted tail HTTP failures
   // cannot pin all following refreshes ahead of healthy bounded repair.
@@ -515,24 +553,44 @@ try {
   assert.match(failedTail.error ?? "", /fills_http_error/u);
   assert.equal(
     failedTail.history.executionsObservedAt,
-    tailAfterFailedRepair.history.executionsObservedAt,
+    repairedAfterFailure.history.executionsObservedAt,
   );
-  assert.equal(await usedBudgetWeight(), 284);
+  assert.equal(await usedBudgetWeight(), 309);
 
   await expireBudgetWindow();
   budgetRequests.length = 0;
   failingHistoryRequest = null;
   const repairAfterFailedTail = await refreshBudgetAccount();
   assert.equal(budgetRequests.includes("userFillsByTime"), true);
-  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(budgetRequests.includes("userFills"), true);
   assert.equal(repairAfterFailedTail.history.fillRepair?.lastError, null);
   assert.equal(repairAfterFailedTail.history.fillRepair?.nextTime, null);
-  assert.equal(
-    repairAfterFailedTail.history.executionsObservedAt,
-    failedTail.history.executionsObservedAt,
-  );
+  assert.ok(repairAfterFailedTail.history.executionsObservedAt);
   assert.equal(repairAfterFailedTail.history.allTimeComplete, false);
-  assert.equal(await usedBudgetWeight(), 284);
+  assert.equal(await usedBudgetWeight(), 230);
+
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await expireBudgetWindow();
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 20, 600, {
+        scope: "background_repair",
+        maximum: 220,
+        backgroundMaximum: 300,
+      }),
+      true,
+    );
+    const currentBasis = await refreshBudgetAccount();
+    assert.equal(
+      currentBasis.history.positionAccounting?.positions[0].costBasis,
+      "1.01",
+      "both consecutive normal core cycles retain exact verified basis alongside indexer work",
+    );
+    assert.equal(
+      currentBasis.history.positionAccounting?.observedAt,
+      currentBasis.observation?.observedAt,
+    );
+    assert.equal(await usedBudgetWeight(), 250);
+  }
 
   // A worker must also make history progress while catalog capacity remains
   // reserved. Alternate real cash observations with independently bound
@@ -548,8 +606,20 @@ try {
   let backgroundRole = "user";
   let backgroundLegacy: unknown = null;
   let changeLegacyDuringSpot = false;
+  let cappedBackgroundFills = false;
   const backgroundFetcher: typeof fetch = async (url, options) => {
     const request = JSON.parse(String(options?.body));
+    if (
+      cappedBackgroundFills &&
+      ["userFills", "userFillsByTime"].includes(request.type)
+    ) {
+      budgetRequests.push(request.type);
+      const time =
+        request.type === "userFillsByTime" ? request.startTime : fill.time;
+      return Response.json(
+        Array.from({ length: 2000 }, () => ({ ...fill, time })),
+      );
+    }
     if (request.type === "userRole") {
       budgetRequests.push(request.type);
       return Response.json(
@@ -610,13 +680,268 @@ try {
     assert.ok(snapshot);
     return { result, snapshot };
   };
+  // Atomic background admission must preserve the existing explicit recovery
+  // path. Standard mandatory cash costs124 and fits a160 global ceiling even
+  // though an unknown-mode background reservation must conservatively need182.
+  await pool.query(
+    "insert into user_wallets(user_id,wallet_address,wallet_type,is_verified) values($1,$2,'ethereum',true)",
+    [backgroundOwnerId, smallBudgetAddress],
+  );
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyIds[0],
+    { ...budgetPolicy.readPolicy, requestWeightPerMinute: 160 },
+  ]);
+  let smallBudgetMode = "disabled";
+  const smallBudgetRequests: string[] = [];
+  const smallBudgetFetcher: typeof fetch = async (url, options) => {
+    const request = JSON.parse(String(options?.body));
+    smallBudgetRequests.push(request.type);
+    if (request.type === "userAbstraction")
+      return Response.json(smallBudgetMode);
+    if (request.type === "spotClearinghouseState")
+      return Response.json({
+        balances: [
+          {
+            coin: "USDC",
+            token: 0,
+            total: "3.25",
+            hold: "0",
+            entryNtl: "0",
+          },
+        ],
+      });
+    return backgroundFetcher(url, options);
+  };
+  const smallBudgetService = createHip4OwnedAccountService(
+    pool,
+    smallBudgetFetcher,
+  );
+  const smallPolicy = await smallBudgetService.policy();
+  const explicitSmallRefresh = () =>
+    smallBudgetService.load(
+      smallBudgetAddress,
+      smallPolicy.readPolicy,
+      smallPolicy.accountPolicy,
+      smallPolicy.revision,
+      true,
+    );
+  await expireBudgetWindow();
+  const smallStandard = await explicitSmallRefresh();
+  assert.equal(smallStandard.state, "fresh");
+  assert.equal(smallStandard.observation?.mode, "disabled");
+  assert.equal(smallStandard.observation?.cash.ownedCash, "3.25");
+  assert.equal(smallStandard.observation?.perpsCash?.state, "verified");
+  assert.deepEqual(smallBudgetRequests, [
+    "userRole",
+    "userAbstraction",
+    "spotMeta",
+    "spotClearinghouseState",
+    "clearinghouseState",
+    "userAbstraction",
+  ]);
+  assert.equal(await usedBudgetWeight(), 124);
+  assert.match(smallStandard.error ?? "", /budget_exhausted/u);
+  const smallStored = await readHip4AccountSnapshot(
+    pool,
+    "mainnet",
+    smallBudgetAddress,
+  );
+  assert.deepEqual(smallStored?.observation, smallStandard.observation);
+  await expireBudgetWindow();
+  smallBudgetRequests.length = 0;
+  const smallStartedAt = new Date();
+  const smallLease = await claimHip4AccountRefresh(
+    pool,
+    "mainnet",
+    smallBudgetAddress,
+    smallPolicy.accountPolicy.leaseMs,
+    smallStartedAt,
+  );
+  assert.ok(smallLease);
+  const smallBackground = await refreshHip4OwnedAccount({
+    pool,
+    address: smallBudgetAddress,
+    lease: smallLease,
+    policy: smallPolicy.readPolicy,
+    accountPolicy: smallPolicy.accountPolicy,
+    now: smallStartedAt.getTime(),
+    fetcher: smallBudgetFetcher,
+    background: true,
+    requireCurrentOwner: true,
+  });
+  assert.equal(smallBackground.saved, true);
+  assert.ok(smallBackground.errors.includes("budget_exhausted"));
+  assert.deepEqual(smallBudgetRequests, []);
+  assert.equal(await usedBudgetWeight(), 0);
+
+  // Default's actual182 requirement never fitted160. A failed explicit
+  // attempt must retain the old verified Standard snapshot, not relabel it.
+  await expireBudgetWindow();
+  smallBudgetMode = "default";
+  const smallDefault = await explicitSmallRefresh();
+  assert.match(smallDefault.error ?? "", /budget_exhausted/u);
+  assert.deepEqual(smallDefault.observation, smallStandard.observation);
+  assert.deepEqual(smallBudgetRequests, [
+    "userRole",
+    "userAbstraction",
+    "userDexAbstraction",
+    "borrowLendUserState",
+    "spotMeta",
+    "spotClearinghouseState",
+  ]);
+  assert.equal(await usedBudgetWeight(), 142);
+
+  // refresh=false on an authenticated account request means honor its TTL,
+  // not background priority. Existing optional repair usage must not strand a
+  // stale foreground account when the global interactive budget still fits.
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyIds[0],
+    {
+      ...budgetPolicy.readPolicy,
+      requestWeightPerMinute: 1200,
+      interactiveRequestWeightReserveRatio: 0.75,
+    },
+  ]);
+  const priorityPolicy = await smallBudgetService.policy();
+  const staleDefault = projectHip4Account({
+    environment: "mainnet",
+    observedAt: new Date(
+      Date.now() - priorityPolicy.accountPolicy.snapshotMaxAgeMs - 1000,
+    ).toISOString(),
+    role: "user",
+    mode: "default",
+    quote,
+    state: {
+      balances: [
+        { coin: "USDC", token: 0, total: "3.25", hold: "0", entryNtl: "0" },
+      ],
+    },
+    defaultSpotCashEvidence: {
+      legacyDexAbstraction: null,
+      borrowLendState: {
+        tokenToState: [],
+        health: "healthy",
+        healthFactor: null,
+      },
+    },
+  });
+  const staleLease = await claimHip4AccountRefresh(
+    pool,
+    "mainnet",
+    smallBudgetAddress,
+    priorityPolicy.accountPolicy.leaseMs,
+    new Date(),
+  );
+  assert.ok(staleLease);
+  assert.equal(
+    await persistHip4AccountRefresh(pool, {
+      environment: "mainnet",
+      address: smallBudgetAddress,
+      lease: staleLease,
+      observation: staleDefault,
+      executions: [],
+      ledger: [],
+      history: { nextBackgroundRead: "cash" },
+      error: null,
+    }),
+    true,
+  );
+  await expireBudgetWindow();
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 137, 1200, {
+      scope: "background_repair",
+      maximum: 220,
+      backgroundMaximum: 300,
+    }),
+    true,
+  );
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 80, 1200, {
+      scope: "background_catalog",
+      maximum: 300,
+      backgroundMaximum: 300,
+    }),
+    true,
+  );
+  smallBudgetRequests.length = 0;
+  const priorityBackgroundStartedAt = new Date();
+  const priorityBackgroundLease = await claimHip4AccountRefresh(
+    pool,
+    "mainnet",
+    smallBudgetAddress,
+    priorityPolicy.accountPolicy.leaseMs,
+    priorityBackgroundStartedAt,
+  );
+  assert.ok(priorityBackgroundLease);
+  const priorityBackground = await refreshHip4OwnedAccount({
+    pool,
+    address: smallBudgetAddress,
+    lease: priorityBackgroundLease,
+    policy: priorityPolicy.readPolicy,
+    accountPolicy: priorityPolicy.accountPolicy,
+    now: priorityBackgroundStartedAt.getTime(),
+    fetcher: smallBudgetFetcher,
+    background: true,
+    requireCurrentOwner: true,
+  });
+  assert.ok(priorityBackground.errors.includes("budget_exhausted"));
+  assert.deepEqual(smallBudgetRequests, []);
+  assert.equal(await usedBudgetWeight(), 217);
+  const foregroundStartedAt = Date.now();
+  const ordinaryForeground = await smallBudgetService.load(
+    smallBudgetAddress,
+    priorityPolicy.readPolicy,
+    priorityPolicy.accountPolicy,
+    priorityPolicy.revision,
+    false,
+  );
+  assert.equal(ordinaryForeground.state, "fresh");
+  assert.equal(ordinaryForeground.observation?.mode, "default");
+  assert.equal(ordinaryForeground.observation?.cash.ownedCash, "3.25");
+  assert.deepEqual(ordinaryForeground.observation?.positions, []);
+  assert.ok(
+    Date.parse(ordinaryForeground.observation?.observedAt ?? "") >=
+      foregroundStartedAt,
+  );
+  assert.deepEqual(smallBudgetRequests.slice(0, 8), [
+    "userRole",
+    "userAbstraction",
+    "userDexAbstraction",
+    "borrowLendUserState",
+    "spotMeta",
+    "spotClearinghouseState",
+    "userAbstraction",
+    "userDexAbstraction",
+  ]);
+  const priorityStored = await readHip4AccountSnapshot(
+    pool,
+    "mainnet",
+    smallBudgetAddress,
+  );
+  assert.deepEqual(priorityStored?.observation, ordinaryForeground.observation);
+  const foregroundCallCount = smallBudgetRequests.length;
+  const stillFresh = await smallBudgetService.load(
+    smallBudgetAddress,
+    priorityPolicy.readPolicy,
+    priorityPolicy.accountPolicy,
+    priorityPolicy.revision,
+    false,
+  );
+  assert.deepEqual(stillFresh.observation, ordinaryForeground.observation);
+  assert.equal(smallBudgetRequests.length, foregroundCallCount);
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyIds[0],
+    budgetPolicy.readPolicy,
+  ]);
+  await expireBudgetWindow();
+
   const backgroundCash = await runBackground();
   assert.equal(backgroundCash.snapshot.history.nextBackgroundRead, "history");
   assert.equal(budgetRequests.includes("spotClearinghouseState"), true);
   assert.equal(budgetRequests.includes("userFills"), false);
   assert.equal(budgetRequests.includes("userFillsByTime"), false);
   assert.ok(backgroundCash.snapshot.history.ledgerRepair?.lastSuccessAt);
-  assert.equal(await usedBudgetWeight(), 164);
+  assert.equal(await usedBudgetWeight(), 189);
   const cashObservation = backgroundCash.snapshot.observation;
   await pool.query(
     "update hip4_account_snapshots set attempt_error='cash_read_failed' where environment='mainnet' and account_address=$1",
@@ -633,8 +958,16 @@ try {
   assert.equal(budgetRequests.includes("spotMeta"), false);
   assert.equal(budgetRequests.includes("spotClearinghouseState"), false);
   assert.equal(budgetRequests.includes("clearinghouseState"), false);
-  assert.equal(budgetRequests.includes("userFills"), true);
-  assert.equal(await usedBudgetWeight(), 220);
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userRole"), false);
+  assert.equal(budgetRequests.includes("userAbstraction"), false);
+  assert.equal(
+    repairRequests.at(-1)?.endTime,
+    Date.parse(cashObservation.observedAt),
+    "historical reads stop at the exact retained snapshot, not the current clock",
+  );
+  assert.equal(await usedBudgetWeight(), 65);
   for (let pair = 0; pair < 2; pair++)
     assert.equal(
       await admitHip4Request(pool, "mainnet", 40, 600, {
@@ -644,7 +977,7 @@ try {
       }),
       true,
     );
-  assert.equal(await usedBudgetWeight(), 300);
+  assert.equal(await usedBudgetWeight(), 145);
   const backgroundCashAgain = await runBackground();
   assert.equal(backgroundCashAgain.snapshot.attempt_error, null);
   assert.equal(
@@ -662,46 +995,88 @@ try {
     backgroundRepair.snapshot.observation,
     backgroundCashAgain.snapshot.observation,
   );
-  assert.equal(await usedBudgetWeight(), 220);
+  assert.equal(await usedBudgetWeight(), 65);
 
-  // A quota between cash+fill and cash+fill+ledger must still split phases;
-  // otherwise every pass consumes 264 and permanently starves the ledger20.
+  // A 300-weight repair quota fits the old 284 estimate, but not a Standard
+  // cash144 + capped fills120 + conservative ledger45 = 309 bundle. A capped
+  // page never gets a small-response settlement; splitting must still let the
+  // independent ledger make progress without fabricating fill completeness.
   const middleBudgetPolicy = {
     ...budgetPolicy.readPolicy,
-    requestWeightPerMinute: 700,
+    requestWeightPerMinute: 800,
+    backgroundRequestWeightPerMinute: 380,
   };
   await pool.query("update runtime_policies set payload=$2 where id=$1", [
     policyIds[0],
     middleBudgetPolicy,
   ]);
-  await runBackground(middleBudgetPolicy);
+  cappedBackgroundFills = true;
+  const middleCash = await runBackground(middleBudgetPolicy);
+  assert.equal(middleCash.snapshot.history.nextBackgroundRead, "history");
   assert.equal(budgetRequests.includes("userFills"), false);
   assert.equal(budgetRequests.includes("userFillsByTime"), false);
   assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
-  assert.equal(await usedBudgetWeight(), 164);
-  await runBackground(middleBudgetPolicy);
+  assert.equal(await usedBudgetWeight(), 189);
+  const middleHistory = await runBackground(middleBudgetPolicy);
   assert.equal(budgetRequests.includes("spotClearinghouseState"), false);
-  assert.equal(budgetRequests.includes("userFills"), true);
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
+  assert.equal(await usedBudgetWeight(), 165);
+  assert.deepEqual(
+    middleHistory.snapshot.observation,
+    middleCash.snapshot.observation,
+  );
+  assert.equal(
+    middleHistory.snapshot.history.fillRepair?.coveredThrough,
+    middleCash.snapshot.history.fillRepair?.coveredThrough,
+  );
+  assert.equal(middleHistory.snapshot.history.fillRepair?.gapCount > 0, true);
+  assert.equal(middleHistory.snapshot.history.ledgerRepair?.lastError, null);
+  assert.ok(
+    middleHistory.snapshot.history.ledgerRepair?.coveredThrough >=
+      Date.parse(middleCash.snapshot.observation.observedAt),
+  );
+  backgroundMode = "default";
+  const middleDefaultCash = await runBackground(middleBudgetPolicy);
+  assert.equal(
+    middleDefaultCash.snapshot.history.nextBackgroundRead,
+    "history",
+  );
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
+  assert.equal(await usedBudgetWeight(), 247);
+  const middleDefaultHistory = await runBackground(middleBudgetPolicy);
+  assert.deepEqual(
+    middleDefaultHistory.snapshot.observation,
+    middleDefaultCash.snapshot.observation,
+  );
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
+  assert.equal(await usedBudgetWeight(), 165);
+  cappedBackgroundFills = false;
+  backgroundMode = "disabled";
   await pool.query("update runtime_policies set payload=$2 where id=$1", [
     policyIds[0],
     budgetPolicy.readPolicy,
   ]);
 
-  // Changed binding fails closed for history, then ordinary cash refresh can
-  // observe the new mode; no stale mode is used to synthesize fresh balances.
+  // A historical pass remains bound to its old observation even if the current
+  // mode changed. It does not observe or authorize current cash in that mode.
   await runBackground(); // cash phase makes history the next phase
   backgroundMode = "unifiedAccount";
   const changedBinding = await runBackground();
-  assert.deepEqual(budgetRequests, ["userRole", "userAbstraction"]);
-  assert.ok(
-    changedBinding.result.errors.includes("account_history_binding_changed"),
-  );
+  assert.deepEqual(budgetRequests, [
+    "userFillsByTime",
+    "userNonFundingLedgerUpdates",
+  ]);
+  assert.equal(changedBinding.result.errors.length, 0);
   assert.equal(changedBinding.snapshot.history.nextBackgroundRead, "cash");
   assert.equal(changedBinding.snapshot.observation?.mode, "disabled");
   backgroundMode = "disabled";
   await runBackground();
   backgroundMode = "default";
-  await runBackground(); // history binding change, next ordinary cash phase
+  await runBackground(); // historical disabled snapshot, next current cash phase
   const defaultCash = await runBackground();
   assert.equal(defaultCash.snapshot.observation?.mode, "default");
   assert.equal(defaultCash.snapshot.observation?.cash.ownedCash, "0");
@@ -717,13 +1092,13 @@ try {
   assert.equal(budgetRequests.includes("clearinghouseState"), false);
   assert.equal(
     budgetRequests.includes("frontendOpenOrders"),
-    false,
-    "cash phase leaves room for ledger under the unchanged 220 quota",
+    true,
+    "current open-order display stays in the current cash phase and background budget",
   );
-  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
+  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), false);
   assert.equal(await usedBudgetWeight(), 202);
   const defaultHistory = await runBackground();
-  assert.equal(budgetRequests.includes("frontendOpenOrders"), true);
+  assert.equal(budgetRequests.includes("frontendOpenOrders"), false);
   assert.equal(budgetRequests.includes("borrowLendUserState"), false);
   assert.equal(
     budgetRequests.includes("userFills") ||
@@ -735,11 +1110,49 @@ try {
     defaultCash.snapshot.observation,
     "history-only work never renews qualified cash proof",
   );
+  const retainedOpenOrders = defaultHistory.snapshot.history.openOrders;
+  await pool.query(
+    `update hip4_account_snapshots set history=jsonb_set(
+       jsonb_set(jsonb_set(history,'{nextBackgroundRead}','"history"'::jsonb),
+         '{nextFillRead}','"repair"'::jsonb),
+       '{ledgerRepair,coveredThrough}',to_jsonb($2::bigint))
+     where environment='mainnet' and account_address=$1`,
+    [
+      budgetAddress,
+      Date.parse(defaultCash.snapshot.observation.observedAt) - 1,
+    ],
+  );
+  const ledgerCatchUp = await runBackground();
+  assert.equal(
+    budgetRequests.includes("frontendOpenOrders"),
+    false,
+    "ledger coverage needed for the held balance snapshot precedes optional order history",
+  );
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
+  assert.equal(await usedBudgetWeight(), 65);
+  assert.ok(
+    ledgerCatchUp.snapshot.history.ledgerRepair.coveredThrough >=
+      Date.parse(defaultCash.snapshot.observation.observedAt),
+  );
+  assert.deepEqual(
+    ledgerCatchUp.snapshot.history.openOrders,
+    retainedOpenOrders,
+    "deferral preserves the prior list rather than publishing empty orders or new holds",
+  );
+  assert.deepEqual(
+    ledgerCatchUp.snapshot.observation,
+    defaultCash.snapshot.observation,
+  );
+  const resumedCash = await runBackground(); // cash phase
+  assert.equal(budgetRequests.includes("frontendOpenOrders"), true);
+  await runBackground(); // historical phase keeps its own exact range
+  assert.equal(budgetRequests.includes("frontendOpenOrders"), false);
   changeLegacyDuringSpot = true;
   const changedLegacy = await runBackground();
   assert.deepEqual(
     changedLegacy.snapshot.observation,
-    defaultCash.snapshot.observation,
+    resumedCash.snapshot.observation,
     "changed legacy selector cannot publish freshly qualified cash",
   );
   assert.equal(changedLegacy.result.errors.length > 0, true);
@@ -747,11 +1160,15 @@ try {
   backgroundLegacy = null;
   await runBackground(); // history-only, preserving failed core-read status
   const recoveredDefault = await runBackground();
-  assert.equal(recoveredDefault.snapshot.attempt_error, null);
+  assert.equal(
+    recoveredDefault.snapshot.attempt_error,
+    "ledger_budget_exhausted",
+  );
   assert.equal(recoveredDefault.snapshot.observation?.cash.ownedCash, "0");
   backgroundMode = "disabled";
-  await runBackground(); // history binding changed, no cash reuse
+  await runBackground(); // historical default snapshot, no cash reuse
   await runBackground(); // fresh disabled cash
+  await runBackground(); // historical disabled snapshot, no current role inference
   backgroundRole = "agent";
   const rejectedRole = await runBackground();
   assert.deepEqual(budgetRequests, ["userRole"]);
@@ -763,7 +1180,125 @@ try {
   ]);
   const rejectedOwner = await runBackground();
   assert.deepEqual(budgetRequests, [], "ownership loss makes zero HTTP calls");
-  assert.ok(rejectedOwner.result.errors.includes("account_owner_unavailable"));
+  assert.ok(
+    rejectedOwner.result.errors.some((error) =>
+      error.includes("account_owner_unavailable"),
+    ),
+  );
+
+  // A complete tail can bridge a long idle interval, but every intervening
+  // economic fact must survive the moving lookback filter. A same-size exit
+  // and re-entry before the new display window cannot retain the old basis.
+  await pool.query("update users set is_active=true where id=$1", [
+    backgroundOwnerId,
+  ]);
+  await pool.query(
+    "insert into user_wallets(user_id,wallet_address,wallet_type,is_verified) values($1,$2,'ethereum',true)",
+    [backgroundOwnerId, longGapAddress],
+  );
+  const gapNow = Date.now();
+  const oldEnd = gapNow - 90000;
+  const gapBuy = { ...fill, time: gapNow - 120000, tid: 10001, oid: 10001 };
+  const gapSell = {
+    ...fill,
+    time: gapNow - 80000,
+    tid: 10002,
+    oid: 10002,
+    dir: "Sell",
+    side: "A",
+    startPosition: "2",
+    px: "0.6",
+  };
+  const gapReentry = {
+    ...fill,
+    time: gapNow - 70000,
+    tid: 10003,
+    oid: 10003,
+    px: "0.7",
+    fee: "0.02",
+  };
+  const gapObservation = projectHip4Account({
+    environment: "mainnet",
+    observedAt: new Date(oldEnd).toISOString(),
+    role: "user",
+    mode: "disabled",
+    quote,
+    state: { balances: [{ ...position, total: "2", hold: "0" }] },
+  });
+  const gapLease = await claimHip4AccountRefresh(
+    pool,
+    "mainnet",
+    longGapAddress,
+    120000,
+    new Date(),
+  );
+  assert.ok(gapLease);
+  const gapHistory = {
+    fillRepair: advanceHip4FillRepair(
+      planHip4FillRepair(undefined, 60000, oldEnd, 32),
+      [gapBuy],
+      new Date(oldEnd).toISOString(),
+      32,
+    ),
+    ledgerRepair: advanceHip4LedgerRepair(
+      planHip4LedgerRepair(undefined, 60000, oldEnd, 32),
+      [],
+      new Date(oldEnd).toISOString(),
+      32,
+    ),
+  };
+  await persistHip4AccountRefresh(pool, {
+    environment: "mainnet",
+    address: longGapAddress,
+    lease: gapLease,
+    observation: gapObservation,
+    executions: [projectHip4Execution("mainnet", longGapAddress, gapBuy)],
+    executionSources: [gapBuy],
+    ledger: [],
+    history: gapHistory,
+    error: null,
+    accountingMaxRows: 100,
+  });
+  await expireBudgetWindow();
+  const gapService = createHip4OwnedAccountService(
+    pool,
+    async (url, options) => {
+      const request = JSON.parse(String(options?.body));
+      if (request.user) assert.equal(request.user, longGapAddress);
+      if (request.type === "userFills")
+        return Response.json([gapBuy, gapSell, gapReentry]);
+      return budgetFetcher(url, options);
+    },
+  );
+  const gapResult = await gapService.load(
+    longGapAddress,
+    budgetPolicy.readPolicy,
+    {
+      ...budgetPolicy.accountPolicy,
+      historyLookbackMs: 60000,
+      historyRepairPagesPerRefresh: 0,
+    },
+    budgetPolicy.revision,
+    true,
+  );
+  assert.equal(
+    gapResult.history.positionAccounting?.positions[0].costBasis,
+    "1.42",
+  );
+  assert.equal(
+    gapResult.history.positionAccounting?.positions[0].anchorTime,
+    gapReentry.time,
+  );
+  assert.deepEqual(
+    gapResult.history.fillRepair,
+    gapHistory.fillRepair,
+    "tail coverage is not a rewritten ByTime cursor, even with range repair paused",
+  );
+  const preservedBridgeFacts = await pool.query(
+    "select count(*)::int as count from hip4_account_executions where environment='mainnet' and account_address=$1 and time_ms>$2 and time_ms<$3",
+    [longGapAddress, oldEnd, gapNow - 60000],
+  );
+  assert.equal(preservedBridgeFacts.rows[0].count, 2);
 
   // Exact private keyset scans, including sparse market filters and generic plans.
   await pool.query(
@@ -824,7 +1359,7 @@ try {
   ]);
   await pool.query(
     "delete from hip4_account_snapshots where account_address=any($1::text[])",
-    [[address, budgetAddress]],
+    [[address, budgetAddress, longGapAddress, smallBudgetAddress]],
   );
   await pool.query("delete from users where id=$1", [backgroundOwnerId]);
   await pool.end();

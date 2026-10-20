@@ -91,7 +91,18 @@ export async function testHip4ObserverSharedBudget() {
         indexerMode: "off",
       };
       for (const [key, payload] of [
-        ["hip4_read", { environment: "mainnet", requestWeightPerMinute: 600 }],
+        [
+          "hip4_read",
+          {
+            environment: "mainnet",
+            requestWeightPerMinute: 600,
+            // Exercise combined-refresh contention at the SAME global ceiling.
+            // Default background reserves correctly split cash/history now,
+            // so relying on those defaults no longer reaches this scenario.
+            backgroundRequestWeightPerMinute: 600,
+            interactiveRequestWeightReserveRatio: 0,
+          },
+        ],
         [
           "hip4_account",
           {
@@ -179,14 +190,19 @@ export async function testHip4ObserverSharedBudget() {
     };
     const first = await runHip4FinancialReadPass(pool, transport, false);
     assert.equal(first.orderObservation.saved, 2);
-    assert.equal(first.budgetExhausted, 1);
+    assert.equal(
+      first.budgetExhausted,
+      0,
+      "small successful fill pages settle to20 and no longer exhaust the600 ceiling",
+    );
     const firstHistory = (
       await pool.query(
         "select history from hip4_account_snapshots where account_address=$1",
         [wallet.address.toLowerCase()],
       )
     ).rows[0].history;
-    assert.equal(firstHistory.fillRepair.lastError, "budget_exhausted");
+    assert.equal(firstHistory.fillRepair.lastError, null);
+    assert.ok(firstHistory.fillRepair.lastSuccessAt);
     assert.equal(
       (
         await pool.query(
@@ -209,8 +225,13 @@ export async function testHip4ObserverSharedBudget() {
       [wallet.address.toLowerCase()],
     );
     await pool.query(
-      "update hip4_order_submissions set reconcile_after='-infinity' where action_id=any($1::uuid[])",
-      [orders.map((order) => order.id)],
+      `update hip4_order_submissions set reconcile_after='-infinity',
+        fills_observation=jsonb_set(fills_observation,'{repair,lastAttemptAt}',to_jsonb($2::text))
+        where action_id=any($1::uuid[])`,
+      [
+        orders.map((order) => order.id),
+        new Date(Date.now() - 60000).toISOString(),
+      ],
     );
     const second = await runHip4FinancialReadPass(pool, transport, true);
     assert.equal(second.updated, 1);
@@ -222,7 +243,7 @@ export async function testHip4ObserverSharedBudget() {
     ).rows[0].history;
     assert.ok(secondHistory.fillRepair.lastSuccessAt);
     assert.equal(secondHistory.fillRepair.lastError, null);
-    assert.equal(second.orderObservation.budgetExhausted, 1);
+    assert.equal(second.orderObservation.budgetExhausted, 0);
     const weight = (
       await pool.query(
         "select sum((entry->>'weight')::int)::int as weight from hip4_request_budget cross join lateral jsonb_array_elements(admissions) entry",
@@ -230,7 +251,7 @@ export async function testHip4ObserverSharedBudget() {
     ).rows[0].weight;
     assert.ok(weight <= 600);
     console.log(
-      "[hip4-observer-budget] alternating priority advances both histories at 600/min without changing provider budget",
+      "[hip4-observer-budget] settled small fill pages advance both histories at600/min without changing provider budget",
     );
   } finally {
     if (policyIds.length)

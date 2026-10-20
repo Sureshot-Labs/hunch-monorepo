@@ -1,6 +1,10 @@
 import { hip4RawUnits, parseHip4Coin } from "@hunch/shared";
 import { hip4AccountFillSchema } from "./hip4-account-contract.js";
 import { hip4SignedAmount } from "./hip4-account-projection.js";
+import {
+  hip4BasisLedgerEvidenceKey,
+  type Hip4BasisLedgerEntry,
+} from "./hip4-cash-ledger-evidence.js";
 
 type Fill = ReturnType<typeof hip4AccountFillSchema.parse>;
 export function hip4BasisFillFingerprint(value: unknown): string | null {
@@ -53,7 +57,8 @@ export type Hip4PositionBasis = {
 export function projectHip4PositionBasis(input: {
   positions: readonly { coin: string; quantity: string }[];
   fills: readonly unknown[];
-  ledger: readonly { time: number; delta: Record<string, unknown> }[];
+  ledger: readonly Hip4BasisLedgerEntry[];
+  provenQuoteTransfers?: ReadonlySet<string>;
   quoteLedgerToken: string;
   observedTime: number;
   // Exhausted provider-visible ranges, not a claim about its older retention.
@@ -244,7 +249,8 @@ export function projectHip4PositionBasis(input: {
         (entry) =>
           entry.time >= anchorTime &&
           entry.time <= input.observedTime &&
-          !isBasisNeutralLedger(entry.delta, input.quoteLedgerToken),
+          !isBasisNeutralLedger(entry.delta, input.quoteLedgerToken) &&
+          !input.provenQuoteTransfers?.has(hip4BasisLedgerEvidenceKey(entry)),
       )
     )
       return unknown(position, "unsupported_economic_event");

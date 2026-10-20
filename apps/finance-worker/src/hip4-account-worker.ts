@@ -1,11 +1,17 @@
 import { createPgPool, type Pool } from "@hunch/infra";
 import { env } from "./env.js";
+import {
+  createHip4ObserverRunner,
+  type Hip4ObserverCadence,
+} from "./hip4-observer-cadence.js";
 
 type AccountModule = {
+  readHip4FinancialReadCadence(pool: Pool): Promise<Hip4ObserverCadence>;
   runHip4FinancialReadPass(
     pool: Pool,
     fetcher?: typeof fetch,
     accountFirst?: boolean,
+    options?: { skipAccounts?: boolean },
   ): Promise<{
     claimed: number;
     updated: number;
@@ -13,6 +19,7 @@ type AccountModule = {
     leaseLost: number;
     budgetExhausted: number;
     nextIntervalSeconds: number;
+    nextAccountIntervalSeconds: number;
     orderObservation?: {
       claimed: number;
       saved: number;
@@ -24,12 +31,8 @@ type AccountModule = {
 };
 let accountModule: Promise<AccountModule> | null = null;
 let accountPool: Pool | null = null;
-let accountFirstNext = true;
-let running: Promise<
-  Awaited<ReturnType<AccountModule["runHip4FinancialReadPass"]>>
-> | null = null;
 
-async function runPass() {
+async function loadAccountObserver() {
   accountModule ??= import(
     import.meta.url.endsWith(".ts")
       ? new URL("../../api/src/hip4-account-worker-entry.ts", import.meta.url)
@@ -50,28 +53,37 @@ async function runPass() {
       console.error("[hip4-account-observer] database connection error"),
     );
   }
-  const accountFirst = accountFirstNext;
-  // Flip only for an actual pass, never a scheduler timeout's single-flight
-  // replay. Restart defaults to existing P2 priority, then alternates.
-  accountFirstNext = !accountFirstNext;
-  return (await accountModule).runHip4FinancialReadPass(
-    accountPool,
-    undefined,
-    accountFirst,
-  );
+  return { pool: accountPool, observer: await accountModule };
 }
+
+function createObserverRunner() {
+  return createHip4ObserverRunner({
+    readCadence: async () => {
+      const { pool, observer } = await loadAccountObserver();
+      return observer.readHip4FinancialReadCadence(pool);
+    },
+    runPass: async (accountFirst, options) => {
+      const { pool, observer } = await loadAccountObserver();
+      return observer.runHip4FinancialReadPass(
+        pool,
+        undefined,
+        accountFirst,
+        options,
+      );
+    },
+  });
+}
+let observerRunner = createObserverRunner();
 
 export function runHip4AccountReadJob() {
   // Scheduler timeout does not end provider work; hold single-flight until it
   // actually settles. SQL leases protect concurrent API/worker instances.
-  running ??= runPass().finally(() => {
-    running = null;
-  });
-  return running;
+  return observerRunner.run();
 }
 export async function closeHip4AccountReadPool() {
-  await running?.catch(() => undefined);
+  await observerRunner.waitForIdle();
   const pool = accountPool;
   accountPool = null;
   if (pool) await pool.end();
+  observerRunner = createObserverRunner();
 }

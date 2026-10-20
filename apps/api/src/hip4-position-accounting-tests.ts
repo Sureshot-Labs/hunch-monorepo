@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { projectHip4PositionBasis } from "./services/hip4-position-accounting.js";
+import { canonicalJsonHash } from "./funding/persistence/canonical.js";
+import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
+import {
+  hip4BasisLedgerEvidenceKey,
+  hip4ProvenCashLedgerEntries,
+} from "./services/hip4-cash-ledger-evidence.js";
 
 const buy = {
   coin: "#87750",
@@ -208,4 +214,235 @@ test("opposite side legs sharing a hash are distinct holdings, not hash-level du
     results.map((row) => row.costBasis),
     ["4.1", "6.1"],
   );
+});
+
+function incomingCash(index = 1, fee = "0.0") {
+  const owner = `0x${"9".repeat(40)}`;
+  const sender = `0x${"7".repeat(40)}`;
+  const entry = {
+    time: 3100 + index,
+    hash: `0x${String(index).repeat(64)}`,
+    delta: {
+      type: "send",
+      user: sender,
+      destination: owner,
+      sourceDex: "",
+      destinationDex: "spot",
+      nonce: 3000 + index,
+      token: "USDC",
+      amount: "0.205539",
+      usdcValue: "0.205539",
+      fee,
+      nativeTokenFee: fee,
+      feeToken: "",
+    },
+  };
+  const feeObservation = { fee, nativeTokenFee: fee, feeToken: "" };
+  const receipt = {
+    network_id: HYPERCORE_MAINNET_USDC.networkId,
+    asset_id: HYPERCORE_MAINNET_USDC.assetId,
+    asset_decimals: 8,
+    tx_hash: entry.hash,
+    event_index: "hypercore:send:destination_credit",
+    kind: "destination_credit",
+    from_address: sender,
+    to_address: owner,
+    raw_amount: "20553900",
+    canonical: true,
+    finality_status: "finalized",
+    reorged_at: null as string | null,
+    metadata: {
+      observerId: "relay_owned_destination_observation_v1",
+      nativeEvidenceKind: "hypercore_send_ledger_v1",
+      relayTransactionReferenceMatched: true,
+      nativeNonce: entry.delta.nonce,
+      nativeLedgerTime: entry.time,
+      nativeProviderBlock: 123,
+      nativeSourceDex: "",
+      nativeDestinationDex: "spot",
+      nativeFeeObservation: feeObservation,
+      nativeEvidenceFingerprint: canonicalJsonHash({
+        networkId: HYPERCORE_MAINNET_USDC.networkId,
+        asset: HYPERCORE_MAINNET_USDC,
+        owner,
+        direction: "credit",
+        transactionHash: entry.hash,
+        nonce: entry.delta.nonce,
+        sourceAddress: sender,
+        destinationAddress: owner,
+        sourceDex: "",
+        destinationDex: "spot",
+        rawAmount: "20553900",
+        feeObservation,
+        ledgerTime: entry.time,
+        providerBlock: 123,
+      }),
+    },
+  };
+  const scope = {
+    environment: "mainnet" as const,
+    address: owner,
+    assetId: HYPERCORE_MAINNET_USDC.assetId,
+    decimals: 8,
+  };
+  return { scope, entry, receipt };
+}
+
+test("existing exact canonical destination receipts qualify bare-USDC cash only, without subtracting sender fees from basis twice", () => {
+  const first = incomingCash();
+  const second = incomingCash(2, "1.0"); // denomination remains unknown; recipient credit is exact
+  const ledger = [first.entry, second.entry];
+  const provenQuoteTransfers = hip4ProvenCashLedgerEntries({
+    ...first.scope,
+    ledger,
+    observations: [first.receipt, second.receipt],
+  });
+  assert.equal(provenQuoteTransfers.size, 2);
+  const result = projectHip4PositionBasis({
+    ...input,
+    ledger,
+    provenQuoteTransfers,
+  })[0];
+  assert.equal(result.reason, "verified");
+  assert.equal(result.costBasis, "7.65");
+  assert.equal(result.realizedSinceAnchor, "1.4");
+  assert.equal(
+    projectHip4PositionBasis({ ...input, ledger })[0].reason,
+    "unsupported_economic_event",
+  );
+  const conflicting = {
+    ...first.entry,
+    delta: { ...first.entry.delta, token: "+87750" },
+  };
+  assert.ok(!provenQuoteTransfers.has(hip4BasisLedgerEvidenceKey(conflicting)));
+  assert.equal(
+    projectHip4PositionBasis({
+      ...input,
+      ledger: [conflicting],
+      provenQuoteTransfers,
+    })[0].reason,
+    "unsupported_economic_event",
+  );
+});
+
+test("bare-USDC identity stays unknown without one exact finalized owned recipient receipt and matching immutable native proof", () => {
+  const { scope, entry, receipt } = incomingCash();
+  const changes: ((value: typeof receipt) => void)[] = [
+    (value) => {
+      value.canonical = false;
+    },
+    (value) => {
+      value.finality_status = "provisional";
+    },
+    (value) => {
+      value.reorged_at = new Date().toISOString();
+    },
+    (value) => {
+      value.network_id = "hyperliquid:testnet";
+    },
+    (value) => {
+      value.asset_id = `0x${"a".repeat(32)}`;
+    },
+    (value) => {
+      value.asset_decimals = 6;
+    },
+    (value) => {
+      value.tx_hash = `0x${"f".repeat(64)}`;
+    },
+    (value) => {
+      value.to_address = value.from_address;
+    },
+    (value) => {
+      value.from_address = value.to_address;
+    },
+    (value) => {
+      value.raw_amount = "20553901";
+    },
+    (value) => {
+      value.event_index = "hypercore:send:source_debit";
+    },
+    (value) => {
+      value.metadata.nativeNonce++;
+    },
+    (value) => {
+      value.metadata.nativeLedgerTime++;
+    },
+    (value) => {
+      value.metadata.nativeProviderBlock++;
+    },
+    (value) => {
+      value.metadata.nativeSourceDex = "spot";
+    },
+    (value) => {
+      value.metadata.nativeDestinationDex = "";
+    },
+    (value) => {
+      value.metadata.relayTransactionReferenceMatched = false;
+    },
+    (value) => {
+      value.metadata.nativeEvidenceKind = "unknown";
+    },
+    (value) => {
+      value.metadata.nativeFeeObservation.fee = "0.1";
+    },
+    (value) => {
+      value.metadata.nativeFeeObservation.feeToken = "USDC";
+    },
+    (value) => {
+      value.metadata.nativeEvidenceFingerprint = "0".repeat(64);
+    },
+  ];
+  for (const change of changes) {
+    const changed = structuredClone(receipt);
+    change(changed);
+    assert.equal(
+      hip4ProvenCashLedgerEntries({
+        ...scope,
+        ledger: [entry],
+        observations: [changed],
+      }).size,
+      0,
+      change.toString(),
+    );
+  }
+  for (const observations of [
+    [],
+    [receipt, receipt],
+    [receipt, { ...receipt, raw_amount: "1" }],
+  ])
+    assert.equal(
+      hip4ProvenCashLedgerEntries({ ...scope, ledger: [entry], observations })
+        .size,
+      0,
+    );
+  for (const changedScope of [
+    { ...scope, environment: "testnet" as const },
+    { ...scope, address: entry.delta.user }, // credit cannot prove sender debit
+    { ...scope, address: `0x${"a".repeat(40)}` },
+    { ...scope, decimals: 6 },
+    { ...scope, assetId: `0x${"a".repeat(32)}` },
+  ])
+    assert.equal(
+      hip4ProvenCashLedgerEntries({
+        ...changedScope,
+        ledger: [entry],
+        observations: [receipt],
+      }).size,
+      0,
+    );
+  for (const delta of [
+    { ...entry.delta, fee: "0.1" },
+    { ...entry.delta, amount: "0.20553901" },
+    { ...entry.delta, nonce: entry.delta.nonce + 1 },
+    { ...entry.delta, token: "USDC:unknown" },
+    { ...entry.delta, type: "spotTransfer" },
+  ])
+    assert.equal(
+      hip4ProvenCashLedgerEntries({
+        ...scope,
+        ledger: [{ ...entry, delta }],
+        observations: [receipt],
+      }).size,
+      0,
+    );
 });

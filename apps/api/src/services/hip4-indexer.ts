@@ -22,6 +22,7 @@ import {
 } from "./hip4-client.js";
 import {
   admitHip4Request,
+  reserveHip4Request,
   advanceHip4Cursor,
   persistHip4Market,
   readHip4Cursor,
@@ -166,7 +167,7 @@ export async function runHip4ReadCycle(
           metadataCredits--;
           return Promise.resolve(true);
         }
-        return admitHip4Request(
+        return reserveHip4Request(
           pool,
           policy.environment,
           weight,

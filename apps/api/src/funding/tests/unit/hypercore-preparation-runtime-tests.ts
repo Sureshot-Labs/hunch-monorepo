@@ -18,12 +18,17 @@ import { PreparationContractError } from "../../preparation/core-adapter.js";
 import { hypercoreFundingBalance } from "../../preparation/hypercore-adapter.js";
 import { hip4PortfolioPositionId } from "../../../services/hip4-portfolio-positions.js";
 import type { ApiTradeMarket } from "../../../services/api-trading-market-repo.js";
+import {
+  fundingDestinationsQuerySchema,
+  fundingPreparationInspectRequestSchema,
+  fundingPreparationPrepareRequestSchema,
+} from "../../../schemas/funding.js";
 
 const isPreparationUnavailable = (error: unknown): boolean =>
   error instanceof PreparationContractError &&
   error.code === "preparation_unavailable";
 
-async function fixture() {
+async function fixture(outcome = 1473) {
   let now = new Date("2026-10-14T16:00:00Z");
   const wallet: UserWallet = {
     id: "00000000-0000-4000-8000-000000000001",
@@ -73,7 +78,9 @@ async function fixture() {
     afterLoad: null as (() => void) | null,
   };
   const loads: boolean[] = [];
-  const identity = hip4Identity("mainnet", 1473);
+  const loadedAddresses: string[] = [];
+  const wallets = [wallet];
+  const identity = hip4Identity("mainnet", outcome);
   const market: ApiTradeMarket = {
     id: identity.marketId,
     venue: "hyperliquid",
@@ -135,7 +142,7 @@ async function fixture() {
                 ? [
                     {
                       coin: identity.sides[state.positionSide].tokenName,
-                      token: 14730 + state.positionSide,
+                      token: outcome * 10 + state.positionSide,
                       total: state.positionQuantity,
                       hold: state.positionHeld,
                       entryNtl: "0",
@@ -172,6 +179,7 @@ async function fixture() {
       refresh: boolean,
     ) => {
       loads.push(refresh);
+      loadedAddresses.push(address);
       const value = hip4AccountReadResponse({
         row: {
           observation: snapshot(),
@@ -251,7 +259,7 @@ async function fixture() {
     db,
     () => now,
     undefined,
-    async () => [wallet],
+    async () => wallets,
     undefined,
     nativeService,
     funding,
@@ -272,9 +280,11 @@ async function fixture() {
   return {
     state,
     wallet,
+    wallets,
     service,
     input,
     loads,
+    loadedAddresses,
     snapshot,
     market,
     identity,
@@ -731,6 +741,136 @@ test("market-scoped native refresh budget denial reports unavailability and ordi
   assert.equal(recovered.spendability?.availableAmount.raw, "0");
   assert.equal(recovered.spendability?.asOf, f.state.observedAt);
   assert.deepEqual(f.loads, [false, true, false]);
+});
+
+test("two native NO contracts pass the public preparation schemas and exact owned runtime without extra setup", async () => {
+  const f = await fixture(11797);
+  Object.assign(f.state, { positionQuantity: "2", positionSide: 1 });
+  const positionActionRef = hip4PortfolioPositionId(
+    "mainnet",
+    f.wallet.walletAddress,
+    f.identity.sides[1].tokenId,
+  );
+  const query = fundingDestinationsQuerySchema.parse({
+    purpose: "sell",
+    marketContextId: f.market.id,
+    positionActionRef,
+    controllerWalletRef: f.wallet.id,
+  });
+  const request = {
+    ...query,
+    accountId: f.wallet.userId,
+    marketContextId: query.marketContextId ?? null,
+    marketClass: query.marketClass ?? null,
+    compatibleVenueBindingOptionIds: null,
+  };
+  const [option] = await f.service.listDestinationOptions(request);
+  assert.equal(option.preparationStatus, "ready");
+  const inspectionRequest = fundingPreparationInspectRequestSchema.parse({
+    ...query,
+    marketClass: null,
+    venueBindingOptionId: option.venueBindingOptionId,
+  });
+  const inspection = await f.service.inspectBindingOption({
+    ...request,
+    ...inspectionRequest,
+  });
+  assert.equal(inspection.status, "ready");
+  assert.equal(
+    inspection.evidence.facts.positionTokenId,
+    f.identity.sides[1].tokenId,
+  );
+  const preparedRequest = fundingPreparationPrepareRequestSchema.parse({
+    ...inspectionRequest,
+    expectedInspectionRevision: inspection.inspectionRevision,
+  });
+  const prepared = await f.service.prepareBindingOption({
+    ...request,
+    ...preparedRequest,
+    operationId: "synthetic_sell_preparation_11797",
+  });
+  assert.deepEqual(prepared.actions, []);
+  assert.equal(prepared.controllerWalletRef, f.wallet.id);
+  // Syntactically valid foreign references still reach the existing exact
+  // address/token/environment ownership check; accepting a ref is not authority.
+  const foreignQuery = fundingDestinationsQuerySchema.parse({
+    ...query,
+    positionActionRef: hip4PortfolioPositionId(
+      "mainnet",
+      `0x${"b".repeat(40)}`,
+      f.identity.sides[1].tokenId,
+    ),
+  });
+  await assert.rejects(
+    f.service.listDestinationOptions({ ...request, ...foreignQuery }),
+    isPreparationUnavailable,
+  );
+});
+
+test("native SELL scopes discovery and explicit refresh to the selected owned wallet before account IO", async () => {
+  const f = await fixture(11797);
+  Object.assign(f.state, { positionQuantity: "2", positionSide: 1 });
+  f.wallets.unshift({
+    ...f.wallet,
+    id: "00000000-0000-4000-8000-000000000003",
+    walletAddress: `0x${"b".repeat(40)}`,
+    isPrimary: false,
+  });
+  const request = {
+    ...f.input,
+    purpose: "sell" as const,
+    marketContextId: f.market.id,
+    positionActionRef: hip4PortfolioPositionId(
+      "mainnet",
+      f.wallet.walletAddress,
+      f.identity.sides[1].tokenId,
+    ),
+  };
+  const [option] = await f.service.listDestinationOptions(request);
+  assert.equal(option.preparationStatus, "ready");
+  assert.deepEqual(f.loadedAddresses, [f.wallet.walletAddress]);
+  const inspection = await f.service.inspectBindingOption(
+    { ...request, venueBindingOptionId: option.venueBindingOptionId },
+    { forceFresh: true },
+  );
+  assert.equal(inspection.status, "ready");
+  assert.deepEqual(f.loadedAddresses, [
+    f.wallet.walletAddress,
+    f.wallet.walletAddress,
+  ]);
+  assert.deepEqual(f.loads, [false, true]);
+  // Deterministic selection is not holding evidence: a fresh missing holding
+  // still fails, rather than reusing another wallet or an old inspection.
+  f.state.positionQuantity = "0";
+  await assert.rejects(
+    f.service.inspectBindingOption(
+      { ...request, venueBindingOptionId: option.venueBindingOptionId },
+      { forceFresh: true },
+    ),
+    isPreparationUnavailable,
+  );
+});
+
+test("foreign native SELL references reject before account IO and disabled SELL stays empty", async () => {
+  const f = await fixture(11797);
+  const request = {
+    ...f.input,
+    purpose: "sell" as const,
+    marketContextId: f.market.id,
+    positionActionRef: hip4PortfolioPositionId(
+      "mainnet",
+      `0x${"c".repeat(40)}`,
+      f.identity.sides[1].tokenId,
+    ),
+  };
+  await assert.rejects(
+    f.service.listDestinationOptions(request),
+    isPreparationUnavailable,
+  );
+  assert.deepEqual(f.loads, []);
+  f.state.sellEnabled = false;
+  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  assert.deepEqual(f.loads, []);
 });
 
 test("native SELL binds the exact portfolio position and remains independent of BUY/funding switches", async () => {

@@ -15,6 +15,7 @@ import {
   planHip4FillRepair,
 } from "./hip4-account-history.js";
 import { projectHip4Execution } from "./hip4-account-projection.js";
+import { assertHip4ObservationDeadline } from "./hip4-optional-observation.js";
 import {
   readHip4OrderObservationContext,
   type Hip4OrderObservationClaim,
@@ -53,9 +54,11 @@ export async function repairHip4ClaimedOrderFills(input: {
   policy: Hip4AccountPolicy;
   read: ReturnType<typeof createHip4AccountClient>;
   throughTime: number;
+  deadlineMs?: number;
 }) {
   let pages = 0;
   for (; pages < input.policy.historyRepairPagesPerRefresh; pages++) {
+    assertHip4ObservationDeadline(input.deadlineMs);
     const context = await readHip4OrderObservationContext(
       input.pool,
       input.claim,
@@ -87,7 +90,12 @@ export async function repairHip4ClaimedOrderFills(input: {
       input.pool,
       context.environment,
       context.signer_address,
-      input.policy.leaseMs,
+      input.deadlineMs === undefined
+        ? input.policy.leaseMs
+        : Math.max(
+            1,
+            Math.min(input.policy.leaseMs, input.deadlineMs - Date.now()),
+          ),
       new Date(now),
       "order_fills",
     );

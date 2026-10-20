@@ -59,3 +59,10 @@ test("provider failure diagnostics contain only fixed safe labels", () => {
       "invalid_runtime_contract",
     );
 });
+
+test("missing native closing fee terms remain distinct from wallet or transport failure", () => {
+  assert.deepEqual(
+    hip4TradingRouteError(new Error("hip4_fee_terms_unavailable")),
+    { status: 409, error: "hip4_fee_terms_unavailable" },
+  );
+});

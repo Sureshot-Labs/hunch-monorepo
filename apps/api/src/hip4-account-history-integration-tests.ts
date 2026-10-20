@@ -93,7 +93,13 @@ try {
     "insert into runtime_policies(id,policy_key,payload,effective_at) values($1,'hip4_read',$3,now()),($2,'hip4_account',$4,now())",
     [
       ...policyIds,
-      JSON.stringify({ enabled: true, requestWeightPerMinute: 1200 }),
+      JSON.stringify({
+        enabled: true,
+        requestWeightPerMinute: 1200,
+        // This pagination fixture intentionally fits tail + repair pages in
+        // one refresh; default interactive policy defers optional history.
+        backgroundRequestWeightPerMinute: 600,
+      }),
       JSON.stringify({ enabled: true }),
     ],
   );

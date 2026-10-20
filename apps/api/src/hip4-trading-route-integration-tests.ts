@@ -84,6 +84,8 @@ async function lifecycle(state: "active" | "exit-only" | "unreleased") {
 let uninitializedAccount = false;
 let fundedDefaultAccount = false;
 let legacyDexAbstraction: unknown = null;
+let omitDeployerFeeScale = false;
+let omitGlobalFeeScale = false;
 const fetcher: typeof fetch = async (url, init) => {
   const body = JSON.parse(String(init?.body));
   if (url === "https://api.hyperliquid.xyz/exchange") {
@@ -163,10 +165,10 @@ const fetcher: typeof fetch = async (url, init) => {
           description: "",
           sideSpecs: [{ name: "Yes" }, { name: "No" }],
           quoteToken: "USDC",
-          deployerFeeScale: "1",
+          ...(omitDeployerFeeScale ? {} : { deployerFeeScale: "1" }),
         },
       ],
-      feeScale: "1",
+      ...(omitGlobalFeeScale ? {} : { feeScale: "1" }),
     },
     userFees: {
       userSpotCrossRate: "0.0007",
@@ -412,6 +414,28 @@ try {
   assert.equal(sellQuote.json().amounts.debitAsset, "outcome");
   assert.equal(sellQuote.json().fees.feeRoleAssumption, "taker");
   assert.notEqual(sellQuote.json().fees.estimatedFeeAtLimitRaw, "0");
+  omitDeployerFeeScale = true;
+  await resetBudget();
+  const omittedShareQuote = await post("/orders/market-quote", {
+    ...marketRequest,
+    requestKey: randomUUID(),
+    side: "SELL",
+    consentedDebitCapRaw: "200000",
+  });
+  assert.equal(omittedShareQuote.statusCode, 200, omittedShareQuote.body);
+  assert.equal(omittedShareQuote.json().fees.currentRateUpperBound, "0.0007");
+  assert.notEqual(omittedShareQuote.json().fees.estimatedFeeAtLimitRaw, "0");
+  omitGlobalFeeScale = true;
+  await resetBudget();
+  const missingGlobalQuote = await post("/orders/market-quote", {
+    ...marketRequest,
+    side: "SELL",
+    consentedDebitCapRaw: "200000",
+  });
+  assert.equal(missingGlobalQuote.statusCode, 409, missingGlobalQuote.body);
+  assert.equal(missingGlobalQuote.json().error, "hip4_fee_terms_unavailable");
+  omitDeployerFeeScale = false;
+  omitGlobalFeeScale = false;
   await resetBudget();
   assert.equal(
     (
@@ -953,6 +977,39 @@ try {
     status: 503,
     error: "trade_temporarily_unavailable",
   });
+  // Quote-only cases above still prove no order is created. Exercise unsigned
+  // SELL preparation only after those zero-order assertions have completed.
+  failReads = false;
+  omitDeployerFeeScale = true;
+  await resetBudget();
+  const readySellQuote = await post("/orders/market-quote", {
+    ...marketRequest,
+    requestKey: randomUUID(),
+    side: "SELL",
+    consentedDebitCapRaw: "200000",
+  });
+  assert.equal(readySellQuote.statusCode, 200, readySellQuote.body);
+  await resetBudget();
+  const omittedSharePreparation = await post(
+    "/orders/prepare",
+    readySellQuote.json().preparationRequest,
+  );
+  assert.equal(
+    omittedSharePreparation.statusCode,
+    200,
+    omittedSharePreparation.body,
+  );
+  actionIds.push(omittedSharePreparation.json().actionId);
+  assert.equal(
+    omittedSharePreparation.json().fees.currentRateUpperBound,
+    "0.0007",
+  );
+  assert.equal(
+    posts,
+    2,
+    "unsigned SELL preparation never sends an exchange request",
+  );
+  omitDeployerFeeScale = false;
   const spec = app.swagger();
   assert.ok(spec.paths?.["/orders/actions/{actionId}"]?.get);
   for (const route of [

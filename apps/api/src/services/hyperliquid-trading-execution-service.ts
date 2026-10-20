@@ -3,7 +3,15 @@ import { z } from "zod";
 import { hip4OrderPreparationRequestSchema } from "../repos/hip4-order-preparation.js";
 import { readHip4OrderController } from "../repos/hip4-order-controller.js";
 import { readHip4TradeLifecycle } from "../repos/hip4-order-admission.js";
-import { readHip4OrderCapacity } from "./hip4-financial-observation.js";
+import {
+  projectHip4StoredDefaultBuyQuoteCapacity,
+  readHip4OrderCapacity,
+} from "./hip4-financial-observation.js";
+import {
+  readHip4AccountPolicy,
+  readHip4AccountSnapshot,
+} from "./hip4-account-repository.js";
+import { readHip4Policy } from "./hip4-repository.js";
 import {
   prepareHip4OrderWithCurrentContext,
   quoteHip4OrderWithCurrentContext,
@@ -409,14 +417,55 @@ export function createHyperliquidTradingExecutionService(
           "wallet_mismatch",
           "Select the linked controller wallet.",
         );
-      const capacity = await readHip4OrderCapacity(
+      const capacityInput = {
+        address: profile.address,
+        marketId: request.target.marketId,
+        side: request.action ?? "BUY",
+        outcomeSide: request.target.outcome as "YES" | "NO",
+      };
+      let capacity: Awaited<ReturnType<typeof readHip4OrderCapacity>> | null =
+        null;
+      if (capacityInput.side === "BUY") {
+        // Stored USDC is preview-only, but it must not bypass the native
+        // market/outcome identity validation performed by the fresh reader.
+        const match = /^hyperliquid:mainnet:outcome:(0|[1-9]\d*)$/u.exec(
+          capacityInput.marketId,
+        );
+        if (!match) throw new Error("hip4_capacity_identity_invalid");
+        hip4Identity("mainnet", Number(match[1]));
+        const [read, account] = await Promise.all([
+          readHip4Policy(input.pool, "accountRead"),
+          readHip4AccountPolicy(input.pool),
+        ]);
+        if (
+          !read.policy.enabled ||
+          !account.policy.enabled ||
+          read.policy.environment !== "mainnet"
+        )
+          throw new Error("native_account_read_unavailable");
+        const snapshot = await readHip4AccountSnapshot(
+          input.pool,
+          "mainnet",
+          profile.address,
+        ).catch((error: unknown) => {
+          // Optional legacy display facts cannot block a healthy fresh read.
+          if (error instanceof z.ZodError) return undefined;
+          throw error;
+        });
+        capacity = projectHip4StoredDefaultBuyQuoteCapacity({
+          ...capacityInput,
+          observation: snapshot?.observation,
+          environment: read.policy.environment,
+          snapshotMaxAgeMs: account.policy.snapshotMaxAgeMs,
+          now: Date.now(),
+          readRevision: read.revision,
+          accountRevision: account.revision,
+        });
+      }
+      // SELL stock and strict prepare/submit always retain fresh native reads.
+      capacity ??= await readHip4OrderCapacity(
         input.pool,
-        {
-          address: profile.address,
-          marketId: request.target.marketId,
-          side: request.action ?? "BUY",
-          outcomeSide: request.target.outcome as "YES" | "NO",
-        },
+        capacityInput,
         dependencies.fetcher,
       );
       return {

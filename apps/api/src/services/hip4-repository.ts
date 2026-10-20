@@ -1,5 +1,5 @@
 import { fetchActiveRuntimePolicy } from "@hunch/db";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   hip4ReadMarketSchema,
   hip4Identity,
@@ -17,6 +17,7 @@ import {
 } from "@hunch/shared";
 import type { Pool } from "pg";
 import type { z } from "zod";
+import type { Hip4InfoAdmissionReceipt } from "./hip4-client.js";
 import { mergeHip4Volume } from "./hip4-volume.js";
 import { ageHip4Market } from "./hip4-mapping.js";
 import { hip4CatalogProjection } from "./hip4-catalog-projection.js";
@@ -89,8 +90,16 @@ export async function admitHip4Request(
     maximum: number;
     backgroundMaximum?: number;
   },
+  reservationId?: string,
 ): Promise<boolean> {
-  if (!Number.isInteger(weight) || weight <= 0 || weight > maximum)
+  if (
+    !Number.isInteger(maximum) ||
+    maximum <= 0 ||
+    maximum > 1200 ||
+    !Number.isInteger(weight) ||
+    weight <= 0 ||
+    weight > maximum
+  )
     return false;
   if (
     classBudget &&
@@ -107,7 +116,8 @@ export async function admitHip4Request(
   const result = await db.query(
     `
     insert into hip4_request_budget(scope, admissions)
-    values ('public-info', jsonb_build_array(jsonb_build_object('at', extract(epoch from statement_timestamp()), 'weight', $1::int, 'consumer', $3::text)))
+    values ('public-info', jsonb_build_array(jsonb_build_object('at', extract(epoch from statement_timestamp()), 'weight', $1::int, 'consumer', $3::text)
+      || case when $6::text is null then '{}'::jsonb else jsonb_build_object('reservationId',$6::text,'reservedWeight',$1::int) end))
     on conflict (scope) do update set
       admissions = coalesce((select jsonb_agg(admission_row)
         from jsonb_array_elements(hip4_request_budget.admissions) as admission_row
@@ -131,9 +141,127 @@ export async function admitHip4Request(
       classBudget?.scope ?? null,
       classBudget?.maximum ?? null,
       classBudget ? (classBudget.backgroundMaximum ?? maximum) : null,
+      reservationId ?? null,
     ],
   );
   return result.rowCount === 1;
+}
+
+export const HIP4_SETTLE_REQUEST_WEIGHT_SQL = `with settlement_limits as materialized (
+    select set_config('lock_timeout',$4::int::text||'ms',true) as applied_lock_timeout
+  ) update hip4_request_budget budget_row
+  set admissions=(select jsonb_agg(
+    case when admission_row->>'reservationId'=$1::text
+      then admission_row || jsonb_build_object('weight',$3::int,'settledWeight',$3::int)
+      else admission_row end order by admission_ordinal)
+    from jsonb_array_elements(budget_row.admissions) with ordinality as admission_entries(admission_row,admission_ordinal))
+  from settlement_limits
+  where budget_row.scope='public-info' and $3::int>=20 and $3::int<$2::int and $2::int<=1200 and exists(
+    select 1 from jsonb_array_elements(budget_row.admissions) admission_row
+    where admission_row->>'reservationId'=$1::text
+      and (admission_row->>'reservedWeight')::int=$2::int
+      and (admission_row->>'weight')::int=$2::int
+      and not admission_row ? 'settledWeight'
+      and (admission_row->>'at')::numeric>extract(epoch from statement_timestamp())-60)
+  returning scope`;
+
+export type Hip4RollingInfoAdmissionReceipt = Hip4InfoAdmissionReceipt &
+  Readonly<{ renew: () => Promise<boolean> }>;
+
+// Prepaid batches dispatch several requests at different times. Keep their
+// complete bound charged for60s after the latest attempted transport, rather
+// than letting later requests age out at the batch's first reservation time.
+// Only the original, still-active/unsettled receipt can extend its own entry.
+export const HIP4_RENEW_REQUEST_RESERVATION_SQL = `with renewal_limits as materialized (
+    select set_config('lock_timeout',$3::int::text||'ms',true) as applied_lock_timeout
+  ), locked_budget as materialized (
+    select budget_row.scope,budget_row.admissions
+    from hip4_request_budget budget_row cross join renewal_limits
+    where budget_row.scope='public-info'
+    for update of budget_row
+  ) update hip4_request_budget budget_row
+  set admissions=(select jsonb_agg(
+    case when admission_row->>'reservationId'=$1::text
+      then admission_row || jsonb_build_object('at',greatest((admission_row->>'at')::numeric,extract(epoch from clock_timestamp())))
+      else admission_row end order by admission_ordinal)
+    from jsonb_array_elements(locked_budget.admissions) with ordinality as admission_entries(admission_row,admission_ordinal))
+  from locked_budget
+  where budget_row.scope=locked_budget.scope and $2::int>0 and $2::int<=1200 and exists(
+    select 1 from jsonb_array_elements(locked_budget.admissions) admission_row
+    where admission_row->>'reservationId'=$1::text
+      and (admission_row->>'reservedWeight')::int=$2::int
+      and (admission_row->>'weight')::int=$2::int
+      and not admission_row ? 'settledWeight'
+      and (admission_row->>'at')::numeric>extract(epoch from clock_timestamp())-60)
+  returning budget_row.scope`;
+
+/** Reserve the complete transport bound before IO. Only the successful client
+ * that owns this internal receipt may settle a smaller documented row weight.
+ * A failed settlement is safe: the conservative reservation remains charged. */
+export async function reserveHip4Request(
+  db: Pick<Pool, "query">,
+  environment: Hip4Environment,
+  weight: number,
+  maximum: number,
+  classBudget?: Parameters<typeof admitHip4Request>[4],
+): Promise<false | Hip4RollingInfoAdmissionReceipt> {
+  const reservationId = randomUUID();
+  if (
+    !(await admitHip4Request(
+      db,
+      environment,
+      weight,
+      maximum,
+      classBudget,
+      reservationId,
+    ))
+  )
+    return false;
+  return {
+    reservedWeight: weight,
+    renew: async () => {
+      try {
+        const renewalQuery = {
+          text: HIP4_RENEW_REQUEST_RESERVATION_SQL,
+          values: [reservationId, weight, 950],
+          query_timeout: 1000,
+        };
+        return (await db.query(renewalQuery)).rowCount === 1;
+      } catch {
+        // Failed renewal is not new provider credit. The batch must stop IO.
+        return false;
+      }
+    },
+    settle: async (actualWeight, deadlineMs) => {
+      if (
+        !Number.isSafeInteger(actualWeight) ||
+        actualWeight < 20 ||
+        actualWeight >= weight ||
+        (deadlineMs !== undefined && deadlineMs <= Date.now())
+      )
+        return;
+      const queryTimeoutMs = Math.max(
+        1,
+        Math.min(1000, (deadlineMs ?? Infinity) - Date.now()),
+      );
+      // pg supports per-query query_timeout (lib/client.js); its installed
+      // QueryConfig types expose it only on ClientConfig. Structural typing
+      // retains the supported option without changing pooled session state.
+      const settlementQuery = {
+        text: HIP4_SETTLE_REQUEST_WEIGHT_SQL,
+        values: [
+          reservationId,
+          weight,
+          actualWeight,
+          Math.max(1, queryTimeoutMs - 50),
+        ],
+        // Optional accounting must not hold a successful financial response
+        // behind a contended budget row. Retaining the bound is conservative.
+        query_timeout: queryTimeoutMs,
+      };
+      await db.query(settlementQuery);
+    },
+  };
 }
 
 export async function advanceHip4Cursor(

@@ -6,6 +6,13 @@ import {
   type Hip4AccountObservation,
 } from "../schemas/hip4-account.js";
 import { projectHip4PositionBasis } from "./hip4-position-accounting.js";
+import { hip4FillCoveredThrough } from "./hip4-tail-history.js";
+import {
+  HIP4_BASIS_CASH_RECEIPTS_SQL,
+  hip4ProvenCashLedgerEntries,
+  type Hip4BasisLedgerEntry,
+} from "./hip4-cash-ledger-evidence.js";
+import { isHypercoreMainnetUsdc } from "../funding/domain/hypercore-identity.js";
 
 export const HIP4_BASIS_FILLS_SQL = `select provider_fill from hip4_account_executions
   where environment=$1 and account_address=$2 and time_ms>=$3 and time_ms<=$4
@@ -40,23 +47,32 @@ export async function readHip4PositionAccounting(
   const starts = coverages
     .map((row) => row?.coveredFrom)
     .filter((value): value is number => value != null);
-  const ends = coverages
-    .map((row) => row?.coveredThrough)
-    .filter((value): value is number => value != null);
+  const ends = [
+    hip4FillCoveredThrough({
+      environment: input.environment,
+      address: input.address,
+      snapshotTime: observedTime,
+      repair: fillsCoverage,
+      tail: input.history.fillsTailCoverage,
+    }),
+    ledgerCoverage?.coveredThrough,
+  ].filter((value): value is number => value != null);
   const coveredFrom =
     starts.length === coverages.length ? Math.max(...starts) : null;
   const coveredThrough =
     ends.length === coverages.length ? Math.min(...ends) : null;
   let incomplete =
     input.observation.unresolvedBalances.length > 0 ||
-    coverages.some(
-      (row) => !row || row.gapDetailsTruncated || !!row.lastError,
-    ) ||
+    // A failed attempt to extend an already covered range does not revoke its
+    // earlier evidence. Coverage must still include the exact balance snapshot;
+    // neither the failed extension nor a fresh clock establishes new coverage.
+    coverages.some((row) => !row || row.gapDetailsTruncated) ||
     coveredFrom == null ||
     coveredThrough == null ||
     coveredThrough < observedTime;
   let fills: unknown[] = [];
-  let ledger: { time: number; delta: Record<string, unknown> }[] = [];
+  let ledger: Hip4BasisLedgerEntry[] = [];
+  let provenQuoteTransfers: ReadonlySet<string> = new Set();
   if (!incomplete && input.observation.positions.length) {
     const params = [
       input.environment,
@@ -72,6 +88,39 @@ export async function readHip4PositionAccounting(
       ledgerRows.rows.length > input.maxRows;
     fills = fillRows.rows.map((row) => row.provider_fill);
     ledger = ledgerRows.rows.map((row) => row.ledger_entry);
+    const asset = {
+      networkId: `hyperliquid:${input.environment}`,
+      assetId: input.observation.cash.assetId,
+      decimals: input.observation.cash.decimals,
+    };
+    if (!incomplete && isHypercoreMainnetUsdc(asset)) {
+      // The existing bounded ledger read limits this exact-hash point lookup.
+      // Proof is scoped to this derivation, never a durable symbol alias that
+      // could outlive a canonical receipt's revocation.
+      const hashes = [
+        ...new Set(
+          ledger.flatMap((entry) =>
+            entry.delta?.type === "send" &&
+            entry.delta.token === "USDC" &&
+            typeof entry.hash === "string" &&
+            /^0x[0-9a-fA-F]{64}$/u.test(entry.hash)
+              ? [entry.hash.toLowerCase()]
+              : [],
+          ),
+        ),
+      ];
+      if (hashes.length) {
+        const receipts = await db.query(HIP4_BASIS_CASH_RECEIPTS_SQL, [hashes]);
+        provenQuoteTransfers = hip4ProvenCashLedgerEntries({
+          environment: input.environment,
+          address: input.address,
+          assetId: asset.assetId,
+          decimals: asset.decimals,
+          ledger,
+          observations: receipts.rows,
+        });
+      }
+    }
   }
   return hip4PositionAccountingSchema.parse({
     version: 1,
@@ -83,6 +132,7 @@ export async function readHip4PositionAccounting(
       positions: input.observation.positions,
       fills,
       ledger,
+      provenQuoteTransfers,
       quoteLedgerToken: `USDC:${input.observation.cash.assetId}`,
       observedTime,
       coveredFrom,

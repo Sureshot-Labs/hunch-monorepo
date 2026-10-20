@@ -178,6 +178,9 @@ function canonicalJson(value: unknown): string {
   if (serialized === undefined) throw new Error("invalid_observation_json");
   return serialized;
 }
+export const HIP4_ACCOUNT_REFRESH_LOCK_SQL = `select lease_token, history, observation from hip4_account_snapshots
+  where environment=$1 and account_address=$2 and lease_token=$3 for update`;
+
 export async function persistHip4AccountRefresh(
   pool: Pool,
   input: {
@@ -204,11 +207,11 @@ export async function persistHip4AccountRefresh(
       input.executionSources.length !== input.executions.length
     )
       throw new Error("execution_source_mismatch");
-    const locked = await db.query(
-      `select lease_token, history from hip4_account_snapshots
-      where environment=$1 and account_address=$2 and lease_token=$3 for update`,
-      [input.environment, input.address, input.lease],
-    );
+    const locked = await db.query(HIP4_ACCOUNT_REFRESH_LOCK_SQL, [
+      input.environment,
+      input.address,
+      input.lease,
+    ]);
     if (!locked.rows.length) {
       await db.query("rollback");
       return false;
@@ -391,14 +394,20 @@ export async function persistHip4AccountRefresh(
     }
     const history = { ...locked.rows[0].history, ...input.history };
     history.accountingConflicts = accountingConflicts;
-    if (input.observation && input.accountingMaxRows != null) {
+    // A history-only pass may finish the range needed by the retained balance
+    // snapshot. Derive against that exact locked snapshot, never a new clock or
+    // a caller's pre-lease view, and do not promote its balance freshness.
+    const accountingObservation =
+      input.observation ??
+      hip4AccountObservationSchema.safeParse(locked.rows[0].observation).data;
+    if (accountingObservation && input.accountingMaxRows != null) {
       // A savepoint protects valid snapshot/fill facts if a derived read fails.
       await db.query("savepoint hip4_basis_derivation");
       try {
         history.positionAccounting = await readHip4PositionAccounting(db, {
           environment: input.environment,
           address: input.address,
-          observation: input.observation,
+          observation: accountingObservation,
           history,
           maxRows: input.accountingMaxRows,
           conflicts: accountingConflicts,

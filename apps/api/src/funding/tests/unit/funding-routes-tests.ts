@@ -31,6 +31,8 @@ import { fundingValidationErrorResponseSchema } from "../../../schemas/funding.j
 import { buildFundingExecutionPreflight } from "../../execution/operation-execution-preflight.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import { SafeFundingSubmissionUnknownError } from "../../execution/safe-funding-submission.js";
+import { hip4PortfolioPositionId } from "../../../services/hip4-portfolio-positions.js";
+import { hip4Identity } from "@hunch/shared";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const NOW = new Date("2026-07-24T12:00:00.000Z");
@@ -1252,6 +1254,154 @@ await test("sell destination discovery forwards the owner-scoped position refere
     assert.equal(response.statusCode, 200);
     assert.equal(observedQuery?.purpose, "sell");
     assert.equal(observedQuery?.positionActionRef, positionActionRef);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("native SELL position references cross discovery, inspection and preparation unchanged", async () => {
+  const identity = hip4Identity("mainnet", 11797);
+  const positionActionRef = hip4PortfolioPositionId(
+    "mainnet",
+    `0x${"a".repeat(40)}`,
+    identity.sides[1].tokenId,
+  );
+  const seen: string[] = [];
+  const controllerWalletRef = "20000000-0000-4000-8000-000000000002";
+  const request = {
+    venueBindingOptionId: "binding_hyperliquid_12345678",
+    purpose: "sell" as const,
+    marketContextId: identity.marketId,
+    marketClass: "hip4",
+    positionActionRef,
+    controllerWalletRef,
+  };
+  const app = await buildApp({
+    destinations: async (userId, query) => {
+      assert.equal(userId, USER_ID);
+      assert.equal(query.controllerWalletRef, controllerWalletRef);
+      seen.push(query.positionActionRef ?? "missing");
+      return [];
+    },
+    inspectPreparation: async (userId, input) => {
+      assert.equal(userId, USER_ID);
+      assert.deepEqual(input, request);
+      seen.push(input.positionActionRef ?? "missing");
+      return preparation();
+    },
+    prepare: async (userId, input) => {
+      assert.equal(userId, USER_ID);
+      assert.equal(input.positionActionRef, positionActionRef);
+      assert.equal(input.controllerWalletRef, controllerWalletRef);
+      seen.push(input.positionActionRef ?? "missing");
+      return preparationRun();
+    },
+  });
+  try {
+    const discovery = await app.inject({
+      method: "GET",
+      url:
+        "/funding/destinations?" +
+        new URLSearchParams({
+          purpose: request.purpose,
+          marketContextId: request.marketContextId,
+          marketClass: request.marketClass,
+          positionActionRef,
+          controllerWalletRef,
+          refresh: "true",
+        }),
+    });
+    assert.equal(discovery.statusCode, 200, discovery.body);
+    for (const path of ["inspect", "prepare"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: `/funding/preparation/${path}`,
+        payload: {
+          ...request,
+          ...(path === "prepare"
+            ? { expectedInspectionRevision: "inspection_hyperliquid_12345678" }
+            : {}),
+        },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+    }
+    assert.deepEqual(seen, [
+      positionActionRef,
+      positionActionRef,
+      positionActionRef,
+    ]);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("native preparation references cannot relax legacy IDs or cross venue and purpose boundaries", async () => {
+  const identity = hip4Identity("mainnet", 11797);
+  const positionActionRef = hip4PortfolioPositionId(
+    "mainnet",
+    `0x${"a".repeat(40)}`,
+    identity.sides[1].tokenId,
+  );
+  let invoked = false;
+  const app = await buildApp({
+    destinations: async () => {
+      invoked = true;
+      return [];
+    },
+    inspectPreparation: async () => {
+      invoked = true;
+      return preparation();
+    },
+    prepare: async () => {
+      invoked = true;
+      return preparationRun();
+    },
+  });
+  try {
+    for (const override of [
+      { positionActionRef: "not-a-position-uuid" },
+      { positionActionRef: `hyperliquid:${"a".repeat(63)}` },
+      { positionActionRef: `hyperliquid:${"A".repeat(64)}` },
+      { positionActionRef: `polymarket:${"a".repeat(64)}` },
+      { marketContextId: "polymarket:561251" },
+      { marketContextId: "hyperliquid:testnet:outcome:11797" },
+      { marketContextId: "hyperliquid:mainnet:outcome:011797" },
+      { marketContextId: "561251" },
+      { purpose: "buy" },
+      { purpose: "redeem" },
+      { controllerWalletRef: positionActionRef },
+    ]) {
+      const request = {
+        purpose: "sell",
+        marketContextId: identity.marketId,
+        positionActionRef,
+        controllerWalletRef: USER_ID,
+        ...override,
+      };
+      const discovery = await app.inject({
+        method: "GET",
+        url: "/funding/destinations?" + new URLSearchParams(request),
+      });
+      assert.equal(discovery.statusCode, 400, discovery.body);
+      for (const path of ["inspect", "prepare"]) {
+        const response = await app.inject({
+          method: "POST",
+          url: `/funding/preparation/${path}`,
+          payload: {
+            ...request,
+            venueBindingOptionId: "binding_hyperliquid_12345678",
+            marketClass: "hip4",
+            ...(path === "prepare"
+              ? {
+                  expectedInspectionRevision: "inspection_hyperliquid_12345678",
+                }
+              : {}),
+          },
+        });
+        assert.equal(response.statusCode, 400, response.body);
+      }
+    }
+    assert.equal(invoked, false);
   } finally {
     await app.close();
   }

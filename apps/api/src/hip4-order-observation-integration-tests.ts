@@ -1292,7 +1292,12 @@ try {
     ).rows[0].admissions;
     assert.equal(budget.length, 2);
     assert.equal(budget[0].weight, 2);
-    assert.equal(budget[1].weight, 120);
+    assert.equal(budget[1].reservedWeight, 120);
+    assert.equal(
+      budget[1].weight,
+      20,
+      "empty successful fill page uses its documented base weight",
+    );
     const accountRow = (
       await runtime.query(
         "select attempt_at,observed_at,observation from hip4_account_snapshots where environment='mainnet' and account_address=$1",

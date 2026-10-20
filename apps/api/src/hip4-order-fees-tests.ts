@@ -316,6 +316,74 @@ test("fresh fee reader uses common lifecycle and budget, not default rates or an
   );
 });
 
+test("an omitted deployer share uses first-party base-fee semantics, not a free close or another venue's scale", async () => {
+  const f = readerFixture();
+  const metadata = f.responses.outcomeMeta as {
+    feeScale?: string;
+    outcomes: { deployerFeeScale?: string }[];
+  };
+  delete metadata.outcomes[0].deployerFeeScale;
+  const observed = await readHip4OrderFeeObservation(
+    f.pool,
+    f.input,
+    f.fetcher,
+  );
+  assert.equal(observed.closing?.deployerFeeScale, "0");
+  assert.equal(
+    observed.closing?.deployerFeeScaleSource,
+    "official_ui_default_20261019",
+  );
+  const frozen = quote(observed);
+  assert.equal(frozen.currentRateUpperBound, "0.0007");
+  assert.equal(frozen.estimatedFeeAtLimitRaw, "70000");
+  assert.equal(
+    quote(observed, action("SELL", "Alo")).currentRateUpperBound,
+    "0.0004",
+  );
+  metadata.outcomes[0].deployerFeeScale = "1";
+  const current = await readHip4OrderFeeObservation(f.pool, f.input, f.fetcher);
+  assert.equal(current.closing?.deployerFeeScaleSource, "metadata");
+  assert.throws(
+    () => assertHip4CurrentFeeConsent(frozen, quote(current)),
+    /hip4_fee_consent_changed/u,
+    "a newly observed higher rate still requires a new review",
+  );
+});
+
+test("missing global fee scale stays unavailable, malformed deployer shares fail closed, and fresh terms recover", async () => {
+  const f = readerFixture();
+  const metadata = f.responses.outcomeMeta as {
+    feeScale?: unknown;
+    outcomes: { deployerFeeScale?: unknown }[];
+  };
+  delete metadata.feeScale;
+  await assert.rejects(
+    readHip4OrderFeeObservation(f.pool, f.input, f.fetcher),
+    /^Error: hip4_fee_terms_unavailable$/u,
+  );
+  assert.equal(f.calls.includes("userFees"), false);
+  const buy = await readHip4OrderFeeObservation(
+    f.pool,
+    { ...f.input, side: "BUY" },
+    f.fetcher,
+  );
+  assert.equal(quote(buy, action("BUY")).buyFeeCapRaw, "0");
+  metadata.feeScale = "1";
+  for (const malformed of [null, -1, "-1", "NaN", {}, ""]) {
+    metadata.outcomes[0].deployerFeeScale = malformed;
+    await assert.rejects(
+      readHip4OrderFeeObservation(f.pool, f.input, f.fetcher),
+    );
+  }
+  metadata.outcomes[0].deployerFeeScale = "1";
+  const recovered = await readHip4OrderFeeObservation(
+    f.pool,
+    f.input,
+    f.fetcher,
+  );
+  assert.equal(quote(recovered).currentRateUpperBound, "0.0014");
+});
+
 test("fee read failures, identity mismatches and slow IO never create a fresh zero fee", async (t) => {
   for (const field of [
     "userSpotCrossRate",

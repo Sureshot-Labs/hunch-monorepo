@@ -6,7 +6,7 @@ import {
   serializerCompiler,
   validatorCompiler,
 } from "fastify-type-provider-zod";
-import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
+import { DEFAULT_VENUE_LIFECYCLE_POLICY, hip4Identity } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { hip4OrderTestFixture } from "./hip4-order-test-fixture.js";
 import { registerHip4TradingRoutes } from "./routes/hip4-trading.js";
@@ -41,6 +41,7 @@ let secondMarket: Awaited<ReturnType<typeof hip4OrderTestFixture>> | undefined;
 let mode = "disabled";
 let legacyDexAbstraction: unknown = null;
 let cash = "10";
+let positionQuantity = "12";
 let failFacts = false;
 let failFeeOnly = false;
 let failCapacityOnly = false;
@@ -117,6 +118,22 @@ const fetcher: typeof fetch = async (_url, init) => {
     return Response.json({
       balances: [
         { coin: "USDC", token: 0, total: cash, hold: "0", entryNtl: "0" },
+        ...[fixture, secondMarket].flatMap((value) => {
+          if (!value) return [];
+          const identity = hip4Identity(
+            "mainnet",
+            Number(value.request.marketId.split(":").at(-1)),
+          );
+          return [
+            {
+              coin: identity.sides[0].tokenName,
+              token: identity.outcome * 10,
+              total: positionQuantity,
+              hold: "0",
+              entryNtl: "0",
+            },
+          ];
+        }),
       ],
     });
   if (request.type === "userFees")
@@ -425,71 +442,9 @@ try {
       Date.parse(beforeExpiry.providerCapacity.observedAt),
   );
 
-  // A known authoritative account refresh invalidates preview cash immediately.
-  await resetBudget();
-  const lease = await claimHip4AccountRefresh(
-    pool,
-    "mainnet",
-    owner.profile.address,
-    120000,
-    new Date(now),
-  );
-  assert.ok(lease);
-  cash = "20";
-  const observation = projectHip4Account({
-    environment: "mainnet",
-    observedAt: new Date(now).toISOString(),
-    role: "user",
-    mode: "disabled",
-    quote: {
-      tokenId: HYPERCORE_MAINNET_USDC.assetId,
-      index: 0,
-      weiDecimals: 8,
-    },
-    state: {
-      balances: [
-        { coin: "USDC", token: 0, total: cash, hold: "0", entryNtl: "0" },
-      ],
-    },
-  });
-  assert.equal(
-    await persistHip4AccountRefresh(pool, {
-      environment: "mainnet",
-      address: owner.profile.address,
-      lease,
-      observation,
-      executions: [],
-      ledger: [],
-      history: {},
-      error: null,
-    }),
-    true,
-  );
-  const postFunding = await ok();
-  assert.equal(postFunding.providerCapacity.availableRaw, "2000000000");
-
-  // Unobserved mode changes may remain bounded preview facts, but strict
-  // preparation MUST bypass them and use new role/mode provider reads.
-  mode = "unifiedAccount";
-  const preview = await ok();
-  await resetBudget();
-  const beforePrepare = calls.length;
-  const strict = await app.inject({
-    method: "POST",
-    url: "/orders/prepare",
-    payload: preview.preparationRequest,
-  });
-  assert.equal(strict.statusCode, 409, strict.body);
-  assert.equal(strict.json().error, "native_cash_mode_unsupported");
-  assert.ok(calls.slice(beforePrepare).includes("userRole"));
-  assert.ok(calls.slice(beforePrepare).includes("userAbstraction"));
-  mode = "disabled";
-
-  // A preparation/worker already observed qualified default cash. Under the
-  // same unchanged600 rolling window, background220 + prior interactive182
-  // leaves too little for another full204 BUY quote, but fresh public terms42
-  // fit. Keep all those admissions while exercising the actual HTTP route.
-  const savePreviewObservation = async (value: typeof observation) => {
+  const savePreviewObservation = async (
+    value: ReturnType<typeof projectHip4Account>,
+  ) => {
     const nextLease = await claimHip4AccountRefresh(
       pool,
       "mainnet",
@@ -512,6 +467,132 @@ try {
       true,
     );
   };
+  const disabledObservation = () =>
+    projectHip4Account({
+      environment: "mainnet",
+      observedAt: new Date(now).toISOString(),
+      role: "user",
+      mode: "disabled",
+      quote: {
+        tokenId: HYPERCORE_MAINNET_USDC.assetId,
+        index: 0,
+        weiDecimals: 8,
+      },
+      state: {
+        balances: [
+          { coin: "USDC", token: 0, total: cash, hold: "0", entryNtl: "0" },
+        ],
+      },
+    });
+  // A known authoritative account refresh invalidates preview cash immediately,
+  // but cannot extend or discard independently bounded fee terms.
+  await resetBudget();
+  cash = "20";
+  const observation = disabledObservation();
+  await savePreviewObservation(observation);
+  const beforeFundingRefresh = calls.length;
+  const postFunding = await ok();
+  assert.equal(postFunding.providerCapacity.availableRaw, "2000000000");
+  assert.equal(postFunding.fees.observedAt, afterExpiry.fees.observedAt);
+  assert.equal(postFunding.fees.expiresAt, afterExpiry.fees.expiresAt);
+  assert.equal(
+    calls.slice(beforeFundingRefresh).includes("outcomeMeta"),
+    false,
+    "account refresh must not discard already bounded BUY fee metadata",
+  );
+
+  // SELL refreshes exact owned-token capacity after each account generation.
+  // The new stock observation cannot trigger another user-fee/public-fee read,
+  // nor slide the original fee deadline as account snapshots keep arriving.
+  await resetBudget();
+  const sellRequest = { side: "SELL", consentedDebitCapRaw: "300000" } as const;
+  const beforeSellWarm = calls.length;
+  const sellWarm = await ok(sellRequest);
+  assert.equal(sellWarm.providerCapacity.availableRaw, "1200000");
+  assert.equal(
+    calls.slice(beforeSellWarm).filter((type) => type === "userFees").length,
+    1,
+  );
+  assert.equal(
+    calls.slice(beforeSellWarm).filter((type) => type === "outcomeMeta").length,
+    1,
+  );
+  for (const quantity of ["11", "10"]) {
+    now += 1000;
+    positionQuantity = quantity;
+    cash = String(Number(cash) + 1);
+    await savePreviewObservation(disabledObservation());
+    await resetBudget();
+    const beforeSnapshotChurn = calls.length;
+    const changedStock = await ok(sellRequest);
+    assert.equal(
+      changedStock.providerCapacity.availableRaw,
+      `${quantity}00000`,
+    );
+    assert.equal(changedStock.fees.observedAt, sellWarm.fees.observedAt);
+    assert.equal(changedStock.fees.expiresAt, sellWarm.fees.expiresAt);
+    assert.equal(
+      changedStock.fees.observationRevision,
+      sellWarm.fees.observationRevision,
+    );
+    assert.equal(
+      Date.parse(changedStock.expiresAt) <= Date.parse(sellWarm.fees.expiresAt),
+      true,
+    );
+    const refreshed = calls.slice(beforeSnapshotChurn);
+    assert.equal(refreshed.filter((type) => type === "userRole").length, 1);
+    assert.equal(
+      refreshed.filter((type) => type === "spotClearinghouseState").length,
+      1,
+    );
+    assert.equal(refreshed.filter((type) => type === "userFees").length, 0);
+    assert.equal(refreshed.filter((type) => type === "outcomeMeta").length, 0);
+    assert.equal(
+      await usedWeight(),
+      124,
+      "fresh book2 plus exact capacity122; unchanged fee60 remains bounded",
+    );
+  }
+  now = Date.parse(sellWarm.fees.expiresAt) + 1;
+  await resetBudget();
+  const beforeFeeExpiry = calls.length;
+  const expiredSell = await ok(sellRequest);
+  assert.equal(
+    calls.slice(beforeFeeExpiry).filter((type) => type === "userFees").length,
+    1,
+  );
+  assert.equal(
+    calls.slice(beforeFeeExpiry).filter((type) => type === "outcomeMeta")
+      .length,
+    1,
+  );
+  assert.ok(
+    Date.parse(expiredSell.fees.observedAt) >
+      Date.parse(sellWarm.fees.observedAt),
+  );
+
+  // Unobserved mode changes may remain bounded preview facts, but strict
+  // preparation MUST bypass them and use new role/mode provider reads.
+  await ok();
+  mode = "unifiedAccount";
+  const preview = await ok();
+  await resetBudget();
+  const beforePrepare = calls.length;
+  const strict = await app.inject({
+    method: "POST",
+    url: "/orders/prepare",
+    payload: preview.preparationRequest,
+  });
+  assert.equal(strict.statusCode, 409, strict.body);
+  assert.equal(strict.json().error, "native_cash_mode_unsupported");
+  assert.ok(calls.slice(beforePrepare).includes("userRole"));
+  assert.ok(calls.slice(beforePrepare).includes("userAbstraction"));
+  mode = "disabled";
+
+  // A preparation/worker already observed qualified default cash. Under the
+  // same unchanged600 rolling window, background220 + prior interactive182
+  // leaves too little for another full204 BUY quote, but fresh public terms42
+  // fit. Keep all those admissions while exercising the actual HTTP route.
   const qualifiedDefault = projectHip4Account({
     environment: "mainnet",
     observedAt: new Date(now - 1000).toISOString(),
@@ -537,6 +618,9 @@ try {
     },
   });
   mode = "default";
+  // Isolate this cold-fee scenario from the prior BUY preview; an account
+  // observation alone intentionally no longer invalidates fee facts.
+  await setReadPolicy({ quotePreviewCacheEntries: 59 });
   await savePreviewObservation(qualifiedDefault);
   await resetBudget();
   assert.equal(
@@ -597,7 +681,7 @@ try {
     await resetBudget();
     calls.length = 0;
     await ok();
-    assert.equal(await usedWeight(), 204);
+    assert.equal(await usedWeight(), 184);
     assert.equal(
       calls.includes("userRole"),
       true,

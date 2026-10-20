@@ -8,12 +8,39 @@ import {
 import { refreshHip4OwnedAccount } from "./services/hip4-account-service.js";
 import { runHip4OrderObservationPass } from "./services/hip4-order-observer.js";
 
+/** Cheap current-policy reads, without provider IO or API-wide secrets. The
+ * worker must reconsider a shortened interval or newly enabled scope now,
+ * rather than waiting behind a previously cached account due timestamp. */
+export async function readHip4FinancialReadCadence(pool: Pool) {
+  const [account, read] = await Promise.all([
+    readHip4AccountPolicy(pool),
+    // A broken account-read policy must not prevent observing an admitted
+    // order. Let the due account phase report its normal diagnostic failure.
+    readHip4Policy(pool, "accountRead").catch(() => null),
+  ]);
+  return {
+    nextIntervalSeconds: Math.ceil(
+      Math.min(
+        account.policy.workerIntervalMs,
+        account.policy.orderObservationIntervalMs,
+      ) / 1000,
+    ),
+    nextAccountIntervalSeconds: Math.ceil(
+      account.policy.workerIntervalMs / 1000,
+    ),
+    accountPolicyRevision: account.revision,
+    accountReadEnabled: read?.policy.enabled ?? true,
+    accountReadEnvironment: read?.policy.environment ?? null,
+  };
+}
+
 /** Existing finance-worker job/pool, not a second trading executor. Already
  * admitted orders remain observable after new-exposure/account-read disabling. */
 export async function runHip4FinancialReadPass(
   pool: Pool,
   fetcher?: typeof fetch,
   accountFirst = true,
+  options: { skipAccounts?: boolean } = {},
 ) {
   const orders = () =>
     runHip4OrderObservationPass(pool, fetcher).catch(() => ({
@@ -26,12 +53,24 @@ export async function runHip4FinancialReadPass(
   // Try both phases even if one policy/read fails. Priority is rotated by the
   // existing single-flight job so neither can monopolize the shared IP budget.
   const accounts = () =>
-    runHip4AccountReadPass(pool, fetcher).catch(() => null);
+    options.skipAccounts
+      ? Promise.resolve({
+          claimed: 0,
+          updated: 0,
+          errors: 0,
+          leaseLost: 0,
+          budgetExhausted: 0,
+        })
+      : runHip4AccountReadPass(pool, fetcher).catch(() => null);
   const first = accountFirst ? await accounts() : null;
   const orderObservation = await orders();
   const account = accountFirst ? first : await accounts();
   if (!account) throw new Error("hip4_account_observation_failed");
-  return { ...account, orderObservation };
+  return {
+    ...account,
+    orderObservation,
+    ...(await readHip4FinancialReadCadence(pool)),
+  };
 }
 
 // Materialize eligibility before the LIMIT row goal. Otherwise PostgreSQL can

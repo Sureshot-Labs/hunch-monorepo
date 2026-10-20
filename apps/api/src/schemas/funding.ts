@@ -75,19 +75,52 @@ const preparationStatusSchema = z.enum([
   "unavailable",
 ]);
 
+// Native holdings are projected from an owned account observation, not rows in
+// the UUID-keyed legacy position ledger. The runtime still recomputes this
+// reference from the verified wallet, environment and exact observed token.
+const nativePositionActionRefPattern = /^hyperliquid:[0-9a-f]{64}$/u;
+const preparationPositionActionRefSchema = z.union([
+  z.string().uuid(),
+  z.string().regex(nativePositionActionRefPattern),
+]);
+
+function refinePreparationPositionReference(
+  request: {
+    purpose: string;
+    marketContextId?: string | null;
+    positionActionRef?: string | null;
+  },
+  context: z.RefinementCtx,
+) {
+  if (
+    request.positionActionRef?.startsWith("hyperliquid:") &&
+    (request.purpose !== "sell" ||
+      !/^hyperliquid:mainnet:outcome:(0|[1-9]\d*)$/u.test(
+        request.marketContextId ?? "",
+      ))
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["positionActionRef"],
+      message:
+        "Native position references require SELL preparation for a canonical native market",
+    });
+  }
+}
+
 const preparationRequestBaseSchema = z
   .object({
     venueBindingOptionId: opaqueIdSchema,
     purpose: preparationPurposeSchema,
     marketContextId: marketReferenceSchema.nullable(),
     marketClass: z.string().trim().min(1).max(80).nullable(),
-    positionActionRef: z.string().uuid().nullable().optional(),
+    positionActionRef: preparationPositionActionRefSchema.nullable().optional(),
     controllerWalletRef: z.string().uuid().nullable().optional(),
   })
   .strict();
 
 export const fundingPreparationInspectRequestSchema =
-  preparationRequestBaseSchema;
+  preparationRequestBaseSchema.superRefine(refinePreparationPositionReference);
 
 export const fundingPreparationPrepareRequestSchema =
   preparationRequestBaseSchema
@@ -97,7 +130,8 @@ export const fundingPreparationPrepareRequestSchema =
       operationId: opaqueIdSchema.optional(),
       expectedInspectionRevision: opaqueIdSchema,
     })
-    .strict();
+    .strict()
+    .superRefine(refinePreparationPositionReference);
 
 export const actionSummarySchema = z
   .object({
@@ -943,11 +977,12 @@ export const fundingDestinationsQuerySchema = z
     purpose: preparationPurposeSchema.default("fund"),
     marketContextId: marketReferenceSchema.nullable().optional(),
     marketClass: z.string().trim().min(1).max(80).nullable().optional(),
-    positionActionRef: z.string().uuid().nullable().optional(),
+    positionActionRef: preparationPositionActionRefSchema.nullable().optional(),
     controllerWalletRef: z.string().uuid().nullable().optional(),
     refresh: z.enum(["true", "false"]).optional(),
   })
   .strict()
+  .superRefine(refinePreparationPositionReference)
   .refine(
     (query) =>
       query.refresh !== "true" ||

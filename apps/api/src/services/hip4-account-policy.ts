@@ -23,6 +23,20 @@ export const hip4AccountPolicySchema = z
     historyRepairMaxGapDetails: z.number().int().min(1).max(100).default(32),
     workerIntervalMs: z.number().int().min(1000).max(3_600_000).default(60_000),
     workerBatchSize: z.number().int().min(0).max(20).default(2),
+    // Already-admitted orders need a faster exact-status lane than account
+    // snapshots. Fill pages have a separate, heavier-weight retry cadence.
+    orderObservationIntervalMs: z
+      .number()
+      .int()
+      .min(1000)
+      .max(60_000)
+      .default(5000),
+    orderFillRepairIntervalMs: z
+      .number()
+      .int()
+      .min(1000)
+      .max(60_000)
+      .default(15_000),
     // Completed exact full-fill receipts are cold rechecks, not hot work on
     // every tick. One hot slot is always preserved inside workerBatchSize.
     completedOrderRecheckIntervalMs: z

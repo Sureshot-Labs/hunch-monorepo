@@ -44,6 +44,7 @@ const conflicts = new Set([
   "hip4_preparation_unavailable",
   "hip4_fee_preparation_required",
   "hip4_fee_consent_changed",
+  "hip4_fee_terms_unavailable",
   "hip4_market_unavailable",
   "hip4_fee_market_unavailable",
   "hip4_current_amounts_invalid",

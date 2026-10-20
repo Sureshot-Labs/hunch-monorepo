@@ -14,10 +14,11 @@ import {
 import {
   createHip4AccountClient,
   createHip4ReadClient,
+  HIP4_LEDGER_REQUEST_WEIGHT,
   Hip4ReadError,
 } from "./hip4-client.js";
 import {
-  admitHip4Request,
+  reserveHip4Request,
   readHip4Policy,
   readHip4Markets,
 } from "./hip4-repository.js";
@@ -53,6 +54,11 @@ import {
 import { projectHip4OpenOrders } from "./hip4-open-orders.js";
 import { projectHip4PerpsCash } from "./hip4-perps-cash.js";
 import type { Hip4DefaultSpotCashEvidence } from "./hip4-spot-cash-mode.js";
+import { proveHip4FillTailCoverage } from "./hip4-tail-history.js";
+import {
+  HIP4_ACCOUNT_CASH_REQUEST_WEIGHT,
+  reserveHip4AccountCashBudget,
+} from "./hip4-account-cash-budget.js";
 
 const boundedRows = z.array(z.record(z.string(), z.unknown())).max(2000);
 // Match transport admission: role + mode + spot metadata + spot/perps states
@@ -88,7 +94,7 @@ export async function refreshHip4OwnedAccount(input: {
 }) {
   const { pool, policy, address, now, lease, accountPolicy } = input;
   let historyOnly = false;
-  const admit = async (weight: number, background = false) => {
+  const recheckAdmissionPolicy = async () => {
     if (input.requireCurrentOwner || historyOnly) {
       const owned = await pool.query(
         `select 1 from user_wallets wallet_row
@@ -109,22 +115,36 @@ export async function refreshHip4OwnedAccount(input: {
       read.policy.environment !== policy.environment
     )
       throw new Error("account_read_disabled");
-    return admitHip4Request(
+    return read.policy;
+  };
+  const reserve = (
+    weight: number,
+    readPolicy: Hip4ReadPolicy,
+    background = false,
+  ) =>
+    reserveHip4Request(
       pool,
       policy.environment,
       weight,
-      read.policy.requestWeightPerMinute,
+      readPolicy.requestWeightPerMinute,
       background || input.background
         ? {
             scope: "background_repair",
-            maximum: hip4BackgroundRepairWeightLimit(read.policy),
-            backgroundMaximum: hip4BackgroundRequestWeightLimit(read.policy),
+            maximum: hip4BackgroundRepairWeightLimit(readPolicy),
+            backgroundMaximum: hip4BackgroundRequestWeightLimit(readPolicy),
           }
         : undefined,
     );
+  const admit = async (weight: number, background = false) => {
+    const readPolicy = await recheckAdmissionPolicy();
+    return reserve(weight, readPolicy, background);
   };
-  const accountRead = createHip4AccountClient(policy, admit, input.fetcher);
-  const publicRead = createHip4ReadClient(policy, admit, input.fetcher);
+  let cashBudget: Awaited<
+    ReturnType<typeof reserveHip4AccountCashBudget>
+  > | null = null;
+  const admitCash = async (weight: number) => {
+    return cashBudget ? cashBudget.admit(weight) : admit(weight);
+  };
   // Optional history work cannot consume the interactive reserve merely
   // because an explicit balance refresh initiated it. Deferred history keeps
   // its old facts/cursors; independently valid fresh cash is still persisted.
@@ -151,54 +171,76 @@ export async function refreshHip4OwnedAccount(input: {
   // Split phases only where that work cannot fit: larger existing budgets
   // keep their ordinary cash-refresh cadence and combined history pass.
   let splitBackgroundReads = false;
-  let deferCashOpenOrders = false;
   let historyIdentityVerified = false;
-  try {
-    const role = hip4AccountRoleSchema.parse(
-      await accountRead({ type: "userRole", user: address }),
-    );
-    if (role.role !== "user" && role.role !== "missing")
-      throw new Error("unsupported_account_role");
-    const mode = hip4AccountAbstractionSchema.parse(
-      await accountRead({ type: "userAbstraction", user: address }),
-    );
-    const defaultSpot = mode === "default" && role.role === "user";
-    splitBackgroundReads = Boolean(
+  const shouldSplit = (defaultSpot: boolean) =>
+    Boolean(
       input.background &&
       hip4BackgroundRepairWeightLimit(policy) <
         (defaultSpot
           ? DEFAULT_SPOT_CASH_WEIGHT + 20 + 120
           : STANDARD_CASH_AND_ONE_FILL_WEIGHT) +
-          (accountPolicy.ledgerRepairPagesPerRefresh > 0 ? 20 : 0),
+          (accountPolicy.ledgerRepairPagesPerRefresh > 0
+            ? HIP4_LEDGER_REQUEST_WEIGHT
+            : 0),
     );
-    historyOnly = Boolean(
-      splitBackgroundReads &&
-      previous?.observation &&
-      previous.history.nextBackgroundRead === "history",
-    );
-    if (splitBackgroundReads)
-      history.nextBackgroundRead = historyOnly ? "cash" : "history";
-    // At a 220-weight repair quota, default cash182 + open20 + ledger20
-    // cannot fit. Keep ledger repair in this cash phase; open orders still
-    // refresh in the alternating history phase, without raising any quota.
-    deferCashOpenOrders = Boolean(
-      defaultSpot &&
-      splitBackgroundReads &&
-      !historyOnly &&
-      accountPolicy.ledgerRepairPagesPerRefresh > 0 &&
-      hip4BackgroundRepairWeightLimit(policy) < DEFAULT_SPOT_CASH_WEIGHT + 40,
-    );
+  const retainedObservation = previous?.observation;
+  // This is historical evidence for an already observed exact-address snapshot,
+  // not a current balance/role/mode observation or permission to trade. Each IO
+  // still rechecks current local ownership and policy in admit(). No agent or
+  // master relationship is followed, and the query cannot pass the snapshot.
+  historyOnly = Boolean(
+    retainedObservation &&
+    previous?.history.nextBackgroundRead === "history" &&
+    shouldSplit(
+      retainedObservation.mode === "default" &&
+        retainedObservation.role === "user",
+    ),
+  );
+  try {
     if (historyOnly) {
-      // Fresh role/mode and ownership checks authorize only exact-address
-      // historical reads. Old cash is identity context, never a fresh balance.
-      if (
-        !previous?.observation ||
-        role.role !== previous.observation.role ||
-        mode !== previous.observation.mode
-      )
-        throw new Error("account_history_binding_changed");
+      splitBackgroundReads = true;
+      history.nextBackgroundRead = "cash";
       historyIdentityVerified = true;
     } else {
+      // Neither background work nor foreground UI polling may spend partial
+      // prefixes forever. Keep the older per-request recovery path only for a
+      // small interactive ceiling that fits Standard124 but not the unknown-
+      // mode182 reservation. Optional history keeps its background quota.
+      if (
+        input.background ||
+        policy.requestWeightPerMinute >= HIP4_ACCOUNT_CASH_REQUEST_WEIGHT
+      )
+        cashBudget = await reserveHip4AccountCashBudget({
+          background: Boolean(input.background),
+          recheck: recheckAdmissionPolicy,
+          reserve,
+        });
+      const cashDeadline = cashBudget
+        ? { deadlineMs: cashBudget.deadlineMs }
+        : undefined;
+      const accountRead = createHip4AccountClient(
+        policy,
+        admitCash,
+        input.fetcher,
+        cashDeadline,
+      );
+      const publicRead = createHip4ReadClient(
+        policy,
+        admitCash,
+        input.fetcher,
+        cashDeadline,
+      );
+      const role = hip4AccountRoleSchema.parse(
+        await accountRead({ type: "userRole", user: address }),
+      );
+      if (role.role !== "user" && role.role !== "missing")
+        throw new Error("unsupported_account_role");
+      const mode = hip4AccountAbstractionSchema.parse(
+        await accountRead({ type: "userAbstraction", user: address }),
+      );
+      const defaultSpot = mode === "default" && role.role === "user";
+      splitBackgroundReads = shouldSplit(defaultSpot);
+      if (splitBackgroundReads) history.nextBackgroundRead = "history";
       let defaultSpotCashEvidence: Hip4DefaultSpotCashEvidence | undefined;
       if (defaultSpot) {
         defaultSpotCashEvidence = {
@@ -281,11 +323,16 @@ export async function refreshHip4OwnedAccount(input: {
     }
   } catch (error) {
     errors.push(errorCode(error));
+  } finally {
+    // All mandatory cash IO has settled. Optional history below remains on its
+    // normal background quota and cannot consume this prepaid cash allowance.
+    await cashBudget?.settle();
   }
-  // Account binding/role is checked before history. A failed fresh account read
-  // does not allow following agent/master relationships or fabricating zeros.
+  // Current reads require a fresh account binding. Historical reads use only
+  // the retained exact snapshot and never follow agent/master relationships or
+  // turn that past binding into current cash or execution authority.
   if (observation || historyIdentityVerified) {
-    if (!deferCashOpenOrders) {
+    const refreshOpenOrders = async () => {
       try {
         history.openOrders = projectHip4OpenOrders(
           policy.environment,
@@ -298,11 +345,19 @@ export async function refreshHip4OwnedAccount(input: {
         history.openOrdersError = errorCode(error);
         errors.push(`open_orders_${errorCode(error)}`);
       }
-    }
-    const startTime = Math.max(0, now - accountPolicy.historyLookbackMs);
+    };
+    const historyThrough =
+      historyOnly && retainedObservation
+        ? Date.parse(retainedObservation.observedAt)
+        : now;
+    const startTime = Math.max(
+      0,
+      historyThrough - accountPolicy.historyLookbackMs,
+    );
     history.lookbackStart = new Date(startTime).toISOString();
     const refreshRecentFills = async () => {
       try {
+        const requestStartedAt = Date.now();
         const rows = boundedRows.parse(
           await historyRead({
             type: "userFills",
@@ -310,6 +365,29 @@ export async function refreshHip4OwnedAccount(input: {
             aggregateByTime: false,
           }),
         );
+        const receivedAt = Date.now();
+        const tailCoverage = observation
+          ? proveHip4FillTailCoverage({
+              environment: policy.environment,
+              address,
+              request: {
+                environment: policy.environment,
+                address,
+                startedAt: requestStartedAt,
+              },
+              snapshotTime: Date.parse(observation.observedAt),
+              receivedAt,
+              lookbackMs: accountPolicy.historyLookbackMs,
+              previous: history.fillRepair ?? previous?.history.fillRepair,
+              page: rows,
+            })
+          : null;
+        // A bridge must retain every new economic fact after its old proven
+        // end, even when that end predates the moving display lookback. Dropping
+        // an intervening exit/re-entry could falsely preserve same-size basis.
+        const captureFrom = tailCoverage
+          ? Math.min(startTime, tailCoverage.baseCoveredThrough)
+          : startTime;
         const selected = rows.filter(
           (row) => typeof row.coin === "string" && row.coin.startsWith("#"),
         );
@@ -318,13 +396,14 @@ export async function refreshHip4OwnedAccount(input: {
             entry: projectHip4Execution(policy.environment, address, row),
             source: row,
           }))
-          .filter((row) => row.entry.time >= startTime);
+          .filter((row) => row.entry.time >= captureFrom);
         if (projected.some((row) => row.entry.time > Date.now()))
           throw new Error("wrong_time_range");
         executions.push(...projected.map((row) => row.entry));
         executionSources.push(...projected.map((row) => row.source));
         history.executionsObservedAt = new Date(now).toISOString();
         history.fillsProviderCapped = rows.length >= 2000;
+        if (tailCoverage) history.fillsTailCoverage = tailCoverage;
       } catch (error) {
         errors.push(`fills_${errorCode(error)}`);
       }
@@ -334,7 +413,7 @@ export async function refreshHip4OwnedAccount(input: {
       let repair = planHip4LedgerRepair(
         previous?.history.ledgerRepair,
         accountPolicy.historyLookbackMs,
-        now,
+        historyThrough,
         accountPolicy.historyRepairMaxGapDetails,
       );
       try {
@@ -383,7 +462,7 @@ export async function refreshHip4OwnedAccount(input: {
         repair = planHip4FillRepair(
           previous?.history.fillRepair,
           accountPolicy.historyLookbackMs,
-          now,
+          historyThrough,
           accountPolicy.historyRepairMaxGapDetails,
         );
         for (
@@ -430,12 +509,12 @@ export async function refreshHip4OwnedAccount(input: {
       }
       if (repair) history.fillRepair = repair;
     };
-    // The history-only background phase fits one 120-weight fill read after
-    // its fresh binding checks. Rotate a derived scheduling hint even when
-    // admission/IO/validation fails; an unhealthy source must not monopolize
-    // every free budget window. This hint is never coverage or freshness proof:
-    // only successful reads update observations and inclusive repair cursors.
-    if (!splitBackgroundReads || historyOnly) {
+    if (historyOnly) {
+      // Only bounded historical sources belong in this phase. userFills and
+      // frontendOpenOrders observe the present, not the retained snapshot.
+      await refreshFillRepair();
+      await refreshLedger();
+    } else if (!splitBackgroundReads) {
       const repairFirst =
         accountPolicy.historyRepairPagesPerRefresh > 0 &&
         previous?.history.nextFillRead === "repair";
@@ -454,6 +533,11 @@ export async function refreshHip4OwnedAccount(input: {
       // untouched, so alternating phases cannot pin either fill source.
       await refreshLedger();
     }
+    // Current display history is optional and cannot consume the headroom
+    // needed to complete snapshot accounting. Strict financial capacity still
+    // comes from fresh spot holds, never this list. A denial preserves its
+    // previous timestamp/list; historical-only work never observes it.
+    if (!historyOnly) await refreshOpenOrders();
   }
   try {
     const saved = await persistHip4AccountRefresh(pool, {
@@ -616,6 +700,9 @@ export function createHip4OwnedAccountService(
           accountPolicy.leaseMs,
           new Date(now),
         );
+        // This authenticated foreground read honors snapshot TTL, but
+        // refresh=false is not background-service priority. Optional
+        // history and the periodic worker retain their separate quotas.
         if (lease)
           await refreshHip4OwnedAccount({
             pool,

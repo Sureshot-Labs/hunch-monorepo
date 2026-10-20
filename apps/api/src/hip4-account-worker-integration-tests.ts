@@ -128,7 +128,13 @@ try {
     "insert into runtime_policies(id,policy_key,payload,effective_at) values($1,'hip4_read',$3,clock_timestamp()-interval '1 second'),($2,'hip4_account',$4,clock_timestamp()-interval '1 second')",
     [
       ...policies,
-      { environment: "testnet", requestWeightPerMinute: 1200 },
+      {
+        environment: "testnet",
+        requestWeightPerMinute: 1200,
+        // Exercise the deliberately large combined-refresh configuration;
+        // ordinary defaults keep background repair at its smaller quota.
+        backgroundRequestWeightPerMinute: 600,
+      },
       {
         historyRepairPagesPerRefresh: 0,
         workerBatchSize: 1,

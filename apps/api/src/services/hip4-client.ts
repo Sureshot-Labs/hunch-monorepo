@@ -1,9 +1,19 @@
 import {
   hip4Identity,
   parseHip4Coin,
+  hip4TradeSchema,
   type Hip4ReadPolicy,
 } from "@hunch/shared";
+import { z } from "zod";
 import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
+import { hip4AccountFillSchema } from "./hip4-account-contract.js";
+
+export type Hip4InfoAdmissionReceipt = Readonly<{
+  reservedWeight: number;
+  settle: (actualWeight: number, deadlineMs?: number) => Promise<void>;
+}>;
+type Hip4InfoAdmission = boolean | Hip4InfoAdmissionReceipt;
+export const HIP4_LEDGER_REQUEST_WEIGHT = 45;
 
 export type Hip4AccountInfoRequest =
   | { type: "preTransferCheck"; user: string; source: string }
@@ -38,7 +48,7 @@ export type Hip4AccountInfoRequest =
 /** Owned account reads only; uses the same IP budget and bounded transport. */
 export function createHip4AccountClient(
   policy: Hip4ReadPolicy,
-  admit: (weight: number) => Promise<boolean>,
+  admit: (weight: number) => Promise<Hip4InfoAdmission>,
   fetcher: typeof fetch = fetch,
   options?: Readonly<{ deadlineMs: number }>,
 ) {
@@ -102,7 +112,13 @@ export function createHip4AccountClient(
           ? 2
           : request.type === "userFillsByTime" || request.type === "userFills"
             ? 120
-            : 20;
+            : request.type === "userNonFundingLedgerUpdates"
+              ? // Official Info pagination documents500 time-range elements;
+                // the rates page names nonUserFundingUpdates, not this exact
+                // wire type. Reserve the conservative20+ceil(500/20) bound,
+                // without claiming an exact small-response fee for this alias.
+                HIP4_LEDGER_REQUEST_WEIGHT
+              : 20;
     return hip4InfoResponse(
       policy,
       admit,
@@ -139,7 +155,7 @@ export class Hip4ReadError extends Error {
 
 export function createHip4ReadClient(
   policy: Hip4ReadPolicy,
-  admit: (weight: number) => Promise<boolean>,
+  admit: (weight: number) => Promise<Hip4InfoAdmission>,
   fetcher: typeof fetch = fetch,
   options?: Readonly<{ deadlineMs: number }>,
 ) {
@@ -180,7 +196,7 @@ export function createHip4ReadClient(
 
 async function hip4InfoResponse(
   policy: Hip4ReadPolicy,
-  admit: (weight: number) => Promise<boolean>,
+  admit: (weight: number) => Promise<Hip4InfoAdmission>,
   fetcher: typeof fetch,
   request: Hip4InfoRequest | Hip4AccountInfoRequest,
   weight: number,
@@ -194,10 +210,12 @@ async function hip4InfoResponse(
     return Math.min(policy.requestTimeoutMs, remaining);
   };
   remainingTimeout();
-  if (!(await admit(weight))) throw new Hip4ReadError("budget_exhausted");
+  const admission = await admit(weight);
+  if (!admission) throw new Hip4ReadError("budget_exhausted");
   // Admission may wait on the shared DB row. The absolute caller budget must
   // be rechecked AFTER that wait, at the actual transport boundary.
   const timeoutMs = remainingTimeout();
+  const transportDeadlineMs = Date.now() + timeoutMs;
   const endpoint =
     policy.environment === "mainnet"
       ? "https://api.hyperliquid.xyz/info"
@@ -229,7 +247,22 @@ async function hip4InfoResponse(
       }
       text += decoder.decode();
       try {
-        return JSON.parse(text);
+        const payload: unknown = JSON.parse(text);
+        const actualWeight = hip4SuccessfulResponseWeight(request, payload);
+        if (
+          typeof admission !== "boolean" &&
+          actualWeight !== null &&
+          actualWeight < admission.reservedWeight &&
+          Date.now() < transportDeadlineMs
+        ) {
+          try {
+            await admission.settle(actualWeight, transportDeadlineMs);
+          } catch {
+            // No accounting failure changes valid provider evidence into an
+            // HTTP/financial failure. Keep the complete reserved weight.
+          }
+        }
+        return payload;
       } catch {
         throw new Hip4ReadError("invalid_response");
       }
@@ -246,4 +279,54 @@ async function hip4InfoResponse(
         : "transport_error",
     );
   }
+}
+
+const generalFillSchema = hip4AccountFillSchema.extend({
+  coin: z.string().min(1),
+  px: z.string().regex(/^(0|[1-9]\d*)(\.\d+)?$/u),
+});
+
+/** Official REST weights count the FULL returned array, not a local display
+ * cap or selected coin. Only understood, uncapped successful wire pages can
+ * lower the conservative reservation. Unknown/malformed/capped data cannot. */
+export function hip4SuccessfulResponseWeight(
+  request: Hip4InfoRequest | Hip4AccountInfoRequest,
+  payload: unknown,
+): number | null {
+  if (!Array.isArray(payload) || payload.length >= 2000) return null;
+  if (request.type === "recentTrades") {
+    if (
+      payload.some((row) => {
+        const parsed = hip4TradeSchema.safeParse(row);
+        return (
+          !parsed.success ||
+          parsed.data.coin !== request.coin ||
+          parsed.data.time > Date.now()
+        );
+      })
+    )
+      return null;
+  } else if (
+    request.type === "userFills" ||
+    request.type === "userFillsByTime"
+  ) {
+    let previousTime =
+      request.type === "userFillsByTime" ? request.startTime : 0;
+    for (const row of payload) {
+      const parsed = generalFillSchema.safeParse(row);
+      if (!parsed.success || parsed.data.time > Date.now()) return null;
+      if (
+        parsed.data.coin.startsWith("#") &&
+        !hip4AccountFillSchema.safeParse(row).success
+      )
+        return null;
+      if (
+        request.type === "userFillsByTime" &&
+        (parsed.data.time < previousTime || parsed.data.time > request.endTime)
+      )
+        return null;
+      previousTime = parsed.data.time;
+    }
+  } else return null;
+  return 20 + Math.ceil(payload.length / 20);
 }

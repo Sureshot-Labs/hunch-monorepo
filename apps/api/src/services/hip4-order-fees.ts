@@ -52,13 +52,17 @@ export const hip4OrderFeeObservationSchema = z
     observedAt: z.string().datetime(),
     expiresAt: z.string().datetime(),
     marketRevision: z.string().min(1),
-    // Null for opening: missing closing multipliers do not make a known free
-    // opening unknown. SELL requires all of these actual provider facts.
+    // Null for opening. Closing retains actual global/account rates; an absent
+    // deployer scale follows the pinned first-party UI rule, never a free close.
     closing: z
       .object({
         userFees: userFeesSchema,
         feeScale: unsigned,
         deployerFeeScale: unsigned,
+        // Optional for compatibility with earlier explicit-metadata snapshots.
+        deployerFeeScaleSource: z
+          .enum(["metadata", "official_ui_default_20261019"])
+          .optional(),
       })
       .strict()
       .nullable(),
@@ -292,14 +296,35 @@ export async function readHip4OrderFeeObservation(
     })
   )
     throw new Error("hip4_fee_quote_identity_mismatch");
+  const closingScales =
+    side === "SELL"
+      ? z.object({ feeScale: unsigned, deployerFeeScale: unsigned }).safeParse({
+          feeScale: metadata.feeScale,
+          // Current official UI normalizes an absent deployer share to zero.
+          // g(0)=0+max(1,0)=1: the base protocol fee is NOT erased. This does
+          // not default the global scale or account rates. See pinned fixture
+          // official-ui-fee-default-20261019.json and its execution evidence.
+          deployerFeeScale:
+            outcomes[0].deployerFeeScale === undefined
+              ? "0"
+              : outcomes[0].deployerFeeScale,
+        })
+      : null;
+  // Missing global terms remain unavailable; malformed provider metadata was
+  // already rejected above. Never borrow another venue's observed multiplier.
+  if (closingScales && !closingScales.success)
+    throw new Error("hip4_fee_terms_unavailable");
   const closing =
     side === "SELL"
       ? {
           userFees: userFeesSchema.parse(
             await accountRead({ type: "userFees", user: address }),
           ),
-          feeScale: unsigned.parse(metadata.feeScale),
-          deployerFeeScale: unsigned.parse(outcomes[0].deployerFeeScale),
+          ...(closingScales?.success ? closingScales.data : {}),
+          deployerFeeScaleSource:
+            outcomes[0].deployerFeeScale === undefined
+              ? "official_ui_default_20261019"
+              : "metadata",
         }
       : null;
   const expiresAt = observedAt + account.policy.snapshotMaxAgeMs;
