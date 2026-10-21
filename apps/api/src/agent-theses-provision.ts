@@ -24,7 +24,9 @@ try {
       continue;
     }
     const match =
-      /^--(handle|name|bio|template|interests|approach|style)=(.+)$/s.exec(arg);
+      /^--(handle|name|bio|template|interests|approach|style|language|style-examples|max-thesis-characters)=(.+)$/s.exec(
+        arg,
+      );
     if (!match || flags.has(match[1]))
       throw new Error("Invalid or duplicate argument");
     flags.set(match[1], match[2]);
@@ -48,6 +50,11 @@ try {
         interests: flags.get("interests") ?? template?.interests,
         approach: flags.get("approach") ?? template?.approach,
         style: flags.get("style") ?? template?.style,
+        language: flags.get("language"),
+        styleExamples: flags.get("style-examples"),
+        maxThesisGraphemes: flags.has("max-thesis-characters")
+          ? Number(flags.get("max-thesis-characters"))
+          : undefined,
         paperAmountUsd: "100",
       },
     });

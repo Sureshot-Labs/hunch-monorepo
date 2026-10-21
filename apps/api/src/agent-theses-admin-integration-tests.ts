@@ -83,6 +83,8 @@ try {
 
   assert.deepEqual(state.policy.authors, []);
   assert.equal(state.templates.length, 3);
+  assert.equal(state.writingLimits.maxThesisGraphemes, 12000);
+  assert.equal(state.writingLimits.styleExamples, 12000);
   assert.ok(!JSON.stringify(state.templates).includes("handle"));
   const createUrl = `${root}/authors`;
   const settings = { ...agentFixtureAuthors[0] };
@@ -109,6 +111,12 @@ try {
   }
   const initialRevision = state.revision;
   const firstBody = bodyFor("Weather_One");
+  Object.assign(firstBody.settings, {
+    language: "Русский с английским сленгом",
+    styleExamples: "Хорошо: ".repeat(800),
+    style: "Пиши развёрнуто. ".repeat(200),
+    maxThesisGraphemes: 12000,
+  });
   const created = await app.inject({
     method: "POST",
     url: createUrl,
@@ -119,6 +127,11 @@ try {
   state = created.json();
   const politics = state.policy.authors[0]; // Identity is now an arbitrary user, not a topic.
   assert.equal(politics.enabled, false);
+  assert.equal(politics.style, firstBody.settings.style.trim());
+  assert.equal(politics.language, firstBody.settings.language);
+  assert.equal(politics.styleExamples, firstBody.settings.styleExamples.trim());
+  assert.equal(politics.maxThesisGraphemes, 12000);
+  assert.equal((await getState()).policy.authors[0].maxThesisGraphemes, 12000);
   assert.ok(politics.userId);
   assert.equal("specialization" in politics, false);
   assert.equal(state.profiles[0].handle, "weather_one");
