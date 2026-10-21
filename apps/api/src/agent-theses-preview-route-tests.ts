@@ -157,12 +157,17 @@ try {
       semanticRank: 1,
     },
   ];
+  report.reasonDetail =
+    "No grounded opinion after considering the alternatives";
+  report.writerCandidates = [{ marketId: "test:crypto", title: "Bitcoin" }];
   const enriched = await app.inject({
     url: `${root}/previews/${report.runId}`,
     headers: { "x-test-permissions": "intel:read" },
   });
   assert.deepEqual(enriched.json().shortlist, report.shortlist);
   assert.deepEqual(enriched.json().retrieval, report.retrieval);
+  assert.equal(enriched.json().reasonDetail, report.reasonDetail);
+  assert.deepEqual(enriched.json().writerCandidates, report.writerCandidates);
   assert.equal(
     (await app.inject({ url: `${root}/previews/${report.runId}` })).statusCode,
     401,

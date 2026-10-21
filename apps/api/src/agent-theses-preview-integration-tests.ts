@@ -108,7 +108,18 @@ const service = new AgentPreviewService({
     seenExamples = context.author.styleExamples;
     if (mode === "timeout") throw new Error("mock_timeout");
     if (writerEffect) await writerEffect();
-    const candidate = context.candidates[0];
+    const candidate = context.candidates[mode === "backup" ? 1 : 0];
+    if (mode === "backup") {
+      assert.equal(context.candidates.length, 2);
+      assert.equal(candidate.authorPublication.status, "first_publication");
+      assert.deepEqual(context.authorPublicationHistory, []);
+      assert.ok(
+        candidate.sources.every(
+          (source: { isAuthorPublication: boolean }) =>
+            source.isAuthorPublication === false,
+        ),
+      );
+    }
     const decision =
       mode === "skip"
         ? { decision: "skip", reason: "No supported distinct view" }
@@ -267,6 +278,10 @@ try {
   );
   assert.equal(success.retrieval?.poolCount, 1);
   assert.equal(success.reason, null);
+  assert.deepEqual(
+    success.writerCandidates?.map((c) => c.marketId),
+    [marketId],
+  );
   assert.equal(success.result?.simulation?.shares, "200");
   assert.equal(success.result?.outcomeLabel, "Agreement");
   assert.equal(success.cost.actualUsd, 0.011);
@@ -311,6 +326,8 @@ try {
     mode = scenario;
     const result = await run();
     assert.equal(result.reason, reason);
+    if (scenario === "skip")
+      assert.equal(result.reasonDetail, "No supported distinct view");
     if (scenario === "invalid_sources")
       assert.ok(
         result.result?.body,
@@ -321,6 +338,70 @@ try {
   const fallback = await run();
   assert.ok(fallback.result?.simulation);
   assert.ok(fallback.diagnostics.includes("jev_fallback:mock_timeout"));
+  // A normal Jev selection can be replaced by a supplied alternative, without
+  // another paid model call or any publication/selection-state mutations.
+  const backupMarketId = `preview:${randomUUID()}`;
+  const backupTokenId = `${backupMarketId}:YES`;
+  await pool.query(
+    "insert into unified_markets(id,venue,venue_market_id,event_id,title,description,category,status,market_type,outcomes) values($1,'limitless',$1,$2,'Alternative political deadline?','A signed decision before the specified deadline.','Politics','ACTIVE','binary','[\"Approved\",\"Not approved\"]')",
+    [backupMarketId, marketId],
+  );
+  await pool.query(
+    "insert into unified_tokens(token_id,venue,market_id,side) values($1,'limitless',$2,'YES')",
+    [backupTokenId, backupMarketId],
+  );
+  await pool.query(
+    "insert into unified_token_top_latest(token_id,venue,ts,best_ask) values($1,'limitless',clock_timestamp(),'0.5')",
+    [backupTokenId],
+  );
+  await pool.query(
+    "insert into ai_notes(note_key,note_type,status,title,description,source_kind,source_id,producer_type,producer_run_id) values($1,'signal','active','Shared Hunch context','A decision still requires implementation.','market',$1,'map_signals',$1)",
+    [backupMarketId],
+  );
+  const backupBefore = await snapshot();
+  const backupCallsBefore = calls;
+  mode = "backup";
+  const backup = await run();
+  assert.equal(
+    calls - backupCallsBefore,
+    2,
+    "one Jev call plus one writer call",
+  );
+  assert.equal(backup.writerCandidates?.length, 2);
+  assert.equal(
+    backup.selection?.marketId,
+    backup.writerCandidates?.[1].marketId,
+  );
+  assert.notEqual(
+    backup.selection?.marketId,
+    backup.writerCandidates?.[0].marketId,
+  );
+  assert.equal(backup.result?.simulation?.shares, "200");
+  assert.equal(
+    await snapshot(),
+    backupBefore,
+    "backup choice writes no PostgreSQL rows",
+  );
+  assert.equal(
+    await redis.get(`${AGENT_THESES_PREFIX}:cursor:${userId}`),
+    originalCursor,
+  );
+  assert.deepEqual(
+    await redis.zRangeWithScores(
+      `${AGENT_THESES_PREFIX}:considered:${userId}`,
+      0,
+      -1,
+    ),
+    originalConsidered,
+  );
+  await pool.query("delete from ai_notes where source_id=$1", [backupMarketId]);
+  await pool.query("delete from unified_token_top_latest where token_id=$1", [
+    backupTokenId,
+  ]);
+  await pool.query("delete from unified_tokens where token_id=$1", [
+    backupTokenId,
+  ]);
+  await pool.query("delete from unified_markets where id=$1", [backupMarketId]);
   mode = "publish";
   writerEffect = async () => {
     await pool.query(

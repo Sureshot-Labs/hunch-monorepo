@@ -347,6 +347,8 @@ export class AgentPreviewService {
             (authorReport.candidates as unknown[] | undefined)?.length ?? 0;
           report.shortlist =
             authorReport.shortlist as AgentPreview["shortlist"];
+          report.writerCandidates =
+            authorReport.writerCandidates as AgentPreview["writerCandidates"];
           report.selection =
             (authorReport.selection as AgentPreview["selection"]) ?? null;
           report.angle =
@@ -364,7 +366,10 @@ export class AgentPreviewService {
       if (!researched) {
         report.reason = String(authorReport.status ?? "no_candidates");
         const writer = authorReport.writer as { reason?: string } | undefined;
-        if (writer?.reason) report.diagnostics.push(writer.reason);
+        if (writer?.reason) {
+          report.reasonDetail = writer.reason;
+          report.diagnostics.push(writer.reason);
+        }
       } else {
         const { candidate, side, decision, provenance } = researched;
         report.stage = "validation";

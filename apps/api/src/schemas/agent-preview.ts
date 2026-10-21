@@ -56,6 +56,11 @@ export const agentPreviewSchema = z.object({
   status: z.enum(["running", "complete", "failed", "interrupted"]),
   stage: z.enum(["loading", "selection", "writing", "validation", "finished"]),
   reason: z.string().nullable(),
+  reasonDetail: z.string().max(1200).nullable().optional(),
+  writerCandidates: z
+    .array(z.object({ marketId: z.string(), title: z.string() }))
+    .max(3)
+    .optional(),
   diagnostics: z.array(z.string()),
   models: z.object({ jev: z.string(), writer: z.string() }),
   candidateCount: z.number(),

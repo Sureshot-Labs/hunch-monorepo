@@ -15,6 +15,8 @@ import {
   AGENT_WRITER_MAX_REQUEST_BYTES,
   createAgentModelClient,
   AGENT_TOPIC_FIT_RULES,
+  AGENT_EDITORIAL_RULES,
+  AGENT_HISTORY_RULES,
   selectAgentCandidate,
   writeAgentThesis,
   type AgentModelClient,
@@ -38,6 +40,7 @@ import {
 } from "./services/market-map.js";
 import { AGENT_THESES_PREFIX } from "./services/agent-theses-state.js";
 import { agentPoolOwnerIndex } from "./services/agent-theses-runner.js";
+import { researchAgent } from "./services/agent-theses-research.js";
 import {
   jevRequestModel,
   jevResponseModelMatches,
@@ -676,6 +679,8 @@ const writer: AgentModelClient = async (call) => {
   assert.ok(prompt.includes("not an accuracy/edge gate"));
   assert.ok(prompt.includes("Do not invent news"));
   assert.ok(prompt.includes(AGENT_TOPIC_FIT_RULES));
+  assert.ok(prompt.includes(AGENT_EDITORIAL_RULES));
+  assert.ok(prompt.includes(AGENT_HISTORY_RULES));
   assert.ok(!prompt.includes("Avoid certainty"));
   assert.ok(!prompt.includes("never forces a side"));
   return {
@@ -719,6 +724,215 @@ const outspoken = await writeAgentThesis({
   angle: "countercase",
 });
 assert.equal(outspoken.decision, "publish");
+// Production regression: shared Hunch interpretation is usable material, never
+// evidence that this agent has already published. These mocks verify payloads,
+// not the probability of a live model obeying the editorial instruction.
+const sharedCandidate = {
+  ...candidate,
+  sources: [
+    {
+      ...candidate.sources[0],
+      id: "hunch-note",
+      kind: "hunch_analysis" as const,
+      excerpt: "Shared deadline argument, not this author's publication.",
+    },
+  ],
+};
+await writeAgentThesis({
+  ...args,
+  candidates: [sharedCandidate],
+  history: [],
+  angle: "mechanism",
+  model: async (call) => {
+    const body = call.body as { messages: Array<{ content: string }> };
+    const supplied = JSON.parse(body.messages[1].content);
+    assert.deepEqual(supplied.authorPublicationHistory, []);
+    assert.deepEqual(supplied.candidates[0].authorPublication, {
+      status: "first_publication",
+      lastPublicationId: null,
+    });
+    assert.equal(supplied.candidates[0].sources[0].isAuthorPublication, false);
+    assert.ok(
+      body.messages[0].content.includes("do not say 'I already covered this'"),
+    );
+    assert.ok(
+      body.messages[0].content.includes(
+        "Write the thesis even when the observed ask exceeds",
+      ),
+    );
+    return {
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              ...decision,
+              sourceIds: ["hunch-note"],
+              maxEntryPrice: "0.4",
+            }),
+          },
+        },
+      ],
+    };
+  },
+});
+// One Jev + one writer call can choose a backup, with the backup's own sources
+// and history. A skip still ends the pass; no hidden paid retry loop.
+for (const skip of [false, true]) {
+  const candidates = Array.from({ length: 4 }, (_, i) => ({
+    ...candidate,
+    marketId: `backup:${i}`,
+    sides: candidate.sides.map((side) => ({
+      ...side,
+      instrument: { ...side.instrument, marketId: `backup:${i}` },
+    })),
+    sources: [{ ...candidate.sources[0], id: `source:${i}` }],
+  }));
+  const report: Record<string, unknown> = {};
+  const stages: string[] = [];
+  const history = [
+    {
+      id: "own-backup",
+      market_id: "backup:1",
+      outcome: "NO",
+      body: "My previous opposite view",
+      published_at: now,
+      buy_snapshot: {},
+    },
+  ];
+  const found = await researchAgent({
+    db: {
+      query: async (sql: string) => ({
+        rows: sql.includes("from user_theses") ? history : [],
+      }),
+    } as unknown as Parameters<typeof researchAgent>[0]["db"],
+    redis: {
+      zmScore: async () => [null, null, null, null],
+      zRange: async () => [],
+      get: async () => {
+        throw new Error("no_related_index");
+      },
+    } as unknown as Parameters<typeof researchAgent>[0]["redis"],
+    author: args.author,
+    policy,
+    revision: "test",
+    candidates,
+    freshMarketIds: [],
+    recent: [],
+    now: () => now,
+    report,
+    assertLease: async () => {},
+    onConsidered: async () => {},
+    onProgress: async () => {},
+    model: async (call) => {
+      stages.push(call.stage);
+      if (call.stage === "jev") return jev("c0");
+      const body = call.body as { messages: Array<{ content: string }> };
+      const supplied = JSON.parse(body.messages[1].content);
+      assert.deepEqual(
+        supplied.candidates.map((c: AgentCandidate) => c.marketId),
+        ["backup:0", "backup:1", "backup:2"],
+      );
+      assert.equal(
+        supplied.candidates[0].authorPublication.status,
+        "first_publication",
+      );
+      assert.equal(
+        supplied.candidates[1].authorPublication.lastPublicationId,
+        "own-backup",
+      );
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(
+                skip
+                  ? {
+                      decision: "skip",
+                      reason: "No supplied candidate supports an honest view",
+                    }
+                  : {
+                      ...decision,
+                      marketId: "backup:1",
+                      sourceIds: ["source:1"],
+                      changeReason:
+                        "The supplied counterargument changes my previous view",
+                    },
+              ),
+            },
+          },
+        ],
+      };
+    },
+  });
+  assert.deepEqual(stages, ["jev", "writer"]);
+  assert.equal((report.writerCandidates as unknown[]).length, 3);
+  if (skip) {
+    assert.equal(found, null);
+    assert.equal(report.status, "writer_skip");
+  } else {
+    assert.equal(found?.candidate.marketId, "backup:1");
+    assert.equal(
+      (report.selection as { marketId: string }).marketId,
+      "backup:1",
+    );
+    assert.equal(found?.provenance.previousThesisId, "own-backup");
+  }
+}
+// An alternative cannot cite another candidate's material or bypass its own
+// change-of-view requirement merely because it was not Jev's first choice.
+for (const [patch, expected] of [
+  [{ sourceIds: ["primary-only"] }, /writer_invalid_sources/],
+  [{ changeReason: null }, /writer_missing_change/],
+] as const) {
+  await assert.rejects(
+    writeAgentThesis({
+      ...args,
+      angle: "mechanism",
+      candidates: [
+        {
+          ...candidate,
+          sources: [{ ...candidate.sources[0], id: "primary-only" }],
+        },
+        {
+          ...candidate,
+          marketId: "guard:backup",
+          sources: [{ ...candidate.sources[0], id: "backup-only" }],
+        },
+      ],
+      history: [
+        {
+          id: "previous-backup",
+          marketId: "guard:backup",
+          side: "NO",
+          body: "Previous own view",
+          publishedAt: now.toISOString(),
+          argumentKey: null,
+        },
+      ],
+      model: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(
+                Object.assign(
+                  {},
+                  decision,
+                  {
+                    marketId: "guard:backup",
+                    sourceIds: ["backup-only"],
+                    changeReason: "New supplied counterargument",
+                  },
+                  patch,
+                ),
+              ),
+            },
+          },
+        ],
+      }),
+    }),
+    expected,
+  );
+}
 const expandedBody = "Это авторский взгляд, а не новость. ".repeat(140).trim();
 const oldExactBody =
   "Прежний подробный тезис на противоположной стороне. ".repeat(180);
@@ -744,10 +958,14 @@ const expanded = await writeAgentThesis({
     assert.ok(body.max_tokens >= 24000);
     assert.equal(supplied.author.styleExamples, expandedSettings.styleExamples);
     assert.equal(supplied.author.language, "Русский");
-    assert.equal(supplied.recentViews[0].body, oldExactBody);
-    assert.equal(supplied.recentViews[0].bodyIsExcerpt, false);
-    assert.equal(supplied.recentViews[1].body.length, 1600);
-    assert.equal(supplied.recentViews[1].bodyIsExcerpt, true);
+    assert.equal(supplied.authorPublicationHistory[0].body, oldExactBody);
+    assert.equal(supplied.authorPublicationHistory[0].bodyIsExcerpt, false);
+    assert.equal(supplied.authorPublicationHistory[1].body.length, 1600);
+    assert.equal(supplied.authorPublicationHistory[1].bodyIsExcerpt, true);
+    assert.equal(
+      supplied.candidates[0].authorPublication.lastPublicationId,
+      "history-0",
+    );
     assert.ok(
       Buffer.byteLength(JSON.stringify(body)) <= AGENT_WRITER_MAX_REQUEST_BYTES,
     );
@@ -777,12 +995,15 @@ await selectAgentCandidate({
     const body = call.body as {
       state: {
         author: object;
-        recentViews: Array<{ body: string; bodyIsExcerpt: boolean }>;
+        authorPublicationHistory: Array<{
+          body: string;
+          bodyIsExcerpt: boolean;
+        }>;
       };
     };
     assert.ok(!("styleExamples" in body.state.author));
-    assert.equal(body.state.recentViews[0].body.length, 800);
-    assert.equal(body.state.recentViews[0].bodyIsExcerpt, true);
+    assert.equal(body.state.authorPublicationHistory[0].body.length, 800);
+    assert.equal(body.state.authorPublicationHistory[0].bodyIsExcerpt, true);
     return jev("c0");
   },
 });
@@ -868,9 +1089,13 @@ assert.equal(
     .decision,
   "publish",
 );
+let actuallySent: string[] = [];
 await writeAgentThesis({
   ...args,
   angle: "mechanism",
+  onCandidates: async (sent) => {
+    actuallySent = sent.map((c) => c.marketId);
+  },
   candidates: Array.from({ length: 3 }, (_, i) => ({
     ...candidate,
     marketId: `large:${i}`,
@@ -884,6 +1109,10 @@ await writeAgentThesis({
     const body = call.body as { messages: Array<{ content: string }> };
     const supplied = JSON.parse(body.messages[1].content).candidates;
     assert.equal(supplied.length, 1);
+    assert.deepEqual(
+      actuallySent,
+      supplied.map((c: AgentCandidate) => c.marketId),
+    );
     assert.equal(
       supplied[0].condition.length,
       150000,
