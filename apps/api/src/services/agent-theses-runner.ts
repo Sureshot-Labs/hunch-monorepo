@@ -115,7 +115,6 @@ export async function runAgentTheses(input: {
       if (!author.enabled || !author.userId) continue;
       const authorReport: Record<string, unknown> = {
         userId: author.userId,
-        specialization: author.specialization,
         stage: "history",
         status: "not_attempted",
       };

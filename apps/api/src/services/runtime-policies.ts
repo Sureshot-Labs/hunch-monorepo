@@ -8,6 +8,7 @@ import {
   DEFAULT_AGENT_THESES_POLICY,
   agentThesesOverrideSchema,
   agentThesesPolicySchema,
+  normalizeAgentThesesPolicy,
   type AgentThesesPolicy,
 } from "./agent-theses-policy.js";
 import { DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS } from "./market-map-semantic-review.js";
@@ -3488,6 +3489,18 @@ function validateOverride<K extends IntelPolicyKey>(
   key: K,
   payload: unknown,
 ): { valid: boolean; value: Partial<IntelPolicyMap[K]> | null } {
+  if (key === "agent_theses") {
+    try {
+      return {
+        valid: true,
+        value: normalizeAgentThesesPolicy(payload) as unknown as Partial<
+          IntelPolicyMap[K]
+        >,
+      };
+    } catch {
+      return { valid: false, value: null };
+    }
+  }
   const schema = policySchemas[key];
   const parsed = schema.safeParse(sanitizeOverridePayload(key, payload));
   if (!parsed.success) return { valid: false, value: null };

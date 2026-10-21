@@ -11,7 +11,7 @@ import {
 import type { DbQuery } from "./db.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { registerAdminAgentThesesRoutes } from "./routes/admin-agent-theses.js";
-import { provisionAgentProfiles } from "./services/agent-theses-provision.js";
+import { agentFixtureAuthors } from "./fixtures/agent-theses-authors.js";
 
 const pool = await createIntegrationTestPool({ max: 1 });
 const client = await pool.connect();
@@ -73,14 +73,27 @@ try {
     create temporary table runtime_policies (like public.runtime_policies including all);
     alter table runtime_policies alter column created_at set default clock_timestamp();`);
   await app.ready();
-  for (const path of [root, `${root}/authors/{specialization}`])
+  for (const path of [root, `${root}/authors`])
     assert.ok(app.swagger().paths?.[path]);
   assert.equal((await app.inject({ url: root })).statusCode, 401);
   let state = await getState();
   assert.equal(state.policy.enabled, false);
   assert.equal(state.policy.writerModel, "openai/gpt-6.1-sol");
   assert.equal(state.profiles.length, 0);
-  const createUrl = `${root}/authors/politics`;
+
+  assert.deepEqual(state.policy.authors, []);
+  assert.equal(state.templates.length, 3);
+  assert.ok(!JSON.stringify(state.templates).includes("handle"));
+  const createUrl = `${root}/authors`;
+  const settings = { ...agentFixtureAuthors[0] };
+  const { userId: _id, enabled: _enabled, ...customSettings } = settings;
+  const bodyFor = (handle: string) => ({
+    revision: state.revision,
+    handle,
+    displayName: "Weather Oracle",
+    bio: "AI. Paper positions.",
+    settings: { ...customSettings, interests: "New York weather and rain" },
+  });
   for (const permissions of ["intel:read", "intel:write", "users:write"]) {
     assert.equal(
       (
@@ -88,29 +101,29 @@ try {
           method: "POST",
           url: createUrl,
           headers: { "x-test-permissions": permissions },
-          payload: { revision: state.revision },
+          payload: bodyFor("weather_one"),
         })
       ).statusCode,
       403,
     );
   }
   const initialRevision = state.revision;
+  const firstBody = bodyFor("Weather_One");
   const created = await app.inject({
     method: "POST",
     url: createUrl,
     headers,
-    payload: { revision: initialRevision },
+    payload: firstBody,
   });
   assert.equal(created.statusCode, 200, created.body);
   state = created.json();
-  assert.notEqual(state.revision, initialRevision);
-  const politics = state.policy.authors.find(
-    (a: { specialization: string }) => a.specialization === "politics",
-  );
+  const politics = state.policy.authors[0]; // Identity is now an arbitrary user, not a topic.
   assert.equal(politics.enabled, false);
   assert.ok(politics.userId);
-  assert.equal(state.profiles[0].handle, "hunch_politics");
+  assert.equal("specialization" in politics, false);
+  assert.equal(state.profiles[0].handle, "weather_one");
   assert.equal(state.policy.enabled, false);
+  assert.notEqual(state.revision, initialRevision);
   const user = (
     await client.query("select * from users where id=$1", [politics.userId])
   ).rows[0];
@@ -132,7 +145,7 @@ try {
         method: "POST",
         url: createUrl,
         headers,
-        payload: { revision: initialRevision },
+        payload: firstBody,
       })
     ).statusCode,
     409,
@@ -143,22 +156,21 @@ try {
         method: "POST",
         url: createUrl,
         headers,
-        payload: { revision: state.revision },
+        payload: bodyFor("WEATHER_ONE"),
       })
     ).statusCode,
     409,
   );
-
   const human = randomUUID();
   await client.query(
-    "insert into users(id,handle,display_name) values($1,'hunch_sports','Human')",
+    "insert into users(id,handle,display_name) values($1,'ordinary_user','Human')",
     [human],
   );
   const conflict = await app.inject({
     method: "POST",
-    url: `${root}/authors/sports`,
+    url: createUrl,
     headers,
-    payload: { revision: state.revision },
+    payload: bodyFor("ordinary_user"),
   });
   assert.equal(conflict.statusCode, 409, conflict.body);
   assert.equal(
@@ -167,17 +179,52 @@ try {
     false,
   );
   assert.equal((await getState()).revision, state.revision);
-  await client.query("delete from users where id=$1", [human]);
-
-  await provisionAgentProfiles(db, true, "crypto"); // Existing CLI-created profile can be connected.
-  const connected = await app.inject({
+  for (const handle of ["ab", "not-valid!", "x".repeat(21)]) {
+    const invalidHandle = await app.inject({
+      method: "POST",
+      url: createUrl,
+      headers,
+      payload: bodyFor(handle),
+    });
+    assert.equal(invalidHandle.statusCode, 400, invalidHandle.body);
+  }
+  for (const handle of [
+    "weather_two",
+    "musk_fan",
+    "musk_skeptic",
+    "rain_fan",
+  ]) {
+    const added = await app.inject({
+      method: "POST",
+      url: createUrl,
+      headers,
+      payload: bodyFor(handle),
+    });
+    assert.equal(added.statusCode, 200, added.body);
+    state = added.json();
+  }
+  assert.equal(state.policy.authors.length, 5);
+  assert.equal(state.profiles.length, 5);
+  assert.ok(
+    state.policy.authors.every((a: { enabled: boolean }) => !a.enabled),
+  );
+  assert.equal(
+    new Set(state.policy.authors.map((a: { userId: string }) => a.userId)).size,
+    5,
+  );
+  const failedAvatar = await app.inject({
     method: "POST",
-    url: `${root}/authors/crypto`,
+    url: createUrl,
     headers,
-    payload: { revision: state.revision },
+    payload: { ...bodyFor("bad_avatar"), avatarAssetId: randomUUID() },
   });
-  assert.equal(connected.statusCode, 200, connected.body);
-  state = connected.json();
+  assert.equal(failedAvatar.statusCode, 409, failedAvatar.body);
+  assert.equal((await getState()).revision, state.revision);
+  assert.equal(
+    (await client.query("select id from users where handle='bad_avatar'")).rows
+      .length,
+    0,
+  );
   const saveBody = () => ({
     revision: state.revision,
     policy: structuredClone(state.policy),
@@ -189,6 +236,77 @@ try {
       }),
     ),
   });
+  // Upgrade persisted v1 slots without new users or loss of configured identities/settings.
+  await client.query("savepoint legacy_agents");
+  const legacy = {
+    ...state.policy,
+    version: 1,
+    authors: agentFixtureAuthors.map((a, index) => {
+      const { interests: _interests, ...rest } = a;
+      return {
+        ...rest,
+        specialization: ["politics", "sports", "crypto"][index],
+        userId: index === 1 ? null : state.policy.authors[index].userId,
+        enabled: index === 0,
+        ...(index === 2 ? { interests: "Putin" } : {}),
+      };
+    }),
+  };
+  await client.query(
+    "insert into runtime_policies(policy_key,effective_at,payload) values('agent_theses',clock_timestamp(),$1::jsonb)",
+    [JSON.stringify(legacy)],
+  );
+  const upgraded = await getState();
+  assert.equal(upgraded.policy.version, 2);
+  assert.equal(upgraded.policy.authors.length, 2);
+  assert.equal(
+    upgraded.policy.authors[0].userId,
+    state.policy.authors[0].userId,
+  );
+  assert.equal(upgraded.policy.authors[0].enabled, true);
+  assert.equal(
+    upgraded.policy.authors[0].interests,
+    agentFixtureAuthors[0].interests,
+  );
+  assert.equal(upgraded.policy.authors[1].interests, "Putin");
+  const savedLegacy = await app.inject({
+    method: "PUT",
+    url: root,
+    headers,
+    payload: {
+      revision: upgraded.revision,
+      policy: upgraded.policy,
+      profiles: upgraded.profiles.map(
+        (p: { id: string; displayName: string; bio: string }) => ({
+          id: p.id,
+          displayName: p.displayName,
+          bio: p.bio,
+        }),
+      ),
+    },
+  });
+  assert.equal(savedLegacy.statusCode, 200, savedLegacy.body);
+  assert.deepEqual(savedLegacy.json().policy.authors, upgraded.policy.authors);
+  await client.query("rollback to savepoint legacy_agents");
+  await client.query("release savepoint legacy_agents");
+  assert.equal((await getState()).revision, state.revision);
+  for (const altered of ["remove", "append", "duplicate"]) {
+    const payload = saveBody();
+    if (altered === "remove") payload.policy.authors.pop();
+    if (altered === "append")
+      payload.policy.authors.push({
+        ...payload.policy.authors[0],
+        userId: human,
+      });
+    if (altered === "duplicate")
+      payload.policy.authors[1] = payload.policy.authors[0];
+    assert.equal(
+      (await app.inject({ method: "PUT", url: root, headers, payload }))
+        .statusCode,
+      400,
+      altered,
+    );
+  }
   const malicious = saveBody();
   malicious.policy.authors[0].userId = human;
   assert.equal(
@@ -398,7 +516,7 @@ try {
     ).statusCode,
     409,
   );
-  // Representative PK lookup: three requested users among many unrelated profiles.
+  // Representative PK lookup with many agents among 50k unrelated users.
   await client.query(
     `insert into users(display_name) select 'Unrelated fixture' from generate_series(1,50000)`,
   );
@@ -411,13 +529,19 @@ try {
       u.is_active,u.social_suspended_at is not null as suspended
     from users u left join content_assets a on a.id=u.avatar_asset_id and a.status='ready'
     where u.id=any($1::uuid[]) and u.is_agent order by u.id`,
-      [[politics.userId, state.policy.authors[2].userId, randomUUID()]],
+      [
+        Array.from(
+          { length: 1000 },
+          (_, i) => state.policy.authors[i]?.userId ?? randomUUID(),
+        ),
+      ],
     )
   ).rows[0]["QUERY PLAN"][0];
   assert.ok(JSON.stringify(plan).includes("Index"));
   console.log(
     JSON.stringify({
-      agentAdminUsers: 50002,
+      agentAdminUsers: 50006,
+      requestedAgentIds: 1000,
       lookupMs: plan["Execution Time"],
     }),
   );

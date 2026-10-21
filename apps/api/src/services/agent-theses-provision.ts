@@ -1,43 +1,41 @@
 import { tx, type Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
-import { SocialError } from "./social-primitives.js";
+import { resolveSocialPolicy } from "./social-policy.js";
+import {
+  normalizeSocialHandle,
+  socialText,
+  SocialError,
+} from "./social-primitives.js";
 
-export const AGENT_PROFILES = [
-  {
-    handle: "hunch_politics",
-    name: "Hunch Politics & Geopolitics",
-    specialization: "politics",
-    bio: "AI agent. Institutions, incentives and geopolitics. Paper positions, not real trades.",
-  },
-  {
-    handle: "hunch_sports",
-    name: "Hunch Sports",
-    specialization: "sports",
-    bio: "AI agent. Data-led views on matches and seasons. Paper positions, not real trades.",
-  },
-  {
-    handle: "hunch_crypto",
-    name: "Hunch Crypto",
-    specialization: "crypto",
-    bio: "AI agent. Catalysts, positioning and consensus checks. Paper positions, not real trades.",
-  },
-] as const;
+export type AgentProfileInput = { handle: string; name: string; bio: string };
 
-export async function provisionAgentAuthors(pool: Pool, execute = false) {
-  return tx(pool, (db) => provisionAgentProfiles(db, execute));
+export async function provisionAgentAuthors(
+  pool: Pool,
+  profiles: AgentProfileInput[],
+  execute = false,
+) {
+  return tx(pool, (db) => provisionAgentProfiles(db, profiles, execute));
 }
 
-/** Reused by the CLI and authenticated admin creation, inside their transaction. */
+/** Explicit profiles only; no default identities. Reused by CLI and admin transactions. */
 export async function provisionAgentProfiles(
   db: DbQuery,
+  input: AgentProfileInput[],
   execute: boolean,
-  specialization?: (typeof AGENT_PROFILES)[number]["specialization"],
 ) {
-  const profiles = AGENT_PROFILES.filter(
-    (p) => !specialization || p.specialization === specialization,
-  );
+  const { policy } = await resolveSocialPolicy(db);
+  const profiles = input.map((p) => ({
+    handle: normalizeSocialHandle(
+      p.handle,
+      policy.handleMinLength,
+      policy.handleMaxLength,
+    ),
+    name: socialText(p.name, policy.displayNameMaxGraphemes),
+    bio: socialText(p.bio, policy.bioMaxGraphemes, true),
+  }));
+  if (new Set(profiles.map((p) => p.handle)).size !== profiles.length)
+    throw new SocialError("agent_handle_conflict", 409);
   await db.query("set local lock_timeout='2s'");
-  // Serializes concurrent provisioning commands; human handle races still use the unique index.
   await db.query(
     "select pg_advisory_xact_lock(hashtext('agent_theses:provision'))",
   );
@@ -52,7 +50,6 @@ export async function provisionAgentProfiles(
       throw new SocialError(`agent_handle_owned_by_user:${row.handle}`, 409);
   const result: Array<{
     handle: string;
-    specialization: string;
     userId: string | null;
     action: string;
   }> = [];
@@ -71,11 +68,9 @@ export async function provisionAgentProfiles(
     }
     result.push({
       handle: profile.handle,
-      specialization: profile.specialization,
       userId,
       action: existing ? "unchanged" : execute ? "created" : "would_create",
     });
   }
-  // Deliberately no policy write: operator binds the returned IDs and separately enables publication.
   return { execute, authors: result };
 }

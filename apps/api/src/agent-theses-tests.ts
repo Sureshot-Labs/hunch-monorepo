@@ -1,8 +1,10 @@
+import { agentFixtureAuthors } from "./fixtures/agent-theses-authors.js";
 import assert from "node:assert/strict";
 import {
   DEFAULT_AGENT_THESES_POLICY,
   agentThesesPolicySchema,
   agentInterests,
+  normalizeAgentThesesPolicy,
 } from "./services/agent-theses-policy.js";
 import { validatePaperQuote } from "./services/agent-theses-publish.js";
 import {
@@ -38,7 +40,10 @@ import {
 } from "./lib/jev-model-identity.js";
 
 const now = new Date("2026-10-08T12:00:00Z");
-const policy = agentThesesPolicySchema.parse(DEFAULT_AGENT_THESES_POLICY);
+const policy = agentThesesPolicySchema.parse({
+  ...DEFAULT_AGENT_THESES_POLICY,
+  authors: agentFixtureAuthors,
+});
 assert.equal(
   adminIntelPolicyKeySchema.safeParse("agent_theses").success,
   false,
@@ -61,13 +66,42 @@ assert.equal(
   jevResponseModelMatches("typesafe/jev-1.14", "typesafe/jev-1.13-20260917"),
   false,
 );
-const legacyPolicy = agentThesesPolicySchema.parse({
+assert.deepEqual(DEFAULT_AGENT_THESES_POLICY.authors, []);
+assert.deepEqual(normalizeAgentThesesPolicy({}).authors, []);
+const legacyPolicy = normalizeAgentThesesPolicy({
   ...policy,
-  authors: policy.authors.map(({ interests: _interests, ...author }) => author),
+  version: 1,
+  authors: agentFixtureAuthors.map(
+    ({ interests: _interests, ...author }, index) => ({
+      ...author,
+      specialization: ["politics", "sports", "crypto"][index],
+      userId: index === 1 ? null : author.userId,
+    }),
+  ),
 });
+assert.equal(legacyPolicy.version, 2);
+assert.equal(legacyPolicy.authors.length, 2);
 assert.equal(
   agentInterests(legacyPolicy.authors[0]),
   policy.authors[0].interests,
+);
+assert.equal(legacyPolicy.authors[1].userId, policy.authors[2].userId);
+assert.equal("specialization" in legacyPolicy.authors[0], false);
+const manyAuthors = Array.from({ length: 10 }, (_, i) => ({
+  ...policy.authors[0],
+  userId: `00000000-0000-4000-8000-${String(i + 10).padStart(12, "0")}`,
+}));
+assert.equal(
+  agentThesesPolicySchema.parse({ ...policy, authors: manyAuthors }).authors
+    .length,
+  10,
+);
+assert.throws(() => normalizeAgentThesesPolicy({ version: 3 }));
+assert.throws(() =>
+  agentThesesPolicySchema.parse({
+    ...policy,
+    authors: [{ ...policy.authors[0], userId: null }],
+  }),
 );
 assert.throws(() =>
   agentThesesPolicySchema.parse({
