@@ -20,6 +20,10 @@ import {
   loadAgentResearchContext,
   agentFailureCode as failureCode,
 } from "./agent-theses-research.js";
+import {
+  createAgentInterestEmbedder,
+  type AgentInterestEmbedder,
+} from "./agent-theses-retrieval.js";
 
 /** Least-recent ownership is fair even when peers are ready at different cadences. */
 export function agentPoolOwnerIndex(
@@ -38,6 +42,7 @@ export async function runAgentTheses(input: {
   apiKey: string;
   limitlessPositionContract?: string;
   model?: AgentModelClient;
+  embed?: AgentInterestEmbedder;
   now?: () => Date;
 }) {
   const { policy, revision } = await resolveAgentThesesPolicy(input.db);
@@ -81,6 +86,20 @@ export async function runAgentTheses(input: {
         report.calls.push(record);
       },
     });
+  const embed =
+    input.embed ??
+    (!input.model && input.apiKey
+      ? createAgentInterestEmbedder({
+          apiKey: input.apiKey,
+          runId: state.runId,
+          reserve: (id, amount, metadata) =>
+            state.reserve(id, amount, policy.dayBudgetUsd, metadata),
+          settle: (id, amount) => state.settle(id, amount),
+          record: (record) => {
+            report.calls.push(record);
+          },
+        })
+      : undefined);
   try {
     await state.record(report);
     const ready: Array<{
@@ -143,20 +162,24 @@ export async function runAgentTheses(input: {
       }),
     );
     const owner = ready.find((row) => row.index === ownerIndex) ?? ready[0];
-    const { pool, context } = await loadAgentResearchContext({
+    const ordered = [owner, ...ready.filter((row) => row !== owner)];
+    const { pool, context, retrieval } = await loadAgentResearchContext({
       ...input,
       userId: owner.author.userId,
       maxMarkets: policy.maxMarkets,
       maxQuoteAgeSeconds: social.policy.markMaxAgeSeconds,
       now: input.now?.(),
+      authors: ordered.map((row) => row.author),
+      embed,
+      assertLease: () => state.assertLease(),
     });
+    owner.authorReport.retrieval = retrieval.stats;
     report.diagnostics.push(...pool.diagnostics);
     report.diagnostics.push(...context.diagnostics);
     report.candidates = context.candidates.map((c) => c.marketId);
     owner.authorReport.poolOwner = true;
     // One shared bounded/hydrated pool, independent progress per author.
     // Process its owner first so budget exhaustion cannot consume their unseen page.
-    const ordered = [owner, ...ready.filter((row) => row !== owner)];
     let cursorSaved = false;
     const consumePool = async (userId: string) => {
       if (cursorSaved || userId !== owner.author.userId) return;
@@ -177,6 +200,7 @@ export async function runAgentTheses(input: {
           recent,
           candidates: context.candidates,
           freshMarketIds: pool.freshMarketIds,
+          semanticMarketIds: retrieval.byAuthor[author.userId],
           assertLease: () => state.assertLease(),
           onConsidered: async (ids) => {
             if (ids.length) await state.considered(author.userId, ids);

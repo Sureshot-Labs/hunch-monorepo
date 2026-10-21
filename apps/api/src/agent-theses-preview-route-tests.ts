@@ -140,6 +140,29 @@ try {
   });
   assert.equal(read.statusCode, 200);
   assert.equal(read.headers["cache-control"], "private, no-store");
+  assert.equal(read.json().shortlist, undefined, "old preview remains valid");
+  report.retrieval = {
+    poolCount: 120,
+    semanticPoolCount: 60,
+    cacheHits: 1,
+    generated: 0,
+    durationMs: 42,
+  };
+  report.shortlist = [
+    {
+      marketId: "test:crypto",
+      title: "Bitcoin",
+      eventTitle: "Crypto",
+      category: "Crypto",
+      semanticRank: 1,
+    },
+  ];
+  const enriched = await app.inject({
+    url: `${root}/previews/${report.runId}`,
+    headers: { "x-test-permissions": "intel:read" },
+  });
+  assert.deepEqual(enriched.json().shortlist, report.shortlist);
+  assert.deepEqual(enriched.json().retrieval, report.retrieval);
   assert.equal(
     (await app.inject({ url: `${root}/previews/${report.runId}` })).statusCode,
     401,
@@ -153,6 +176,8 @@ try {
     "language",
     "draftText",
     "reservedUsd",
+    "retrieval",
+    "semanticRank",
   ])
     assert.ok(operation.includes(field), field);
   assert.ok(paths?.[`${root}/previews/{runId}`]);

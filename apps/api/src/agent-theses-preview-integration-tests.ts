@@ -258,6 +258,14 @@ try {
   releaseGate();
   const success = await wait(first.runId);
   assert.equal(success.status, "complete");
+  assert.equal(success.shortlist?.length, success.shortlistCount);
+  assert.equal(success.shortlist?.[0].marketId, marketId);
+  assert.equal(
+    success.retrieval?.generated,
+    0,
+    "missing optional index incurs no embedding call",
+  );
+  assert.equal(success.retrieval?.poolCount, 1);
   assert.equal(success.reason, null);
   assert.equal(success.result?.simulation?.shares, "200");
   assert.equal(success.result?.outcomeLabel, "Agreement");

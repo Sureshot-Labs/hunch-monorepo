@@ -14,6 +14,7 @@ import {
   agentModelReserveUsd,
   AGENT_WRITER_MAX_REQUEST_BYTES,
   createAgentModelClient,
+  AGENT_TOPIC_FIT_RULES,
   selectAgentCandidate,
   writeAgentThesis,
   type AgentModelClient,
@@ -299,6 +300,51 @@ const interestShortlist = selectAgentShortlist(
   "Elon Musk Tesla",
 );
 assert.equal(interestShortlist[0].marketId, "musk");
+assert.equal(
+  selectAgentShortlist(
+    customTopics,
+    freshIds,
+    customTopics.map(() => null),
+    24,
+    "Локальная погода",
+    ["weather"],
+  ).at(0)?.marketId,
+  "weather",
+  "semantic match survives language mismatch",
+);
+const mixedMap = new Map<string, string>([
+  [marketMapActiveKey(), "mixed"],
+  [
+    marketMapRunNodesGlobalKey("mixed"),
+    JSON.stringify([{ id: "leaf", childIds: [] }]),
+  ],
+  [
+    marketMapRunNodeEventsKey("mixed", "leaf"),
+    JSON.stringify([{ eventId: "rotation" }]),
+  ],
+]);
+const mixedPool = await loadAgentMarketPool(
+  {
+    query: async (sql: string) => ({
+      rows: sql.includes("recent_notes")
+        ? Array.from({ length: 30 }, (_, i) => ({ source_id: `fresh:${i}` }))
+        : Array.from({ length: 30 }, (_, i) => ({ id: `rotation:${i}` })),
+    }),
+  } as unknown as Parameters<typeof loadAgentMarketPool>[0],
+  {
+    get: async (key: string) => mixedMap.get(key) ?? null,
+  } as unknown as Parameters<typeof loadAgentMarketPool>[1],
+  120,
+  "owner",
+  Array.from({ length: 60 }, (_, i) => `semantic:${i}`),
+);
+assert.equal(mixedPool.marketIds.length, 120);
+for (const group of ["semantic:", "fresh:", "rotation:"])
+  assert.ok(mixedPool.marketIds.some((id) => id.startsWith(group)));
+assert.equal(
+  mixedPool.marketIds.filter((id) => id.startsWith("semantic:")).length,
+  60,
+);
 assert.ok(
   interestShortlist.some((c) => c.marketId !== "musk"),
   "Interest boosts never remove exploration",
@@ -590,6 +636,37 @@ assert.equal(
 await assert.rejects(
   selectAgentCandidate({ ...args, model: async () => jev("invented") }),
 );
+// Screenshot regression: the contract topic, not generic macro impact, must fit.
+// The mock verifies the prompt/none contract; it is not a live quality evaluation.
+const offTopic = await selectAgentCandidate({
+  ...args,
+  author: {
+    ...args.author,
+    interests: "Crypto, Bitcoin, protocols and token positioning",
+  },
+  candidates: [
+    {
+      ...candidate,
+      title: "No Hormuz Agreement",
+      category: "Politics",
+      condition: "Will the Senate approve the Hormuz Agreement by October 23?",
+    },
+  ],
+  model: async (call) => {
+    const body = call.body as {
+      questions: {
+        market: { instructions: string; criteria: Record<string, string> };
+      };
+    };
+    assert.ok(
+      body.questions.market.instructions.includes(AGENT_TOPIC_FIT_RULES),
+    );
+    assert.ok(body.questions.market.criteria.none.includes("off-topic"));
+    assert.ok(body.questions.market.criteria.c0.includes("generic downstream"));
+    return jev("none");
+  },
+});
+assert.equal(offTopic.candidate, null);
 const writer: AgentModelClient = async (call) => {
   assert.equal(call.stage, "writer");
   assert.ok(!("tools" in (call.body as object)));
@@ -598,6 +675,7 @@ const writer: AgentModelClient = async (call) => {
   assert.ok(prompt.includes("profanity are allowed"));
   assert.ok(prompt.includes("not an accuracy/edge gate"));
   assert.ok(prompt.includes("Do not invent news"));
+  assert.ok(prompt.includes(AGENT_TOPIC_FIT_RULES));
   assert.ok(!prompt.includes("Avoid certainty"));
   assert.ok(!prompt.includes("never forces a side"));
   return {

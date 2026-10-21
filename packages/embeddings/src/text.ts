@@ -328,17 +328,26 @@ export function buildNewsEmbeddingText(
   summary: string | null | undefined,
   generation: EmbeddingGeneration,
 ): string {
+  return buildNewsEmbeddingInput(headline, summary, generation).text;
+}
+
+/** Query-space rendering with an exact truncation flag, including adapter tokens. */
+export function buildNewsEmbeddingInput(
+  headline: string,
+  summary: string | null | undefined,
+  generation: EmbeddingGeneration,
+): { text: string; truncated: boolean } {
   // Legacy callers used raw headline + summary. Keep its old space unchanged for pinned old maps.
   const text = generation.legacy
     ? `${headline}${summary ? ` ${summary}` : ""}`
     : distinct([headline, summary ?? ""]).join("\n");
-  return adapted(
-    truncateToFit(
-      text,
-      (value) => adapted(value, generation, true),
-      generation,
-    ),
+  const bounded = truncateToFit(
+    text,
+    (value) => adapted(value, generation, true),
     generation,
-    true,
   );
+  return {
+    text: adapted(bounded, generation, true),
+    truncated: bounded !== text,
+  };
 }

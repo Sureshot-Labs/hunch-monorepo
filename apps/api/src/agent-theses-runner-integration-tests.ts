@@ -25,6 +25,7 @@ import {
 import {
   loadAgentMarketPool,
   loadAgentCandidates,
+  enrichAgentSelectedContext,
 } from "./services/agent-theses-context.js";
 import { EMBEDDING_ACTIVE_KEY } from "@hunch/embeddings";
 import type { AgentModelClient } from "./services/agent-theses-model.js";
@@ -568,6 +569,69 @@ try {
     limitlessPositionContract: resolveLimitlessPositionContract(),
   });
   assert.equal(maxCandidates.candidates.length, 120);
+  // Deep context reads only selected markets; newest opposite view survives a
+  // long same-side history and future notes cannot leak into the context.
+  const deepClock = new Date();
+  await db.query(
+    `insert into ai_notes(note_key,note_type,status,title,description,direction,source_kind,source_id,producer_type,producer_run_id,created_at)
+     select $1||':deep:'||sample.seq,'signal','active','Interpretation','Saved argument',
+       case when sample.seq=8 then 'down' else 'up' end,'market',$2,'map_signals',$1,
+       $3::timestamptz-sample.seq*interval '1 second'
+     from generate_series(1,5000) sample(seq)`,
+    [prefix, maxSet[0], deepClock],
+  );
+  await db.query(
+    `insert into ai_notes(note_key,note_type,status,title,description,direction,source_kind,source_id,producer_type,producer_run_id,created_at)
+     values($1,'signal','active','Future note','Must be excluded','down','market',$2,'map_signals',$1,$3::timestamptz+interval '1 day')`,
+    [`${prefix}:future`, maxSet[0], deepClock],
+  );
+  await db.query("analyze ai_notes");
+  const deep = await enrichAgentSelectedContext({
+    db,
+    redis,
+    candidates: maxCandidates.candidates.slice(0, 1),
+    now: deepClock,
+  });
+  assert.ok(!deep.diagnostics.includes("stored_notes_unavailable"));
+  assert.equal(deep.candidates.length, 1);
+  assert.ok(
+    deep.candidates[0].sources.some((s) =>
+      s.excerpt.includes("[Prior NO interpretation]"),
+    ),
+  );
+  assert.ok(deep.candidates[0].sources.every((s) => s.title !== "Future note"));
+  assert.deepEqual(
+    deep.candidates[0].sides,
+    maxCandidates.candidates[0].sides,
+    "enrichment cannot change accepted quote/instrument",
+  );
+  assert.equal(
+    (
+      await enrichAgentSelectedContext({
+        db,
+        redis,
+        candidates: maxCandidates.candidates,
+        now: deepClock,
+      })
+    ).candidates.length,
+    3,
+  );
+  const noteRead = [...readQueries.values()].find((q) =>
+    q.sql.includes("note_row.*"),
+  );
+  assert.ok(noteRead);
+  // The same changed SQL is exercised at max pool size/deep limit and an empty tail.
+  await db.query(noteRead.sql, [maxSet, deepClock, 12]);
+  assert.equal(
+    (
+      await db.query(`${noteRead.sql} /* empty-tail plan */`, [
+        [`${prefix}:missing`],
+        deepClock,
+        12,
+      ])
+    ).rows.length,
+    0,
+  );
   // Exercise a full exact-contract history lookup including contracts never published.
   const historyQuery = [...readQueries.keys()].find((sql) =>
     sql.includes("distinct on (market_id)"),
