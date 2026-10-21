@@ -60,6 +60,28 @@ export const agentPreviewSchema = z.object({
   models: z.object({ jev: z.string(), writer: z.string() }),
   candidateCount: z.number(),
   shortlistCount: z.number(),
+  // Optional for recovery of previews created by an older API image.
+  retrieval: z
+    .object({
+      poolCount: z.number(),
+      semanticPoolCount: z.number(),
+      cacheHits: z.number(),
+      generated: z.number(),
+      durationMs: z.number(),
+    })
+    .optional(),
+  shortlist: z
+    .array(
+      z.object({
+        marketId: z.string(),
+        title: z.string(),
+        eventTitle: z.string(),
+        category: z.string(),
+        semanticRank: z.number().int().positive().nullable(),
+      }),
+    )
+    .max(24)
+    .optional(),
   selection: agentPreviewMarketSchema.nullable(),
   angle: z.string().nullable(),
   draftText: z.string().max(120000).nullable(),

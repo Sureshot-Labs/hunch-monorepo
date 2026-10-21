@@ -26,6 +26,7 @@ import { SOCIAL_PUBLIC_AI } from "./social-visibility.js";
 import type { AgentRedis } from "./agent-theses-state.js";
 import { AGENT_THESES_PREFIX } from "./agent-theses-state.js";
 import { validatePaperQuote } from "./agent-theses-publish.js";
+import { relatedAgentMarkets } from "./agent-theses-retrieval.js";
 
 export type AgentCandidate = {
   marketId: string;
@@ -70,6 +71,7 @@ export async function loadAgentMarketPool(
   redis: AgentRedis,
   maximum: number,
   ownerUserId?: string,
+  interestMarketIds: string[] = [],
 ) {
   const diagnostics: string[] = [];
   const fresh = (
@@ -82,12 +84,16 @@ export async function loadAgentMarketPool(
   ).rows.map((row) => String(row.source_id));
   // Reserve a rotation slot even for small configured pools. A one-slot pool
   // walks the map; fresh notes still fill it when the map is unavailable.
+  const interestIds = [...new Set(interestMarketIds)].slice(
+    0,
+    Math.floor(maximum / 2),
+  );
   const freshQuota = Math.min(
     30,
-    Math.max(0, maximum - 1),
+    Math.max(0, maximum - interestIds.length - 1),
     Math.max(1, Math.floor(maximum / 4)),
   );
-  const ids = new Set(fresh.slice(0, freshQuota));
+  const ids = new Set([...interestIds, ...fresh.slice(0, freshQuota)]);
   const runId = await redis.get(marketMapActiveKey());
   const stored = json<Partial<Cursor>>(
     await redis.get(
@@ -275,12 +281,47 @@ export async function loadAgentCandidates(input: {
       url: null,
       asOf: now.toISOString(),
     });
+  diagnostics.push(
+    ...(await attachAgentStoredNotes(input.db, [...candidates.values()], now)),
+  );
+  try {
+    diagnostics.push(
+      ...(await attachStoredNews(input.redis, [...candidates.values()], now)),
+    );
+  } catch {
+    diagnostics.push("stored_background_unavailable");
+  }
+  return {
+    candidates: input.marketIds.flatMap((id) => {
+      const candidate = candidates.get(id);
+      return candidate ? [candidate] : [];
+    }),
+    diagnostics,
+  };
+}
+
+async function attachAgentStoredNotes(
+  db: DbQuery,
+  items: AgentCandidate[],
+  now: Date,
+  deep = false,
+) {
+  // Persisted map/holder directions are up/down/mixed, not trade outcomes.
+  const directionSide = (direction: unknown) =>
+    direction === "up" || direction === "YES"
+      ? "YES"
+      : direction === "down" || direction === "NO"
+        ? "NO"
+        : null;
+  const candidates = new Map(items.map((c) => [c.marketId, c]));
+  const diagnostics: string[] = [];
+  if (!items.length) return diagnostics;
   try {
     const notes = (
-      await input.db.query(
+      await db.query(
         `select requested.market_id,note_row.* from unnest($1::text[]) requested(market_id)
        cross join lateral (
-         select n.id,n.title,n.description,n.created_at,n.metrics->'sides' as holder_sides,
+         select n.id,n.title,n.description,n.direction,n.created_at,n.metrics->'sides' as holder_sides,
            coalesce(n.metrics#>'{publicContextV1,caveats}',n.model_meta->'caveats') as caveats,
            n.model_meta->'public_source_citations' as cited_sources
          from (select * from ai_notes
@@ -288,19 +329,44 @@ export async function loadAgentCandidates(input: {
            order by created_at desc limit 12) n
          where n.status='active' and (
            (n.producer_type='map_signals' and n.note_type='signal') or (${SOCIAL_PUBLIC_AI}))
-         order by n.created_at desc limit 2
+         order by n.created_at desc limit $3
        ) note_row`,
-        [[...candidates.keys()], now],
+        [[...candidates.keys()], now, deep ? 12 : 2],
       )
     ).rows;
-    for (const note of notes) {
+    // Include the newest opposite interpretation when available, not only a
+    // chronological stack of the same direction. It remains Hunch opinion.
+    const selectedNotes = deep
+      ? items.flatMap((c) => {
+          const rows = notes.filter((n) => n.market_id === c.marketId);
+          const first = rows[0];
+          const firstSide = rows
+            .map((n) => directionSide(n.direction))
+            .find(Boolean);
+          const opposite =
+            firstSide &&
+            rows.find(
+              (n) =>
+                directionSide(n.direction) != null &&
+                directionSide(n.direction) !== firstSide,
+            );
+          return [...new Set([first, opposite, ...rows].filter(Boolean))].slice(
+            0,
+            4,
+          );
+        })
+      : notes;
+    for (const note of selectedNotes) {
       const candidate = candidates.get(note.market_id);
       if (!candidate) continue;
       candidate.sources.push({
         id: `note:${note.id}`,
         kind: "hunch_analysis",
         title: text(note.title, 240),
-        excerpt: text(note.description, 1200),
+        excerpt: text(
+          `${note.direction ? `[Prior ${directionSide(note.direction) ?? note.direction} interpretation] ` : ""}${note.description ?? ""}`,
+          1200,
+        ),
         url: null,
         asOf: iso(note.created_at),
         caveats: (Array.isArray(note.caveats) ? note.caveats : [])
@@ -379,20 +445,7 @@ export async function loadAgentCandidates(input: {
   } catch {
     diagnostics.push("stored_notes_unavailable");
   }
-  try {
-    diagnostics.push(
-      ...(await attachStoredNews(input.redis, [...candidates.values()], now)),
-    );
-  } catch {
-    diagnostics.push("stored_background_unavailable");
-  }
-  return {
-    candidates: input.marketIds.flatMap((id) => {
-      const candidate = candidates.get(id);
-      return candidate ? [candidate] : [];
-    }),
-    diagnostics,
-  };
+  return diagnostics;
 }
 
 /** Fresh material gets room, but cannot permanently occupy all model slots. */
@@ -402,6 +455,7 @@ export function selectAgentShortlist(
   lastConsidered: Array<number | null>,
   maximum: number,
   interests = "",
+  semanticMarketIds: string[] = [],
 ) {
   // Cheap soft relevance, not a category gate or semantic matching claim.
   // Rotation still supplies candidates when aliases/languages do not overlap.
@@ -414,7 +468,11 @@ export function selectAgentShortlist(
         .toLowerCase()
         .match(/[\p{L}\p{N}]{3,}/gu) ?? [],
     );
-    return terms.reduce((score, term) => score + Number(words.has(term)), 0);
+    const semanticRank = semanticMarketIds.indexOf(candidate.marketId);
+    return (
+      terms.reduce((score, term) => score + Number(words.has(term)), 0) +
+      (semanticRank < 0 ? 0 : 1 + 1 / (semanticRank + 1))
+    );
   };
   const fresh = new Set(freshIds);
   const ranked = candidates
@@ -470,8 +528,13 @@ async function attachStoredNews(
   redis: AgentRedis,
   candidates: AgentCandidate[],
   now: Date,
+  deep = false,
 ) {
-  const ids = await redis.zRange("ai:map_search:v1:recent_evidence", -200, -1);
+  const ids = await redis.zRange(
+    "ai:map_search:v1:recent_evidence",
+    deep ? -600 : -200,
+    -1,
+  );
   if (!ids.length) return [];
   const diagnostics: string[] = [];
   const docs = await redis.mGet(
@@ -588,9 +651,83 @@ async function attachStoredNews(
       })
       .filter((n) => n.score >= 0.35)
       .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
+      .slice(0, deep ? 4 : 3);
     candidate.sources.push(...ranked.map((n) => n.source));
-    candidate.sources = candidate.sources.slice(0, 8);
+    candidate.sources = [
+      ...new Map(candidate.sources.map((s) => [s.id, s])).values(),
+    ].slice(0, deep ? 12 : 8);
   }
   return diagnostics;
+}
+
+/** Deeper bounded saved context only for Jev's market (or its <=3 fallback).
+ * No search, new news embeddings, refreshed holders, or changed entry quote. */
+export async function enrichAgentSelectedContext(input: {
+  db: DbQuery;
+  redis: AgentRedis;
+  candidates: AgentCandidate[];
+  now: Date;
+}) {
+  const candidates = input.candidates.slice(0, 3).map((c) => ({
+    ...c,
+    sources: c.sources.filter((s) => s.kind === "market"),
+  }));
+  const diagnostics = await attachAgentStoredNotes(
+    input.db,
+    candidates,
+    input.now,
+    true,
+  );
+  // Missing optional sources do not erase the context already used by Jev.
+  for (const c of candidates) {
+    const previous = input.candidates.find((p) => p.marketId === c.marketId);
+    c.sources = [
+      ...new Map(
+        [...(previous?.sources ?? []), ...c.sources].map((s) => [s.id, s]),
+      ).values(),
+    ];
+  }
+  try {
+    diagnostics.push(
+      ...(await attachStoredNews(input.redis, candidates, input.now, true)),
+    );
+  } catch {
+    diagnostics.push("selected_news_unavailable");
+  }
+  for (const candidate of candidates) {
+    try {
+      const ids = await relatedAgentMarkets(input.redis, candidate.marketId);
+      const related = ids.map((marketId) => ({
+        ...candidate,
+        marketId,
+        sources: [] as ThesisSource[],
+      }));
+      diagnostics.push(
+        ...(await attachAgentStoredNotes(input.db, related, input.now)),
+      );
+      const background = related
+        .flatMap((c) =>
+          c.sources
+            .filter((s) => s.kind === "hunch_analysis")
+            .map((s) => ({
+              ...s,
+              excerpt:
+                `[Related contract ${c.marketId}; background, not evidence of this contract's outcome] ${s.excerpt}`.slice(
+                  0,
+                  1200,
+                ),
+            })),
+        )
+        .slice(0, 2);
+      // Keep exact and external evidence ahead of related interpretations.
+      candidate.sources = [
+        ...new Map(
+          [...candidate.sources, ...background].map((s) => [s.id, s]),
+        ).values(),
+      ].slice(0, 14);
+    } catch {
+      diagnostics.push("selected_related_unavailable");
+    }
+  }
+  return { candidates, diagnostics: [...new Set(diagnostics)] };
 }

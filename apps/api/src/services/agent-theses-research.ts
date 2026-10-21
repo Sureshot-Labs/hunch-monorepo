@@ -9,6 +9,7 @@ import {
   loadAgentCandidates,
   loadAgentMarketPool,
   selectAgentShortlist,
+  enrichAgentSelectedContext,
   type AgentCandidate,
 } from "./agent-theses-context.js";
 import { recentAgentTheses } from "./agent-theses-publish.js";
@@ -19,6 +20,10 @@ import {
   type AgentHistory,
   type AgentModelClient,
 } from "./agent-theses-model.js";
+import {
+  retrieveAgentInterests,
+  type AgentInterestEmbedder,
+} from "./agent-theses-retrieval.js";
 
 export function agentFailureCode(error: unknown): string {
   // Never persist full provider/network errors (may include credentials or request bodies).
@@ -44,18 +49,30 @@ export async function loadAgentResearchContext(input: {
   maxQuoteAgeSeconds: number;
   limitlessPositionContract?: string;
   now?: Date;
+  authors?: Pick<AgentAuthor, "userId" | "interests">[];
+  embed?: AgentInterestEmbedder;
+  assertLease?: () => Promise<void>;
 }) {
+  const retrieval = await retrieveAgentInterests({
+    redis: input.redis,
+    authors: input.authors ?? [],
+    maximum: input.maxMarkets,
+    embed: input.embed,
+    assertLease: input.assertLease ?? (async () => {}),
+  });
   const pool = await loadAgentMarketPool(
     input.db,
     input.redis,
     input.maxMarkets,
     input.userId,
+    retrieval.marketIds,
   );
   const context = await loadAgentCandidates({
     ...input,
     marketIds: pool.marketIds,
   });
-  return { pool, context };
+  pool.diagnostics.push(...retrieval.diagnostics);
+  return { pool, context, retrieval };
 }
 
 /** Shared single-author pass. Only the scheduled runner supplies progress mutations. */
@@ -67,6 +84,7 @@ export async function researchAgent(input: {
   revision: string;
   candidates: AgentCandidate[];
   freshMarketIds: string[];
+  semanticMarketIds?: string[];
   model: AgentModelClient;
   now: () => Date;
   report: Record<string, unknown>;
@@ -108,8 +126,19 @@ export async function researchAgent(input: {
     scores,
     policy.candidatesPerAuthor,
     agentInterests(author),
+    input.semanticMarketIds,
   );
   authorReport.candidates = shortlist.map((c) => c.marketId);
+  authorReport.shortlist = shortlist.map((c) => {
+    const rank = input.semanticMarketIds?.indexOf(c.marketId) ?? -1;
+    return {
+      marketId: c.marketId,
+      title: c.title,
+      eventTitle: c.eventTitle,
+      category: c.category,
+      semanticRank: rank < 0 ? null : rank + 1,
+    };
+  });
   if (!shortlist.length) {
     authorReport.status = "no_candidates";
     await input.onConsidered(shortlist.map((c) => c.marketId));
@@ -177,6 +206,19 @@ export async function researchAgent(input: {
   }
   await input.assertLease();
   authorReport.angle = angle;
+  const enriched = await enrichAgentSelectedContext({
+    db,
+    redis,
+    candidates: selected,
+    now: now(),
+  });
+  selected = enriched.candidates;
+  authorReport.contextDiagnostics = enriched.diagnostics;
+  authorReport.enrichedSources = selected.map((c) => ({
+    marketId: c.marketId,
+    sources: c.sources.length,
+  }));
+  await input.assertLease();
   authorReport.stage = "writing";
   await input.onProgress();
   const decision = await writeAgentThesis({

@@ -14,6 +14,7 @@ import {
 } from "./agent-theses-state.js";
 import { readAgentPreviewBudget } from "./agent-theses-budget.js";
 import { createAgentModelClient } from "./agent-theses-model.js";
+import { createAgentInterestEmbedder } from "./agent-theses-retrieval.js";
 import {
   agentFailureCode,
   loadAgentResearchContext,
@@ -239,12 +240,16 @@ export class AgentPreviewService {
       if (abort.signal.aborted) throw new Error("preview_interrupted");
       await state.assertLease();
     };
-    const model = createAgentModelClient({
+    const accounting = {
       apiKey: this.deps.apiKey,
       runId: state.runId,
       fetchImpl: this.deps.fetchImpl,
       signal: abort.signal,
-      reserve: async (id, amount, metadata) => {
+      reserve: async (
+        id: string,
+        amount: number,
+        metadata: Record<string, unknown>,
+      ) => {
         await assertLease();
         const saved = await resolveAgentThesesPolicy(this.db);
         await state.reserve(
@@ -254,23 +259,38 @@ export class AgentPreviewService {
           metadata,
         );
       },
-      settle: (id, amount) => state.settle(id, amount),
+      settle: (id: string, amount: number | null) => state.settle(id, amount),
       record: async () => {
         await persist();
       },
-    });
+    };
+    const model = createAgentModelClient(accounting);
+    const embed = createAgentInterestEmbedder(accounting);
     try {
       const social = await resolveSocialPolicy(this.db);
-      const { pool, context } = await loadAgentResearchContext({
+      const { pool, context, retrieval } = await loadAgentResearchContext({
         db: this.db,
         redis: state.redis,
         maxMarkets: policy.maxMarkets,
         userId: author.userId,
         maxQuoteAgeSeconds: social.policy.markMaxAgeSeconds,
         limitlessPositionContract: this.deps.limitlessPositionContract,
+        authors: [author],
+        embed,
+        assertLease,
       });
       report.diagnostics.push(...pool.diagnostics, ...context.diagnostics);
+      report.diagnostics.push(
+        `interest_retrieval:cache_hits=${retrieval.stats.cacheHits},generated=${retrieval.stats.generated},markets=${retrieval.marketIds.length},duration_ms=${retrieval.stats.durationMs}`,
+      );
       report.candidateCount = context.candidates.length;
+      report.retrieval = {
+        poolCount: pool.marketIds.length,
+        semanticPoolCount: retrieval.marketIds.length,
+        cacheHits: retrieval.stats.cacheHits,
+        generated: retrieval.stats.generated,
+        durationMs: retrieval.stats.durationMs,
+      };
       const researched = await researchAgent({
         db: this.db,
         redis: state.redis,
@@ -282,6 +302,7 @@ export class AgentPreviewService {
         report: authorReport,
         candidates: context.candidates,
         freshMarketIds: pool.freshMarketIds,
+        semanticMarketIds: retrieval.byAuthor[author.userId],
         assertLease,
         onConsidered: async () => {},
         onDraftText: async (body) => {
@@ -324,12 +345,18 @@ export class AgentPreviewService {
           report.stage = authorReport.stage as "selection" | "writing";
           report.shortlistCount =
             (authorReport.candidates as unknown[] | undefined)?.length ?? 0;
+          report.shortlist =
+            authorReport.shortlist as AgentPreview["shortlist"];
           report.selection =
             (authorReport.selection as AgentPreview["selection"]) ?? null;
           report.angle =
             typeof authorReport.angle === "string" ? authorReport.angle : null;
           if (typeof authorReport.jevFallback === "string")
             report.diagnostics.push(`jev_fallback:${authorReport.jevFallback}`);
+          if (Array.isArray(authorReport.contextDiagnostics))
+            report.diagnostics.push(
+              ...(authorReport.contextDiagnostics as string[]),
+            );
           await assertLease();
           await persist();
         },

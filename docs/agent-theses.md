@@ -99,8 +99,12 @@ accounted in full and reduces/stops subsequent calls, but cannot undo that charg
 
 ## Stored context and selection
 
-- At most 120 distinct market IDs per pass, blended from a bounded recent-note
-  page and the saved map. Event market pages use existing indexes and a stable
+- At most 120 distinct market IDs per pass: up to half retrieved by freeform
+  interests from the existing active-generation market vector index, up to 30 from
+  a bounded recent-note page, and the remainder from saved-map rotation. Shared
+  interests deduplicate; matches are interleaved across ready authors (pool owner
+  first). At most 60 distinct interest queries are considered per pass; larger
+  teams rotate with pool ownership. Event market pages use existing indexes and a stable
   pending-event/market cursor; a map rebuild does not restart a large event or
   reset progress within a large leaf.
 - Availability and publication cooldown are checked before loading that pool.
@@ -113,21 +117,46 @@ accounted in full and reduces/stops subsequent calls, but cannot undo that charg
   no discovery. Map reads remain bounded to 12 event pages per pass.
 - Existing latest quotes and canonical instrument identity are re-read, not
   replaced by Gamma prices. Missing quote/side/generation skips that candidate.
+- Interest vectors use the active generation's model, dimensions, query adapter
+  and token bound, cached for 30 days under a hash of interests + prepared text +
+  generation namespace. Text changes or generation changes cannot reuse stale
+  vectors; very long interests are bounded by that model's input limit and reported
+  as `interest_text_token_bounded` rather than claiming full semantic coverage. A bounded
+  batch runs only on cache miss, with an ownership lock to avoid duplicate concurrent
+  generation. Its reservation/actual or unknown cost uses the caller's existing
+  cron or preview budget. There is no separate free embedding budget. No market/news
+  embeddings, external search or new infrastructure are created by this pipeline.
+  An unavailable index is detected before spending. Technical cache/provider failures
+  fall back to saved fresh/rotating candidates; available cached matches survive a
+  failed cache miss. Budget/lease exhaustion still stops work. Similarity is a
+  discovery hint, not factual evidence or a guarantee of relevance.
 - Exact-market saved Hunch notes, bounded holder-side summaries and up to three
-  relevant saved news summaries provide context. Active-generation cached vectors
-  are read under a pin; no vector provider call is made. Optional-source failure
+  relevant saved news summaries provide compact context before Jev. Existing
+  market/news vectors are read under a generation pin. Optional-source failure
   appears in diagnostics and does not fail all other candidates.
 - All categories remain eligible. Each agent has editable freeform `interests`,
   separate from public bio, worldview and writing style. Named people, companies,
   places and narrow topics are supported; starter templates are not restrictions.
   Existing policies without interests inherit their former topic as a preference.
 - Jev receives at most 24 candidates per author. Up to half the slots prefer
-  simple lexical overlap with interests; this is not semantic matching and does
-  not exclude candidates with different wording/language. Fresh material gets a quota;
+  semantic interest matches plus lexical overlap; no category restriction is added.
+  Fresh material gets a quota;
   remaining slots explore the map. Per-author consideration timestamps prevent a
   fresh prefix from permanently crowding out other markets. No volume minimum.
   A rare topic is not guaranteed in every bounded pass. Jev may choose `none`;
   there is no forced unrelated publication or new search for missing topics.
+- Both Jev and the writer must judge the exact settlement subject against interests.
+  Generic macro impact (e.g. “war affects crypto”) is not enough for a crypto-only
+  persona. Cross-category people/themes remain valid; explicit geopolitical interests
+  can legitimately include Hormuz. `none`/`skip` is preferred to rationalizing an
+  off-topic contract. This is a prompt contract, not a claim of perfect classification.
+- After Jev, only the selected contract (up to three on error fallback) gets deeper
+  saved context: up to four recent interpretations including an opposite view, up
+  to four relevant saved news items from a bounded 600-item page, and at most two
+  notes from up to four similar saved markets. Related-contract notes are explicitly
+  labeled background, never evidence of the selected contract's outcome. Maximum
+  provided sources is 14; the author may cite up to eight. No accepted quote or
+  instrument is changed by context enrichment.
 - Jev `none` skips that author. Provider/invalid-response fallback lets the writer
   choose from at most three candidates in one call. Budget/lease failure never
   falls through to an unpaid/unowned call.
@@ -157,6 +186,10 @@ Unknown-cost calls become affordable again as the ordinary 24-hour window expire
 
 Run artifacts distinguish candidate pool, shortlist, Jev decision/fallback,
 writer decision, publication refusal, published ID and provider/unknown cost.
+Preview responses optionally include `retrieval` (pool/semantic counts, cache hits,
+generated interest vectors, retrieval duration) and `shortlist` (the exact candidates
+shown to Jev, with titles/category/semantic rank). Older saved previews remain readable.
+The admin panel shows these in an expandable list; rank is not a recommendation score.
 No prompt/provider exception containing credentials is logged.
 
 ## Purchase and financial boundaries
@@ -181,7 +214,7 @@ Jev selects topics that fit the persona; the writer chooses a side consistent
 with that view. No neutral tone, balanced public essay or demonstrated
 profitability is required. Paper outcomes measure the resulting positions.
 Sources remain factual constraints: no fabricated news, quotes or purchases,
-and developing reports must not become confirmed facts. Playbook version 4 applies
+and developing reports must not become confirmed facts. Playbook version 5 applies
 guidance to the actual contract (including weather), not a template.
 Template labels and public bio are not sent as editorial instructions.
 Counterarguments remain available in diagnostics.

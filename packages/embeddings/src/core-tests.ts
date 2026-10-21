@@ -22,6 +22,8 @@ import {
   buildEmbeddingText,
   buildLegacyEmbeddingText,
   buildNewsEmbeddingText,
+  buildNewsEmbeddingInput,
+  embeddingTokenLimit,
   cleanEmbeddingText,
   countEmbeddingTokens,
 } from "./text.js";
@@ -492,6 +494,36 @@ test("news and query adapters share the generation but not legacy formatting", (
     /^Instruct: .*\nQuery: Headline\nSummary$/,
   );
   assert.doesNotMatch(buildEmbeddingText(source, qwen), /query:|Instruct:/);
+});
+
+test("query truncation metadata includes adapter overhead without changing text API", () => {
+  const boundary = "weather ".repeat(477).trim();
+  assert.ok(countEmbeddingTokens(boundary, e5) <= embeddingTokenLimit(e5));
+  const prepared = buildNewsEmbeddingInput(boundary, "", e5);
+  assert.equal(
+    prepared.truncated,
+    true,
+    "query prefix alone can cross the model bound",
+  );
+  assert.ok(countEmbeddingTokens(prepared.text, e5) <= embeddingTokenLimit(e5));
+  for (const generation of [e5, qwen, LEGACY_EMBEDDING_GENERATION]) {
+    const short = buildNewsEmbeddingInput("Headline", "Summary", generation);
+    assert.equal(short.truncated, false);
+    assert.equal(
+      short.text,
+      buildNewsEmbeddingText("Headline", "Summary", generation),
+    );
+    const long = buildNewsEmbeddingInput(
+      "weather ".repeat(12000),
+      "",
+      generation,
+    );
+    assert.equal(long.truncated, true);
+    assert.ok(
+      countEmbeddingTokens(long.text, generation) <=
+        embeddingTokenLimit(generation),
+    );
+  }
 });
 
 test("vectors reject wrong dimensions, non-finite and zero values and normalize safely", () => {
