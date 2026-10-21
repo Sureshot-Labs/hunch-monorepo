@@ -6,10 +6,7 @@ import {
 
 export type AgentRedis = ReturnType<typeof createRedisClient>;
 export const AGENT_THESES_PREFIX = "ai:agent_theses:v1";
-const LOCK = `${AGENT_THESES_PREFIX}:lock`;
-const CALLS = `${AGENT_THESES_PREFIX}:calls`;
-const COSTS = `${AGENT_THESES_PREFIX}:costs`;
-const CALL_DETAILS = `${AGENT_THESES_PREFIX}:call_details`;
+export const AGENT_PREVIEW_PREFIX = `${AGENT_THESES_PREFIX}:preview`;
 const TTL = 120_000;
 
 // One atomic reservation across all authors/runs. Redis time defines the sliding window.
@@ -39,10 +36,35 @@ export class AgentRunState {
   constructor(
     readonly redis: AgentRedis,
     readonly runId: string,
+    readonly prefix: string = AGENT_THESES_PREFIX,
   ) {}
-  async acquire() {
+  key(suffix: string) {
+    return `${this.prefix}:${suffix}`;
+  }
+  async acquire(initial?: { key: string; value: string; ttlSeconds: number }) {
     if (
-      (await this.redis.set(LOCK, this.runId, { NX: true, PX: TTL })) !== "OK"
+      initial
+        ? Number(
+            await this.redis.eval(
+              `
+          if redis.call('EXISTS',KEYS[2])==1 then return 0 end
+          if not redis.call('SET',KEYS[1],ARGV[1],'NX','PX',ARGV[2]) then return 0 end
+          redis.call('SET',KEYS[2],ARGV[3],'EX',ARGV[4]); return 1`,
+              {
+                keys: [this.key("lock"), initial.key],
+                arguments: [
+                  this.runId,
+                  String(TTL),
+                  initial.value,
+                  String(initial.ttlSeconds),
+                ],
+              },
+            ),
+          ) !== 1
+        : (await this.redis.set(this.key("lock"), this.runId, {
+            NX: true,
+            PX: TTL,
+          })) !== "OK"
     )
       return false;
     this.timer = setInterval(() => {
@@ -64,7 +86,7 @@ export class AgentRunState {
       if (
         !(await renewHolderResearchRunLock({
           redis: this.redis,
-          key: LOCK,
+          key: this.key("lock"),
           owner: this.runId,
           ttlMs: TTL,
         }))
@@ -84,7 +106,12 @@ export class AgentRunState {
     await this.assertLease();
     const code = Number(
       await this.redis.eval(AGENT_RESERVE_SCRIPT, {
-        keys: [LOCK, CALLS, COSTS, CALL_DETAILS],
+        keys: [
+          this.key("lock"),
+          this.key("calls"),
+          this.key("costs"),
+          this.key("call_details"),
+        ],
         arguments: [
           this.runId,
           callId,
@@ -111,10 +138,17 @@ export class AgentRunState {
     await this.redis.eval(
       `
       if redis.call('HEXISTS',KEYS[1],ARGV[1])==0 then return 0 end
-      redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); return 1`,
+      redis.call('HSET',KEYS[1],ARGV[1],ARGV[2])
+      local raw=redis.call('HGET',KEYS[2],ARGV[1])
+      if raw then local detail=cjson.decode(raw); detail.actualUsd=tonumber(ARGV[3]); redis.call('HSET',KEYS[2],ARGV[1],cjson.encode(detail)) end
+      return 1`,
       {
-        keys: [COSTS],
-        arguments: [callId, String(Math.ceil(actualUsd * 1e10))],
+        keys: [this.key("costs"), this.key("call_details")],
+        arguments: [
+          callId,
+          String(Math.ceil(actualUsd * 1e10)),
+          String(actualUsd),
+        ],
       },
     );
   }
@@ -131,13 +165,10 @@ export class AgentRunState {
       return 1`,
       {
         keys: [
-          LOCK,
-          `${AGENT_THESES_PREFIX}:cursor${ownerUserId ? `:${ownerUserId}` : ""}`,
+          this.key("lock"),
+          `${this.prefix}:cursor${ownerUserId ? `:${ownerUserId}` : ""}`,
           ...(ownerUserId
-            ? [
-                `${AGENT_THESES_PREFIX}:pool_turn`,
-                `${AGENT_THESES_PREFIX}:pool_owners`,
-              ]
+            ? [`${this.prefix}:pool_turn`, `${this.prefix}:pool_owners`]
             : []),
         ],
         arguments: [this.runId, JSON.stringify(cursor), ownerUserId ?? ""],
@@ -154,7 +185,7 @@ export class AgentRunState {
       redis.call('ZREMRANGEBYRANK',KEYS[2],0,-10001)
       return 1`,
       {
-        keys: [LOCK, `${AGENT_THESES_PREFIX}:considered:${userId}`],
+        keys: [this.key("lock"), `${this.prefix}:considered:${userId}`],
         arguments: [this.runId, ...marketIds],
       },
     );
@@ -164,13 +195,13 @@ export class AgentRunState {
     const value = JSON.stringify(report);
     const multi = this.redis
       .multi()
-      .set(`${AGENT_THESES_PREFIX}:run:${this.runId}`, value, {
+      .set(`${this.prefix}:run:${this.runId}`, value, {
         EX: 30 * 86400,
       });
     if (!this.recorded)
       multi
-        .lPush(`${AGENT_THESES_PREFIX}:runs`, this.runId)
-        .lTrim(`${AGENT_THESES_PREFIX}:runs`, 0, 1499);
+        .lPush(`${this.prefix}:runs`, this.runId)
+        .lTrim(`${this.prefix}:runs`, 0, 1499);
     await multi.exec();
     this.recorded = true;
   }
@@ -179,7 +210,7 @@ export class AgentRunState {
     if (this.renewal) await this.renewal;
     await releaseHolderResearchRunLock({
       redis: this.redis,
-      key: LOCK,
+      key: this.key("lock"),
       owner: this.runId,
     });
   }

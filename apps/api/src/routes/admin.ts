@@ -82,6 +82,7 @@ import { parseAdminEmbeddingStatus } from "../services/admin-embeddings-status.j
 import { registerAdminFundingRoutes } from "./admin-funding.js";
 import { registerAdminSocialRoutes } from "./admin-social.js";
 import { registerAdminAgentThesesRoutes } from "./admin-agent-theses.js";
+import { AgentPreviewService } from "../services/agent-theses-preview.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import { createEvmRpcProvider } from "../services/rpc-client-factory.js";
@@ -1869,8 +1870,21 @@ function loadSolanaKeypair(secret: string): Keypair {
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
+  const agentPreview = new AgentPreviewService({
+    db: pool,
+    apiKey: env.openRouterKey,
+    limitlessPositionContract: env.limitlessConditionalTokensAddress,
+    redis: async () => {
+      const { redis } = await getRedisStatus();
+      if (!redis) throw new Error("preview_unavailable");
+      return redis;
+    },
+  });
+  app.addHook("onClose", () => agentPreview.close());
+
   registerAdminAgentThesesRoutes(app, {
     db: pool,
+    preview: agentPreview,
     authorize: (permission) =>
       createAdminMiddleware({
         requiredAdminPermission: permission,

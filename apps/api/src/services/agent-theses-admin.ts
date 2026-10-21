@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentPreviewBudgetSchema } from "../schemas/agent-preview.js";
 import type { DbQuery } from "../db.js";
 import { insertRuntimePolicy } from "../repos/runtime-policies.js";
 import {
@@ -56,6 +57,7 @@ const profileSchema = z.object({
 export const agentAdminStateSchema = z.object({
   ok: z.literal(true),
   revision: z.string(),
+  previewBudget: agentPreviewBudgetSchema.nullable().optional(),
   policy: agentThesesPolicySchema,
   profiles: z.array(profileSchema),
   templates: z.array(

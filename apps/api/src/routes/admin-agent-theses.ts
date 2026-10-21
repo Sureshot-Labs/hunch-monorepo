@@ -16,8 +16,14 @@ import {
   saveAgentAdminConfiguration,
 } from "../services/agent-theses-admin.js";
 import { SocialError } from "../services/social-primitives.js";
+import {
+  agentPreviewInputSchema,
+  agentPreviewSchema,
+} from "../schemas/agent-preview.js";
+import type { AgentPreviewService } from "../services/agent-theses-preview.js";
 
 export type AgentAdminDependencies = {
+  preview?: Pick<AgentPreviewService, "start" | "read" | "budget">;
   db: DbQuery;
   authorize: (
     permission: "intel:read" | "intel:write" | "users:write",
@@ -33,6 +39,7 @@ const response = {
   400: errorSchema,
   401: errorSchema,
   403: errorSchema,
+  404: errorSchema,
   409: errorSchema,
   503: errorSchema,
 };
@@ -47,6 +54,17 @@ function actor(request: FastifyRequest) {
 }
 function failure(reply: FastifyReply, error: unknown) {
   const messages: Record<string, string> = {
+    preview_busy:
+      "Another paid preview is running. Wait for it to finish, then try again.",
+    preview_not_found:
+      "Preview expired or was not found. A new paid run requires another click.",
+    preview_request_conflict:
+      "This request ID was already used for different settings. Start a new test explicitly.",
+    agent_budget_exhausted:
+      "The separate preview budget is exhausted or cannot cover the next call reservation.",
+    preview_unavailable: "Paid previews are temporarily unavailable.",
+    agent_unavailable: "This agent is unavailable or suspended.",
+    model_key_unavailable: "The model provider is not configured.",
     agent_configuration_changed:
       "Settings changed since you opened this page. Reload and review before saving.",
     agent_profile_binding_changed:
@@ -101,7 +119,10 @@ export function registerAdminAgentThesesRoutes(
     async (_request, reply) => {
       reply.header("Cache-Control", "private, no-store");
       try {
-        return await readAgentAdminState(deps.db);
+        const state = await readAgentAdminState(deps.db);
+        const previewBudget =
+          (await deps.preview?.budget().catch(() => null)) ?? null;
+        return { ...state, previewBudget };
       } catch (error) {
         return failure(reply, error);
       }
@@ -111,6 +132,69 @@ export function registerAdminAgentThesesRoutes(
     deps.authorize("intel:write"),
     deps.authorize("users:write"),
   ];
+  api.post(
+    "/admin/agent-theses/authors/:userId/preview",
+    {
+      bodyLimit: 256 * 1024,
+      preHandler: writers,
+      schema: {
+        params: z.object({ userId: z.string().uuid() }),
+        body: agentPreviewInputSchema,
+        response: {
+          202: agentPreviewSchema,
+          400: errorSchema,
+          401: errorSchema,
+          403: errorSchema,
+          404: errorSchema,
+          409: errorSchema,
+          503: errorSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      try {
+        if (!deps.preview) throw new SocialError("preview_unavailable", 503);
+        return reply
+          .code(202)
+          .send(
+            await deps.preview.start(
+              actor(request),
+              request.params.userId,
+              request.body,
+            ),
+          );
+      } catch (error) {
+        return failure(reply, error);
+      }
+    },
+  );
+  api.get(
+    "/admin/agent-theses/previews/:runId",
+    {
+      preHandler: deps.authorize("intel:read"),
+      schema: {
+        params: z.object({ runId: z.string().regex(/^[a-f0-9]{64}$/) }),
+        response: {
+          200: agentPreviewSchema,
+          400: errorSchema,
+          401: errorSchema,
+          403: errorSchema,
+          404: errorSchema,
+          503: errorSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      try {
+        if (!deps.preview) throw new SocialError("preview_unavailable", 503);
+        return await deps.preview.read(request.params.runId);
+      } catch (error) {
+        return failure(reply, error);
+      }
+    },
+  );
   api.put(
     "/admin/agent-theses",
     {

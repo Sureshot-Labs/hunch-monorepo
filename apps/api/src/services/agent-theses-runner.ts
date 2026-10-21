@@ -1,9 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "@hunch/infra";
-import {
-  agentInterests,
-  resolveAgentThesesPolicy,
-} from "./agent-theses-policy.js";
+import { resolveAgentThesesPolicy } from "./agent-theses-policy.js";
 import { resolveSocialPolicy } from "./social-policy.js";
 import {
   AgentRunState,
@@ -11,38 +8,19 @@ import {
   type AgentRedis,
 } from "./agent-theses-state.js";
 import {
-  loadAgentCandidates,
-  loadAgentMarketPool,
-  selectAgentShortlist,
-} from "./agent-theses-context.js";
-import {
   recentAgentTheses,
   publishAgentThesis,
 } from "./agent-theses-publish.js";
 import {
-  agentProvenance,
   createAgentModelClient,
-  selectAgentCandidate,
-  writeAgentThesis,
-  type AgentHistory,
   type AgentModelClient,
 } from "./agent-theses-model.js";
+import {
+  researchAgent,
+  loadAgentResearchContext,
+  agentFailureCode as failureCode,
+} from "./agent-theses-research.js";
 
-function failureCode(error: unknown): string {
-  // Never persist full provider/network errors (may include credentials or request bodies).
-  const message = error instanceof Error ? error.message : "unknown_error";
-  if (
-    error &&
-    typeof error === "object" &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[0-9A-Z]{5}$/.test(error.code)
-  )
-    return `database_${error.code}`;
-  return /^[a-z][a-z0-9_:]{0,100}$/.test(message)
-    ? message
-    : "invalid_response_or_dependency_error";
-}
 /** Least-recent ownership is fair even when peers are ready at different cadences. */
 export function agentPoolOwnerIndex(
   ready: number[],
@@ -165,19 +143,14 @@ export async function runAgentTheses(input: {
       }),
     );
     const owner = ready.find((row) => row.index === ownerIndex) ?? ready[0];
-    const pool = await loadAgentMarketPool(
-      input.db,
-      input.redis,
-      policy.maxMarkets,
-      owner.author.userId,
-    );
-    report.diagnostics.push(...pool.diagnostics);
-    const context = await loadAgentCandidates({
+    const { pool, context } = await loadAgentResearchContext({
       ...input,
-      marketIds: pool.marketIds,
+      userId: owner.author.userId,
+      maxMarkets: policy.maxMarkets,
       maxQuoteAgeSeconds: social.policy.markMaxAgeSeconds,
       now: input.now?.(),
     });
+    report.diagnostics.push(...pool.diagnostics);
     report.diagnostics.push(...context.diagnostics);
     report.candidates = context.candidates.map((c) => c.marketId);
     owner.authorReport.poolOwner = true;
@@ -193,117 +166,26 @@ export async function runAgentTheses(input: {
     for (const { author, authorReport, recent } of ordered) {
       try {
         await state.assertLease();
-        const eligible = context.candidates;
-        const scores = eligible.length
-          ? await input.redis.zmScore(
-              `${AGENT_THESES_PREFIX}:considered:${author.userId}`,
-              eligible.map((c) => c.marketId),
-            )
-          : [];
-        const shortlist = selectAgentShortlist(
-          eligible,
-          pool.freshMarketIds,
-          scores,
-          policy.candidatesPerAuthor,
-          agentInterests(author),
-        );
-        authorReport.candidates = shortlist.map((c) => c.marketId);
-        if (!shortlist.length) {
-          authorReport.status = "no_candidates";
-          await consumePool(author.userId);
-          continue;
-        }
-        // Exact-contract last views can be older than the short recent-post history.
-        const exact = await input.db.query(
-          `select distinct on (market_id) id,market_id,outcome,body,published_at,buy_snapshot
-           from user_theses where author_id=$1 and market_id=any($2::text[])
-           order by market_id,published_at desc,id desc`,
-          [author.userId, shortlist.map((c) => c.marketId)],
-        );
-        const history: AgentHistory = [
-          ...new Map([...exact.rows, ...recent].map((h) => [h.id, h])).values(),
-        ]
-          .sort(
-            (a, b) =>
-              new Date(b.published_at).getTime() -
-              new Date(a.published_at).getTime(),
-          )
-          .map((h) => ({
-            id: h.id,
-            marketId: h.market_id,
-            side: h.outcome,
-            body: h.body,
-            publishedAt: new Date(h.published_at).toISOString(),
-            argumentKey: h.buy_snapshot?.provenance?.argumentKey ?? null,
-          }));
-        let selected = shortlist.slice(0, 3);
-        let angle =
-          "Choose the strongest distinct, supported analytical question from this shortlist.";
-        try {
-          authorReport.stage = "selection";
-          const choice = await selectAgentCandidate({
-            model,
-            author,
-            candidates: shortlist,
-            history,
-            policy,
-            now: now(),
-          });
-          await state.considered(
-            author.userId,
-            shortlist.map((c) => c.marketId),
-          );
-          await consumePool(author.userId);
-          authorReport.jev = choice.decision;
-          if (!choice.candidate) {
-            authorReport.status = "jev_none";
-            continue;
-          }
-          selected = [choice.candidate];
-          if (!choice.angle) throw new Error("agent_invalid_selection");
-          angle = choice.angle;
-        } catch (error) {
-          const code = failureCode(error);
-          if (["agent_budget_exhausted", "agent_lease_lost"].includes(code))
-            throw error;
-          await state.considered(
-            author.userId,
-            shortlist.map((c) => c.marketId),
-          );
-          await consumePool(author.userId);
-          authorReport.jevFallback = code;
-        }
-        await state.assertLease();
-        authorReport.stage = "writing";
-        const decision = await writeAgentThesis({
-          model,
+        const result = await researchAgent({
+          ...input,
           author,
-          candidates: selected,
-          history,
-          angle,
           policy,
-          now: now(),
-        });
-        authorReport.writer = decision;
-        if (decision.decision === "skip") {
-          authorReport.status = "writer_skip";
-          continue;
-        }
-        const candidate = selected.find(
-          (c) => c.marketId === decision.marketId,
-        );
-        const side = candidate?.sides.find(
-          (s) => s.instrument.outcome === decision.outcome,
-        );
-        if (!candidate || !side) throw new Error("agent_invalid_selection");
-        const provenance = agentProvenance({
-          decision,
-          candidate,
-          previous: history.find((h) => h.marketId === candidate.marketId),
           revision,
-          model: policy.writerModel,
-          angle,
+          model,
+          now,
+          report: authorReport,
+          recent,
+          candidates: context.candidates,
+          freshMarketIds: pool.freshMarketIds,
+          assertLease: () => state.assertLease(),
+          onConsidered: async (ids) => {
+            if (ids.length) await state.considered(author.userId, ids);
+            await consumePool(author.userId);
+          },
+          onProgress: () => state.record(report),
         });
+        if (!result) continue;
+        const { decision, side, provenance } = result;
         authorReport.stage = "publication";
         const created = await publishAgentThesis({
           db: input.db,
