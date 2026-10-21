@@ -16,6 +16,7 @@ import { recentAgentTheses } from "./agent-theses-publish.js";
 import {
   agentProvenance,
   selectAgentCandidate,
+  screenAgentCandidates,
   writeAgentThesis,
   type AgentHistory,
   type AgentModelClient,
@@ -167,15 +168,50 @@ export async function researchAgent(input: {
       argumentKey: h.buy_snapshot?.provenance?.argumentKey ?? null,
     }));
   let selected = shortlist.slice(0, 3);
+  let screened = shortlist;
   let angle =
     "Choose the strongest distinct, supported analytical question from this shortlist.";
+  authorReport.stage = "selection";
+  await input.onProgress();
+  try {
+    const screening = await screenAgentCandidates({
+      model,
+      author,
+      candidates: shortlist,
+      history,
+      policy,
+      now: now(),
+    });
+    authorReport.screening = screening;
+    const usable = new Set(
+      screening
+        .filter((row) => row.decision === "usable")
+        .map((row) => row.marketId),
+    );
+    screened = shortlist.filter((c) => usable.has(c.marketId));
+    await input.onProgress();
+    if (!screened.length) {
+      await input.onConsidered(shortlist.map((c) => c.marketId));
+      authorReport.status = "jev_screened_out";
+      return null;
+    }
+  } catch (error) {
+    const code = agentFailureCode(error);
+    if (["agent_budget_exhausted", "agent_lease_lost"].includes(code))
+      throw error;
+    // A failed optional model screen is not a permanent block. The selector
+    // and writer still receive explicit topic/entry rules and final guards.
+    authorReport.screeningFallback = code;
+    await input.onProgress();
+  }
+  selected = screened.slice(0, 3);
   try {
     authorReport.stage = "selection";
     await input.onProgress();
     const choice = await selectAgentCandidate({
       model,
       author,
-      candidates: shortlist,
+      candidates: screened,
       history,
       policy,
       now: now(),
@@ -187,10 +223,7 @@ export async function researchAgent(input: {
       authorReport.status = "jev_none";
       return null;
     }
-    selected = [
-      choice.candidate,
-      ...shortlist.filter((c) => c.marketId !== choice.candidate?.marketId),
-    ].slice(0, 3);
+    selected = [choice.candidate, ...(choice.alternatives ?? [])].slice(0, 3);
     authorReport.selection = {
       marketId: choice.candidate.marketId,
       title: choice.candidate.title,

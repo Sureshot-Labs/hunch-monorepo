@@ -13,6 +13,7 @@ import {
   agentAuthorSettingsSchema,
 } from "./services/agent-theses-policy.js";
 import { agentFixtureAuthors } from "./fixtures/agent-theses-authors.js";
+import { agentScreenFixture } from "./fixtures/agent-theses-screening.js";
 import {
   AGENT_PREVIEW_PREFIX,
   AGENT_THESES_PREFIX,
@@ -74,6 +75,10 @@ const service = new AgentPreviewService({
     assert.ok(String(url).startsWith("https://openrouter.ai/api/"));
     const body = JSON.parse(String(init?.body));
     if (String(url).endsWith("/decisions")) {
+      const screening = agentScreenFixture(body, () =>
+        mode === "screened_out" ? "entry_not_acceptable" : "usable",
+      );
+      if (screening) return Response.json(screening);
       if (mode === "hold")
         await new Promise<void>((resolve) => {
           releaseGate = resolve;
@@ -135,7 +140,7 @@ const service = new AgentPreviewService({
                 : `market:${candidate.marketId}`,
             ],
             counterargument: "The exact deadline remains uncertain.",
-            maxEntryPrice: "0.6",
+            maxEntryPrice: mode === "known_bad_entry" ? "0.4" : "0.6",
             changeReason:
               mode === "missing_change"
                 ? null
@@ -284,7 +289,7 @@ try {
   );
   assert.equal(success.result?.simulation?.shares, "200");
   assert.equal(success.result?.outcomeLabel, "Agreement");
-  assert.equal(success.cost.actualUsd, 0.011);
+  assert.equal(success.cost.actualUsd, 0.012);
   assert.equal(success.cost.reservedUsd, 0);
   assert.equal(seenStyle, settings.style);
   assert.equal(seenLanguage, settings.language);
@@ -293,7 +298,7 @@ try {
     (await service.start(adminId, userId, request)).runId,
     first.runId,
   );
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.equal(
     await snapshot(),
     before,
@@ -320,6 +325,8 @@ try {
   for (const [scenario, reason] of [
     ["none", "jev_none"],
     ["skip", "writer_skip"],
+    ["screened_out", "jev_screened_out"],
+    ["known_bad_entry", "writer_entry_above_observed_ask"],
     ["invalid_market", "writer_invalid_market_or_side"],
     ["invalid_sources", "writer_invalid_sources"],
   ]) {
@@ -364,8 +371,8 @@ try {
   const backup = await run();
   assert.equal(
     calls - backupCallsBefore,
-    2,
-    "one Jev call plus one writer call",
+    3,
+    "two Jev calls plus one writer call",
   );
   assert.equal(backup.writerCandidates?.length, 2);
   assert.equal(
@@ -403,6 +410,31 @@ try {
   ]);
   await pool.query("delete from unified_markets where id=$1", [backupMarketId]);
   mode = "publish";
+  // Exclude a mathematically zero-upside side BEFORE any model reservation;
+  // ordinary quote refresh restores eligibility without manual repair.
+  for (const ask of ["1", "1.0"]) {
+    await pool.query(
+      "update unified_token_top_latest set best_ask=$2 where token_id=$1",
+      [tokenId, ask],
+    );
+    const countBefore: number = calls;
+    const dataBefore = await snapshot();
+    const noUpside = await run();
+    assert.equal(noUpside.reason, "no_candidates");
+    assert.equal(calls, countBefore);
+    assert.ok(
+      noUpside.diagnostics.some((d) => d.endsWith(":no_payout_upside")),
+    );
+    assert.equal(await snapshot(), dataBefore);
+  }
+  await pool.query(
+    "update unified_token_top_latest set best_ask='0.5' where token_id=$1",
+    [tokenId],
+  );
+  assert.ok(
+    (await run()).result?.simulation,
+    "fresh usable quote recovers automatically",
+  );
   writerEffect = async () => {
     await pool.query(
       "update unified_token_top_latest set best_ask='0.9' where token_id=$1",
@@ -487,7 +519,7 @@ try {
   const timeout = await run();
   assert.equal(timeout.status, "failed");
   assert.ok(timeout.cost.reservedUsd > 0);
-  assert.equal(timeout.cost.actualUsd, 0.001);
+  assert.equal(timeout.cost.actualUsd, 0.002);
   // Simulate executor disappearance after a paid reservation. A new API instance must not rerun it.
   const orphanId = "a".repeat(64),
     orphan = new AgentRunState(redis, orphanId, AGENT_PREVIEW_PREFIX);

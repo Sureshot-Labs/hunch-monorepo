@@ -4,6 +4,7 @@ import {
 } from "./fixtures/agent-theses-authors.js";
 // @requires-db @requires-redis
 import assert from "node:assert/strict";
+import { agentScreenFixture } from "./fixtures/agent-theses-screening.js";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { createRedisClient, type Pool } from "@hunch/infra";
@@ -223,10 +224,58 @@ try {
     "https://example.org/report",
   );
   assert.ok(background.diagnostics.includes("stored_news_vectors_unavailable"));
+  // Venue rules can live in metadata (e.g. DFlow), with no description. They
+  // are valid context, including secondary/early-close rules, not a missing-rule skip.
+  const originalContextRow = (
+    await db.query(
+      "select description,metadata from unified_markets where id=$1",
+      [`${prefix}:0000`],
+    )
+  ).rows[0];
+  await db.query(
+    "update unified_markets set description=null,metadata=$2::jsonb where id=$1",
+    [
+      `${prefix}:0000`,
+      JSON.stringify({
+        ...originalContextRow.metadata,
+        rulesPrimary: "Exact settlement",
+        rulesSecondary: "Secondary rule",
+        earlyCloseCondition: "Early closure",
+      }),
+    ],
+  );
+  assert.equal(
+    (await loadAgentCandidates(contextInput)).candidates[0].condition,
+    "Exact settlement\n\nSecondary rule\n\nEarly closure",
+  );
+  await db.query(
+    "update unified_markets set metadata='{}'::jsonb where id=$1",
+    [`${prefix}:0000`],
+  );
+  const missingCondition = await loadAgentCandidates(contextInput);
+  assert.equal(missingCondition.candidates.length, 0);
+  assert.ok(
+    missingCondition.diagnostics.includes(
+      `candidate_excluded:${prefix}:0000:missing_condition`,
+    ),
+  );
+  await db.query(
+    "update unified_markets set description=$2,metadata=$3::jsonb where id=$1",
+    [
+      `${prefix}:0000`,
+      originalContextRow.description,
+      JSON.stringify(originalContextRow.metadata),
+    ],
+  );
+  assert.equal(
+    (await loadAgentCandidates(contextInput)).candidates.length,
+    1,
+    "fixed condition is eligible on the next run without a stale skip marker",
+  );
   // Rotation must eventually see >120 low-activity markets, without a volume threshold.
   for (let i = 3; i < 133; i++)
     await db.query(
-      "insert into unified_markets(id,venue,venue_market_id,event_id,title,status,market_type) values($1,'limitless',$1,$2,'Small market','ACTIVE','binary')",
+      "insert into unified_markets(id,venue,venue_market_id,event_id,title,description,status,market_type) values($1,'limitless',$1,$2,'Small market','Fixture resolves YES when the specified event occurs before its deadline.','ACTIVE','binary')",
       [`${prefix}:${String(i).padStart(4, "0")}`, eventId],
     );
   await redis.set(marketMapActiveKey(), mapId);
@@ -266,6 +315,8 @@ try {
   const model: AgentModelClient = async (call) => {
     const body = call.body as Record<string, unknown>;
     modelCalls.push({ stage: call.stage, input: body });
+    const screening = call.stage === "jev" ? agentScreenFixture(body) : null;
+    if (screening) return screening;
     if (call.stage === "jev") {
       const state = body.state as {
         author: { interests: string };

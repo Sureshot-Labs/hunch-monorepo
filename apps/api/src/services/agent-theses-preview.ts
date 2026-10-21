@@ -349,6 +349,13 @@ export class AgentPreviewService {
             authorReport.shortlist as AgentPreview["shortlist"];
           report.writerCandidates =
             authorReport.writerCandidates as AgentPreview["writerCandidates"];
+          report.screening =
+            authorReport.screening as AgentPreview["screening"];
+          if (typeof authorReport.screeningFallback === "string") {
+            const diagnostic = `screening_fallback:${authorReport.screeningFallback}`;
+            if (!report.diagnostics.includes(diagnostic))
+              report.diagnostics.push(diagnostic);
+          }
           report.selection =
             (authorReport.selection as AgentPreview["selection"]) ?? null;
           report.angle =
