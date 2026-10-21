@@ -1,3 +1,7 @@
+import {
+  agentFixtureAuthors,
+  agentFixtureProfiles,
+} from "./fixtures/agent-theses-authors.js";
 // @requires-db @requires-redis
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -70,16 +74,20 @@ const modelCalls: Array<{ stage: string; input: Record<string, unknown> }> = [];
 try {
   await client.query("begin");
   await client.query("set local statement_timeout='10s'");
-  const agents = await provisionAgentAuthors(db, true);
-  const policy = structuredClone(DEFAULT_AGENT_THESES_POLICY);
+  const agents = await provisionAgentAuthors(db, agentFixtureProfiles, true);
+  const policy = structuredClone({
+    ...DEFAULT_AGENT_THESES_POLICY,
+    authors: agentFixtureAuthors,
+  });
   policy.enabled = true;
-  for (let i = 0; i < 3; i++)
-    policy.authors[i].userId = agents.authors[i].userId;
+  for (let i = 0; i < 3; i++) {
+    const id = agents.authors[i].userId;
+    assert.ok(id);
+    policy.authors[i].userId = id;
+  }
   // Starter slots do not restrict categories: deliberately swap their topics.
-  policy.authors[0].interests =
-    DEFAULT_AGENT_THESES_POLICY.authors[1].interests;
-  policy.authors[1].interests =
-    DEFAULT_AGENT_THESES_POLICY.authors[0].interests;
+  policy.authors[0].interests = agentFixtureAuthors[1].interests;
+  policy.authors[1].interests = agentFixtureAuthors[0].interests;
   await db.query(
     "insert into runtime_policies(policy_key,effective_at,payload) values('agent_theses',now(),$1::jsonb)",
     [JSON.stringify(policy)],
@@ -424,6 +432,48 @@ try {
     await redis.hGetAll(`${AGENT_THESES_PREFIX}:pool_owners`),
     ownershipBefore,
   );
+
+  // Fourth/fifth identities are real runtime authors, not merely extra admin cards.
+  await client.query("savepoint dynamic_agents");
+  const extras = await provisionAgentAuthors(
+    db,
+    [
+      { handle: "custom_fourth", name: "Fourth", bio: "AI" },
+      { handle: "custom_fifth", name: "Fifth", bio: "AI" },
+    ],
+    true,
+  );
+  const expanded = structuredClone(policy);
+  expanded.authors = [
+    ...expanded.authors.map((a) => ({ ...a, enabled: false })),
+    ...extras.authors.map((a) => {
+      assert.ok(a.userId);
+      return { ...agentFixtureAuthors[0], userId: a.userId, enabled: true };
+    }),
+  ];
+  await db.query(
+    "insert into runtime_policies(policy_key,effective_at,payload) values('agent_theses',clock_timestamp(),$1::jsonb)",
+    [JSON.stringify(expanded)],
+  );
+  const extraRun = await runAgentTheses({
+    db,
+    redis,
+    apiKey: "",
+    model,
+    limitlessPositionContract: resolveLimitlessPositionContract(),
+  });
+  assert.ok("authors" in extraRun);
+  assert.equal(extraRun.authors.length, 2);
+  assert.ok(
+    extraRun.authors.every((a) => a.status === "published"),
+    JSON.stringify(extraRun.authors),
+  );
+  assert.deepEqual(
+    extraRun.authors.map((a) => a.userId).sort(),
+    extras.authors.map((a) => a.userId).sort(),
+  );
+  await client.query("rollback to savepoint dynamic_agents");
+  await client.query("release savepoint dynamic_agents");
 
   const state = new AgentRunState(redis, "test-owner");
   const rival = new AgentRunState(redis, "test-rival");

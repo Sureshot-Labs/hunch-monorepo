@@ -1,3 +1,7 @@
+import {
+  agentFixtureAuthors,
+  agentFixtureProfiles,
+} from "./fixtures/agent-theses-authors.js";
 // @requires-db
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -60,12 +64,14 @@ try {
   assert.ok(
     version.rows[0].version >= 160000 && version.rows[0].version < 170000,
   );
-  const preview = await provisionAgentAuthors(db);
+  const preview = await provisionAgentAuthors(db, agentFixtureProfiles);
   assert.equal(preview.authors.length, 3);
-  const created = await provisionAgentAuthors(db, true);
+  const created = await provisionAgentAuthors(db, agentFixtureProfiles, true);
   assert.ok(created.authors.every((a) => a.userId));
   assert.deepEqual(
-    (await provisionAgentAuthors(db, true)).authors.map((a) => a.userId),
+    (await provisionAgentAuthors(db, agentFixtureProfiles, true)).authors.map(
+      (a) => a.userId,
+    ),
     created.authors.map((a) => a.userId),
   );
   const author = created.authors[0].userId;
@@ -90,10 +96,16 @@ try {
   await db.query("insert into users(id,display_name) values($1,'Viewer')", [
     viewer,
   ]);
-  const policy = structuredClone(DEFAULT_AGENT_THESES_POLICY);
+  const policy = structuredClone({
+    ...DEFAULT_AGENT_THESES_POLICY,
+    authors: agentFixtureAuthors,
+  });
   policy.enabled = true;
-  for (let i = 0; i < 3; i++)
-    policy.authors[i].userId = created.authors[i].userId;
+  for (let i = 0; i < 3; i++) {
+    const id = created.authors[i].userId;
+    assert.ok(id);
+    policy.authors[i].userId = id;
+  }
   await db.query(
     "insert into runtime_policies(policy_key,effective_at,payload) values('agent_theses',now(),$1::jsonb)",
     [JSON.stringify(policy)],
@@ -342,7 +354,7 @@ try {
   await assert.rejects(publishAgentThesis(input), /agent_unavailable/);
   await db.query("update users set is_agent=false where id=$1", [author]);
   await assert.rejects(
-    provisionAgentAuthors(db, true),
+    provisionAgentAuthors(db, agentFixtureProfiles, true),
     /agent_handle_owned_by_user/,
   );
   console.log(

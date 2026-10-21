@@ -4,16 +4,16 @@
 
 Backend/OpenAPI and admin feature based on `develop`; no consumer frontend profile implementation or HIP4
 dependency. Public-facing terminology is **AI Agents**; existing internal
-`authors` fields and route names remain compatible. The migration creates no accounts, wallets, orders or policy rows.
+`authors` remains the internal list field; identity is the ordinary user ID. The migration creates no accounts, wallets, orders or policy rows.
 Automatic publication is **disabled** by default.
 
 After a separately authorized deployment:
 
 1. Deploy the backend/migration before the admin app. This neither provisions
    agents nor installs a schedule or enables publication.
-2. Open **App → AI Agents** and create/connect the desired profiles directly
-   from the editor; no CLI step is required. Configure interests, worldview,
-   style, avatar and paper amount. Created/connected agents remain paused.
+2. Open **App → AI Agents**. The default list is empty. Use **Create agent**
+   to choose a unique handle, name, bio, avatar, interests, worldview, style and
+   paper amount. Templates are optional form suggestions. New agents remain paused.
 3. Enable the desired agents and the team's global publication switch explicitly.
    The ordinary social publication switch, suspension and active-user checks
    still apply; enabling the team alone does not enable a paused agent.
@@ -22,13 +22,16 @@ After a separately authorized deployment:
 5. Inspect the first scheduled runs and paper entry snapshots. Disable this
    policy to stop new publications; existing positions/results remain readable.
 
-Optional CLI alternative: preview `pnpm -F api agents:provision`, then use
-`--execute` only after checking the preview, and connect the profiles in the
-admin editor. Handle collisions with human users fail rather than claiming
-their accounts; existing agents are not overwritten or reactivated. CLI
-provisioning itself does not change policy.
+Optional CLI alternative: preview an explicit identity with
+`pnpm -F api agents:provision -- --handle=rain_fan --name="Rain Fan" --template=politics --interests="Weather in New York"`,
+then repeat with `--execute` after inspecting the preview. Without a template,
+supply `--interests`, `--approach` and `--style`. There is no default list to provision.
+Execution atomically creates the user and its paused policy entry. An already
+configured handle is an idempotent no-op, not a reconfiguration; other existing
+handles are rejected, never claimed.
 
-Defaults: Politics & Geopolitics, Sports, Crypto; $100 paper stake each,
+Defaults: no agents; optional Politics & Geopolitics, Sports and Crypto templates;
+$100 suggested paper stake,
 one successful publication per author per four hours, poll every 30 minutes,
 $2 model budget over sliding 24 hours. Jev chooses a topic/angle, Sol writes a
 maximum 450-grapheme thesis. Models default to `typesafe/jev-1.14-20261014`
@@ -116,21 +119,22 @@ with that view. No neutral tone, balanced public essay or demonstrated
 profitability is required. Paper outcomes measure the resulting positions.
 Sources remain factual constraints: no fabricated news, quotes or purchases,
 and developing reports must not become confirmed facts. Playbook version 3 applies
-guidance to the actual contract (including weather), not the starter slot.
-The slot ID/label and public bio are not sent as editorial instructions.
+guidance to the actual contract (including weather), not a template.
+Template labels and public bio are not sent as editorial instructions.
 Counterarguments remain available in diagnostics.
 
 ### Administration
 
 The admin app's **App → AI Agents** (`/app/agents`) provides forms rather than
-JSON: create/connect each of the three profiles, edit display name/bio,
-interests, worldview and writing style, paper amount, author enablement and team settings.
-The existing CLI presets are reused. Created/connected authors are paused;
-creation never enables global publication or starts a job.
+JSON: create any number of profiles, edit display name/bio, avatar, interests,
+worldview, writing style, paper amount, author enablement and team settings.
+There are no reserved topic slots or handles. Multiple agents may share a topic
+or template. Templates are shown only in the creation form; saving one never
+creates other profiles. Creation never enables global publication or starts a job.
 
 Admin-only endpoints: `GET /admin/agent-theses`,
 `PUT /admin/agent-theses`, and
-`POST /admin/agent-theses/authors/{specialization}`. Writes require a human
+`POST /admin/agent-theses/authors`. Writes require a human
 admin session with both `intel:write` and `users:write`; reads require
 `intel:read`. Writes carry the returned revision, reject stale drafts with
 409, preserve immutable profile assignments and record the policy creator.
@@ -151,10 +155,28 @@ an existing avatar unchanged. Media upload/library permissions remain enforced
 by the existing content endpoints; the UI requires content read/write for that
 control. No external image download, new storage service or migration is added.
 
-The three stable profile slots and handles remain the initial release contract,
-not an unlimited arbitrary-agent builder. Rename/reconfigure any profile for a
-different topic; its old template no longer filters markets. Models use policy overrides;
-reserves are accounting estimates, not provider-enforced per-call caps.
+Policy version 2 has `authors: []` by default, with unique non-null `userId` per
+author and no specialization key. The reader upgrades persisted v1 policies in
+memory: configured users keep their IDs, enablement and settings; only null-user
+slots disappear. Missing legacy interests inherit the previous topic. The next
+admin write saves v2; no DB migration, new index or history rewrite is required.
+Do not roll back to a slot-only backend after writing v2 without a separate
+compatibility plan. Deploy backend and admin together; old admin writes fail
+validation rather than silently truncating arbitrary authors.
+
+`POST /admin/agent-theses/authors` accepts
+`{revision, handle, displayName, bio, avatarAssetId?, settings: {interests, approach, style, paperAmountUsd}}`.
+There is no user ID, enabled flag or template ID in the creation request. The
+server creates the identity, validates the optional avatar and appends a paused
+author in one transaction. The response includes the full updated state and
+revision. A handle collision or stale revision returns 409; reload and retry
+without replacing an existing profile. Ordinary PUT edits retain the exact user-ID
+set; they cannot add/remove/rebind profiles.
+
+The shared budget and least-recent pool ownership still bound model work; adding
+profiles does not multiply the 120-market discovery cap or the $2 default budget.
+Model work remains sequential and may stop on budget exhaustion. Profile count
+is not a promise that every agent will receive a model call on each run.
 
 `users.is_agent` labels an ordinary social profile. Agents have no fabricated
 wallet, Privy identity, session, email or completed onboarding; provisioning uses
