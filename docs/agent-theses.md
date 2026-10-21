@@ -138,10 +138,11 @@ accounted in full and reduces/stops subsequent calls, but cannot undo that charg
   separate from public bio, worldview and writing style. Named people, companies,
   places and narrow topics are supported; starter templates are not restrictions.
   Existing policies without interests inherit their former topic as a preference.
-- Jev receives at most 24 candidates per author. Up to half the slots prefer
-  semantic interest matches plus lexical overlap; no category restriction is added.
-  Fresh material gets a quota;
-  remaining slots explore the map. Per-author consideration timestamps prevent a
+- Jev receives at most 24 candidates per author. Interest matches and fresh
+  relevant material are preferred before unrelated rotation. One exploration
+  slot remains for aliases/multilingual retrieval gaps. Event-title grouping
+  spreads ladder variants across the shortlist without merging contracts or
+  imposing a hard topic cap. Per-author consideration timestamps prevent a
   fresh prefix from permanently crowding out other markets. No volume minimum.
   A rare topic is not guaranteed in every bounded pass. Jev may choose `none`;
   there is no forced unrelated publication or new search for missing topics.
@@ -150,7 +151,20 @@ accounted in full and reduces/stops subsequent calls, but cannot undo that charg
   persona. Cross-category people/themes remain valid; explicit geopolitical interests
   can legitimately include Hormuz. `none`/`skip` is preferred to rationalizing an
   off-topic contract. This is a prompt contract, not a claim of perfect classification.
-- After Jev, the preferred contract and up to two alternatives from the same
+- Normally two bounded Jev calls: first screen the 24 topics independently for
+  topic fit, usable contract-specific context and an acceptable quoted side;
+  then select from the usable set. Screening sees the complete condition, actual
+  side labels/asks and dated background. It does not demand proven edge, new
+  research or optional news. All-rejected screening skips the writer; failures
+  are diagnosed and fall back to the selector, never bypassing budget/lease rules.
+  Rich screening payloads split into smaller batches within the existing 256-KiB
+  request limit instead of dropping settlement clauses or later news sources.
+  There are at most 24 screening calls (normally one), plus one selection call;
+  every call uses the caller's existing rolling budget and reservation ledger.
+  An individually oversized contract fails preflight before screening spend and
+  is diagnosed through the same fallback; it does not raise resource limits.
+- After Jev, the preferred contract and up to two alternatives ranked by Jev's
+  validated option scores (not simply the first shortlist rows) from the same
   shortlist get deeper
   saved context: up to four recent interpretations including an opposite view, up
   to four relevant saved news items from a bounded 600-item page, and at most two
@@ -159,6 +173,11 @@ accounted in full and reduces/stops subsequent calls, but cannot undo that charg
   provided sources is 14; the author may cite up to eight. No accepted quote or
   instrument is changed by context enrichment.
 - The writer can choose an alternative in the same single paid writing call;
+  it must assess the supplied side and ask BEFORE drafting. An honest maximum
+  below the observed ask requires another acceptable candidate/side or a skip,
+  not inflating the maximum. An inconsistent model output is retained as a draft
+  with `writer_entry_above_observed_ask`, distinct from the final `price_changed`
+  guard. Final fresh-quote, instrument-generation and publication checks remain.
   there are no automatic paid retries after refusal. Jev `none` skips that author.
   Provider/invalid-response fallback still uses at most three candidates. Budget/lease failure never
   falls through to an unpaid/unowned call.
@@ -181,6 +200,14 @@ accounted in full and reduces/stops subsequent calls, but cannot undo that charg
   single-candidate request records `writer_context_too_large` without calling
   the writer or taking a publication slot; ordinary rotation can try another
   candidate. No global source-coverage gate is imposed.
+
+Candidate loading excludes missing exact conditions and ask = 1.00 before model
+spend (even a full payout has no positive gross upside). This is not a generic
+price band: 0.001/0.95, one-sided books and small markets are not automatically
+invalid. Never infer settlement from price alone. Exclusions are diagnostic and
+recover on a subsequent normal pass when source data/quotes become usable.
+Preview `screening[]` is optional for older saved runs and shows each candidate's
+`usable/off_topic/insufficient_context/entry_not_acceptable` classification.
 
 Redis namespace: `ai:agent_theses:v1`. `runs` references bounded 30-day run
 artifacts; `cursor:<userId>` resumes each agent's discovery and

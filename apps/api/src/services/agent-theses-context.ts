@@ -27,6 +27,12 @@ import type { AgentRedis } from "./agent-theses-state.js";
 import { AGENT_THESES_PREFIX } from "./agent-theses-state.js";
 import { validatePaperQuote } from "./agent-theses-publish.js";
 import { relatedAgentMarkets } from "./agent-theses-retrieval.js";
+import { compareSocialDecimal } from "./social-primitives.js";
+import {
+  parseMetadata,
+  pickString,
+  resolveMarketDescription,
+} from "../lib/metadata-description.js";
 
 export type AgentCandidate = {
   marketId: string;
@@ -197,6 +203,26 @@ export async function loadAgentMarketPool(
   };
 }
 
+/** DFlow stores settlement/early-close rules in metadata, not always description. */
+export function agentMarketCondition(
+  description: unknown,
+  rawMetadata: unknown,
+): string {
+  const metadata = parseMetadata(rawMetadata);
+  const clauses = [resolveMarketDescription(description, metadata)];
+  for (const keys of [
+    ["rulesPrimary", "rules_primary"],
+    ["rulesSecondary", "rules_secondary"],
+    ["earlyCloseCondition", "early_close_condition"],
+  ]) {
+    const clause = keys.map((key) => pickString(metadata, key)).find(Boolean);
+    if (clause) clauses.push(clause);
+  }
+  return [
+    ...new Set(clauses.filter((clause): clause is string => Boolean(clause))),
+  ].join("\n\n");
+}
+
 export async function loadAgentCandidates(input: {
   db: DbQuery;
   redis: AgentRedis;
@@ -226,6 +252,11 @@ export async function loadAgentCandidates(input: {
   const diagnostics: string[] = [];
   for (const row of rows) {
     if (!socialMarketAccepting(row)) continue;
+    const condition = agentMarketCondition(row.description, row.metadata);
+    if (!condition) {
+      diagnostics.push(`candidate_excluded:${row.id}:missing_condition`);
+      continue;
+    }
     const instrument = buildSocialInstrument({
       marketId: row.id,
       venue: row.venue,
@@ -248,12 +279,18 @@ export async function loadAgentCandidates(input: {
     } catch {
       continue;
     }
+    // At 1.00 even a full winning payout has no positive gross return. This
+    // mathematical boundary is not an arbitrary high/low probability cutoff.
+    if (compareSocialDecimal(quote.ask, "1") >= 0) {
+      diagnostics.push(`side_excluded:${row.id}:${row.side}:no_payout_upside`);
+      continue;
+    }
     const candidate: AgentCandidate = candidates.get(row.id) ?? {
       marketId: row.id,
       title: text(row.title, 240),
       // Settlement clauses often appear at the end. Only optional excerpts are
       // shortened; the writer's complete request has a separate resource bound.
-      condition: typeof row.description === "string" ? row.description : "",
+      condition,
       category: text(row.category, 120),
       eventTitle: text(row.event_title, 240),
       closesAt: iso(row.close_time ?? row.expiration_time),
@@ -449,6 +486,22 @@ async function attachAgentStoredNotes(
 }
 
 /** Fresh material gets room, but cannot permanently occupy all model slots. */
+function diversify<T extends { candidate: AgentCandidate }>(rows: T[]): T[] {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    // Presentation grouping only: never merge identities, quotes or sources.
+    const key =
+      row.candidate.eventTitle.trim().toLowerCase() || row.candidate.marketId;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  const result: T[] = [];
+  for (let i = 0; result.length < rows.length; i++)
+    for (const group of groups.values()) if (group[i]) result.push(group[i]);
+  return result;
+}
+
 export function selectAgentShortlist(
   candidates: AgentCandidate[],
   freshIds: string[],
@@ -487,12 +540,13 @@ export function selectAgentShortlist(
   // candidate so a persistent fresh note cannot starve exploration.
   if (maximum <= 1)
     return ranked.slice(0, Math.max(0, maximum)).map((r) => r.candidate);
-  const preferred = ranked
-    .filter((r) => r.relevance > 0)
-    .sort(
-      (a, b) => a.at - b.at || b.relevance - a.relevance || a.index - b.index,
-    )
-    .slice(0, Math.floor(maximum / 2));
+  const preferred = diversify(
+    ranked
+      .filter((r) => r.relevance > 0)
+      .sort(
+        (a, b) => a.at - b.at || b.relevance - a.relevance || a.index - b.index,
+      ),
+  ).slice(0, Math.floor(maximum / 2));
   const preferredIds = new Set(preferred.map((r) => r.candidate.marketId));
   const remaining = ranked.filter(
     (r) => !preferredIds.has(r.candidate.marketId),
@@ -501,11 +555,13 @@ export function selectAgentShortlist(
     Math.max(1, Math.floor(maximum / 3)),
     maximum - preferred.length - 1,
   );
+  const freshRows = remaining.filter((r) => fresh.has(r.candidate.marketId));
+  const relevantRemain = remaining.some((r) => r.relevance > 0);
   const selected = [
     ...preferred,
-    ...remaining
-      .filter((r) => fresh.has(r.candidate.marketId))
-      .slice(0, freshQuota),
+    ...diversify(
+      freshRows.filter((r) => !relevantRemain || r.relevance > 0),
+    ).slice(0, freshQuota),
   ];
   const used = new Set(selected.map((r) => r.candidate.marketId));
   const exploration = [...ranked].sort(
@@ -515,7 +571,15 @@ export function selectAgentShortlist(
         Number(fresh.has(b.candidate.marketId)) ||
       a.index - b.index,
   );
-  for (const row of exploration)
+  // Fill with diverse relevant candidates before unrelated fresh/rotation
+  // rows. Keep one real exploration slot for aliases and multilingual gaps.
+  const relevant = diversify(exploration.filter((r) => r.relevance > 0));
+  for (const row of relevant)
+    if (selected.length < maximum - 1 && !used.has(row.candidate.marketId)) {
+      selected.push(row);
+      used.add(row.candidate.marketId);
+    }
+  for (const row of diversify(exploration))
     if (selected.length < maximum && !used.has(row.candidate.marketId)) {
       selected.push(row);
       used.add(row.candidate.marketId);

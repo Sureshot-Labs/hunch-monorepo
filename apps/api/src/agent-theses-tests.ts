@@ -1,4 +1,5 @@
 import { agentFixtureAuthors } from "./fixtures/agent-theses-authors.js";
+import { agentScreenFixture } from "./fixtures/agent-theses-screening.js";
 import assert from "node:assert/strict";
 import {
   DEFAULT_AGENT_THESES_POLICY,
@@ -757,7 +758,7 @@ await writeAgentThesis({
     );
     assert.ok(
       body.messages[0].content.includes(
-        "Write the thesis even when the observed ask exceeds",
+        "choose an acceptable alternative in this same response BEFORE drafting",
       ),
     );
     return {
@@ -767,7 +768,7 @@ await writeAgentThesis({
             content: JSON.stringify({
               ...decision,
               sourceIds: ["hunch-note"],
-              maxEntryPrice: "0.4",
+              maxEntryPrice: "0.5",
             }),
           },
         },
@@ -825,7 +826,8 @@ for (const skip of [false, true]) {
     onProgress: async () => {},
     model: async (call) => {
       stages.push(call.stage);
-      if (call.stage === "jev") return jev("c0");
+      if (call.stage === "jev")
+        return agentScreenFixture(call.body) ?? jev("c0");
       const body = call.body as { messages: Array<{ content: string }> };
       const supplied = JSON.parse(body.messages[1].content);
       assert.deepEqual(
@@ -864,7 +866,7 @@ for (const skip of [false, true]) {
       };
     },
   });
-  assert.deepEqual(stages, ["jev", "writer"]);
+  assert.deepEqual(stages, ["jev", "jev", "writer"]);
   assert.equal((report.writerCandidates as unknown[]).length, 3);
   if (skip) {
     assert.equal(found, null);

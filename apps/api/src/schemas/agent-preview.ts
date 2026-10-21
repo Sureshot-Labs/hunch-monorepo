@@ -57,6 +57,21 @@ export const agentPreviewSchema = z.object({
   stage: z.enum(["loading", "selection", "writing", "validation", "finished"]),
   reason: z.string().nullable(),
   reasonDetail: z.string().max(1200).nullable().optional(),
+  screening: z
+    .array(
+      z.object({
+        marketId: z.string(),
+        title: z.string(),
+        decision: z.enum([
+          "usable",
+          "off_topic",
+          "insufficient_context",
+          "entry_not_acceptable",
+        ]),
+      }),
+    )
+    .max(24)
+    .optional(),
   writerCandidates: z
     .array(z.object({ marketId: z.string(), title: z.string() }))
     .max(3)
