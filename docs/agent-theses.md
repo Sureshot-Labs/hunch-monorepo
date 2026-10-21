@@ -150,27 +150,33 @@ accounted in full and reduces/stops subsequent calls, but cannot undo that charg
   persona. Cross-category people/themes remain valid; explicit geopolitical interests
   can legitimately include Hormuz. `none`/`skip` is preferred to rationalizing an
   off-topic contract. This is a prompt contract, not a claim of perfect classification.
-- After Jev, only the selected contract (up to three on error fallback) gets deeper
+- After Jev, the preferred contract and up to two alternatives from the same
+  shortlist get deeper
   saved context: up to four recent interpretations including an opposite view, up
   to four relevant saved news items from a bounded 600-item page, and at most two
   notes from up to four similar saved markets. Related-contract notes are explicitly
   labeled background, never evidence of the selected contract's outcome. Maximum
   provided sources is 14; the author may cite up to eight. No accepted quote or
   instrument is changed by context enrichment.
-- Jev `none` skips that author. Provider/invalid-response fallback lets the writer
-  choose from at most three candidates in one call. Budget/lease failure never
+- The writer can choose an alternative in the same single paid writing call;
+  there are no automatic paid retries after refusal. Jev `none` skips that author.
+  Provider/invalid-response fallback still uses at most three candidates. Budget/lease failure never
   falls through to an unpaid/unowned call.
 - Writers see up to twelve recent posts (older/other views excerpted to 1,600 code points)
   plus the complete last exact-contract view for each candidate, even if it falls outside
   that recent window. Jev gets excerpts capped at 800 code points. Excerpts are marked,
   never passed off as full prior text. Publication dedup still reads the stored originals.
-  Background Hunch
-  analysis is not independent external confirmation. A repeated side/evidence/
+  Only `authorPublicationHistory` contains the author's own publications. Every
+  candidate explicitly identifies its last own publication or `first_publication`.
+  Shared Hunch notes are reusable background, not the author's past views or
+  independent external confirmation. The author can reinterpret them without
+  requiring a new event. Repeat/change-of-view rules concern only own publications.
+  A repeated side/evidence/
   angle fingerprint is rejected even if the words change. This is a deterministic
   repetition check, not a claim of perfect semantic deduplication.
 - The writer receives complete settlement rules, including trailing clauses.
   Jev's compact condition is explicitly marked when it is an excerpt. A writer
-  request is capped at 256 KiB of serialized JSON: multi-candidate fallback drops
+  request is capped at 256 KiB of serialized JSON: multi-candidate input drops
   trailing candidates first, never contract clauses. An exceptionally oversized
   single-candidate request records `writer_context_too_large` without calling
   the writer or taking a publication slot; ordinary rotation can try another
@@ -190,6 +196,10 @@ Preview responses optionally include `retrieval` (pool/semantic counts, cache hi
 generated interest vectors, retrieval duration) and `shortlist` (the exact candidates
 shown to Jev, with titles/category/semantic rank). Older saved previews remain readable.
 The admin panel shows these in an expandable list; rank is not a recommendation score.
+`writerCandidates` lists the contracts prepared for the writer after input-size
+trimming; it does not prove that budget reservation or the paid call succeeded.
+`reasonDetail` exposes the writer's concrete refusal immediately, outside
+collapsed diagnostics. Older saved writer refusals use their existing explanation.
 No prompt/provider exception containing credentials is logged.
 
 ## Purchase and financial boundaries
@@ -212,9 +222,14 @@ language 160 (settings bounds use JS string units). Thesis length uses graphemes
 Public name/bio retain ordinary social-profile limits; use worldview for a full persona.
 Jev selects topics that fit the persona; the writer chooses a side consistent
 with that view. No neutral tone, balanced public essay or demonstrated
-profitability is required. Paper outcomes measure the resulting positions.
+profitability is required. Writers should express a relevant opinion rather than
+certify a trading edge: a clearly labeled subjective prior or interpretation is
+enough, without new independent research. If the ask exceeds the writer's maximum,
+the preview retains the thesis but refuses the paper entry. Missing facts are not
+invented; the writer can try another supplied angle or market instead.
+Paper outcomes measure the resulting positions.
 Sources remain factual constraints: no fabricated news, quotes or purchases,
-and developing reports must not become confirmed facts. Playbook version 5 applies
+and developing reports must not become confirmed facts. Playbook version 6 applies
 guidance to the actual contract (including weather), not a template.
 Template labels and public bio are not sent as editorial instructions.
 Counterarguments remain available in diagnostics.

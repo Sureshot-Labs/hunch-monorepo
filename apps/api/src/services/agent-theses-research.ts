@@ -187,7 +187,10 @@ export async function researchAgent(input: {
       authorReport.status = "jev_none";
       return null;
     }
-    selected = [choice.candidate];
+    selected = [
+      choice.candidate,
+      ...shortlist.filter((c) => c.marketId !== choice.candidate?.marketId),
+    ].slice(0, 3);
     authorReport.selection = {
       marketId: choice.candidate.marketId,
       title: choice.candidate.title,
@@ -219,8 +222,6 @@ export async function researchAgent(input: {
     sources: c.sources.length,
   }));
   await input.assertLease();
-  authorReport.stage = "writing";
-  await input.onProgress();
   const decision = await writeAgentThesis({
     model,
     author,
@@ -229,6 +230,15 @@ export async function researchAgent(input: {
     angle,
     policy,
     now: now(),
+    onCandidates: async (candidates) => {
+      authorReport.writerCandidates = candidates.map((c) => ({
+        marketId: c.marketId,
+        title: c.title,
+      }));
+      authorReport.stage = "writing";
+      await input.assertLease();
+      await input.onProgress();
+    },
     onDraft: async (decision) => {
       // Only supplied markets can be displayed; source URLs always come from context.
       const candidate = selected.find((c) => c.marketId === decision.marketId);
@@ -246,6 +256,12 @@ export async function researchAgent(input: {
     (s) => s.instrument.outcome === decision.outcome,
   );
   if (!candidate || !side) throw new Error("agent_invalid_selection");
+  authorReport.selection = {
+    marketId: candidate.marketId,
+    title: candidate.title,
+    eventTitle: candidate.eventTitle,
+    condition: candidate.condition,
+  };
   const provenance = agentProvenance({
     decision,
     candidate,
