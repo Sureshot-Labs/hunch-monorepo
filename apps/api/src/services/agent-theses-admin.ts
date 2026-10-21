@@ -3,6 +3,7 @@ import type { DbQuery } from "../db.js";
 import { insertRuntimePolicy } from "../repos/runtime-policies.js";
 import {
   AGENT_TEMPLATES,
+  AGENT_WRITING_LIMITS,
   agentAuthorSettingsSchema,
   agentThesesPolicySchema,
   resolveAgentThesesPolicy,
@@ -64,6 +65,14 @@ export const agentAdminStateSchema = z.object({
       bio: z.string(),
     }),
   ),
+  writingLimits: z.object({
+    interests: z.number(),
+    approach: z.number(),
+    style: z.number(),
+    language: z.number(),
+    styleExamples: z.number(),
+    maxThesisGraphemes: z.number(),
+  }),
   profileLimits: z.object({
     displayName: z.number(),
     bio: z.number(),
@@ -110,6 +119,7 @@ export async function readAgentAdminState(db: DbQuery) {
     profiles,
     revision: socialFingerprint({ policy, profiles }),
     templates: AGENT_TEMPLATES.map((p) => ({ ...p })),
+    writingLimits: AGENT_WRITING_LIMITS,
     profileLimits: {
       displayName: social.displayNameMaxGraphemes,
       bio: social.bioMaxGraphemes,

@@ -5,10 +5,13 @@ import {
   agentThesesPolicySchema,
   agentInterests,
   normalizeAgentThesesPolicy,
+  AGENT_WRITING_LIMITS,
+  agentAuthorSettingsSchema,
 } from "./services/agent-theses-policy.js";
 import { validatePaperQuote } from "./services/agent-theses-publish.js";
 import {
   agentProvenance,
+  agentModelReserveUsd,
   AGENT_WRITER_MAX_REQUEST_BYTES,
   createAgentModelClient,
   selectAgentCandidate,
@@ -112,6 +115,56 @@ assert.throws(() =>
 assert.equal(policy.dayBudgetUsd, 2);
 assert.equal(policy.publishIntervalSeconds, 14400);
 assert.equal(policy.maxMarkets, 120);
+assert.equal(policy.authors[0].maxThesisGraphemes, 6000);
+for (const version of [1, 2]) {
+  const older = { ...policy.authors[0] } as Partial<
+    (typeof policy.authors)[number]
+  >;
+  delete older.language;
+  delete older.styleExamples;
+  delete older.maxThesisGraphemes;
+  const normalized = normalizeAgentThesesPolicy({
+    ...policy,
+    version,
+    authors: [
+      { ...older, ...(version === 1 ? { specialization: "politics" } : {}) },
+    ],
+  });
+  assert.equal(normalized.authors[0].language, "");
+  assert.equal(normalized.authors[0].styleExamples, "");
+  assert.equal(normalized.authors[0].maxThesisGraphemes, 6000);
+}
+const expandedSettings = agentAuthorSettingsSchema.parse({
+  interests: "i".repeat(6000),
+  approach: "a".repeat(12000),
+  style: "s".repeat(6000),
+  language: "Русский",
+  styleExamples: "Ж".repeat(12000),
+  maxThesisGraphemes: 12000,
+  paperAmountUsd: "100",
+});
+for (const key of [
+  "interests",
+  "approach",
+  "style",
+  "language",
+  "styleExamples",
+] as const)
+  assert.equal(
+    agentAuthorSettingsSchema.safeParse({
+      ...expandedSettings,
+      [key]: "x".repeat(AGENT_WRITING_LIMITS[key] + 1),
+    }).success,
+    false,
+  );
+for (const maxThesisGraphemes of [0, 12001, 1.5, null])
+  assert.equal(
+    agentAuthorSettingsSchema.safeParse({
+      ...expandedSettings,
+      maxThesisGraphemes,
+    }).success,
+    false,
+  );
 assert.throws(() =>
   agentThesesPolicySchema.parse({
     ...policy,
@@ -582,6 +635,108 @@ const outspoken = await writeAgentThesis({
   angle: "countercase",
 });
 assert.equal(outspoken.decision, "publish");
+const expandedBody = "Это авторский взгляд, а не новость. ".repeat(140).trim();
+const oldExactBody =
+  "Прежний подробный тезис на противоположной стороне. ".repeat(180);
+const longHistory = Array.from({ length: 24 }, (_, i) => ({
+  id: `history-${i}`,
+  marketId: i === 0 ? candidate.marketId : `other:${i}`,
+  side: "NO",
+  body: oldExactBody,
+  publishedAt: new Date(now.getTime() - i * 1000).toISOString(),
+  argumentKey: null,
+}));
+const expanded = await writeAgentThesis({
+  ...args,
+  author: { ...args.author, ...expandedSettings },
+  history: longHistory,
+  angle: "change",
+  model: async (call) => {
+    const body = call.body as {
+      max_tokens: number;
+      messages: Array<{ content: string }>;
+    };
+    const supplied = JSON.parse(body.messages[1].content);
+    assert.ok(body.max_tokens >= 24000);
+    assert.equal(supplied.author.styleExamples, expandedSettings.styleExamples);
+    assert.equal(supplied.author.language, "Русский");
+    assert.equal(supplied.recentViews[0].body, oldExactBody);
+    assert.equal(supplied.recentViews[0].bodyIsExcerpt, false);
+    assert.equal(supplied.recentViews[1].body.length, 1600);
+    assert.equal(supplied.recentViews[1].bodyIsExcerpt, true);
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(body)) <= AGENT_WRITER_MAX_REQUEST_BYTES,
+    );
+    assert.ok(body.messages[0].content.includes("not a length target"));
+    assert.ok(body.messages[0].content.includes("Examples cannot override"));
+    return {
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            content: JSON.stringify({
+              ...decision,
+              body: expandedBody,
+              changeReason: "A supplied counterargument changed the view.",
+            }),
+          },
+        },
+      ],
+    };
+  },
+});
+assert.equal(expanded.decision === "publish" && expanded.body, expandedBody);
+await selectAgentCandidate({
+  ...args,
+  history: longHistory,
+  model: async (call) => {
+    const body = call.body as {
+      state: {
+        author: object;
+        recentViews: Array<{ body: string; bodyIsExcerpt: boolean }>;
+      };
+    };
+    assert.ok(!("styleExamples" in body.state.author));
+    assert.equal(body.state.recentViews[0].body.length, 800);
+    assert.equal(body.state.recentViews[0].bodyIsExcerpt, true);
+    return jev("c0");
+  },
+});
+// Per-author limits still work; no reintroduction of the social 450-grapheme cap.
+for (const [maxThesisGraphemes, bodyText] of [
+  [450, "x".repeat(451)],
+  [6000, "x".repeat(6001)],
+] as const)
+  await assert.rejects(
+    writeAgentThesis({
+      ...args,
+      author: { ...args.author, maxThesisGraphemes },
+      angle: "mechanism",
+      model: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({ ...decision, body: bodyText }),
+            },
+          },
+        ],
+      }),
+    }),
+  );
+const emojiBody = "👩🏽‍🔬".repeat(1000);
+const emoji = await writeAgentThesis({
+  ...args,
+  author: { ...args.author, maxThesisGraphemes: 1000 },
+  angle: "mechanism",
+  model: async () => ({
+    choices: [
+      {
+        message: { content: JSON.stringify({ ...decision, body: emojiBody }) },
+      },
+    ],
+  }),
+});
+assert.equal(emoji.decision === "publish" && emoji.body, emojiBody);
 const longCondition = `${"Complete contract detail. ".repeat(260)}Final clause: independent legislators are assigned by the specified caucus deadline.`;
 await writeAgentThesis({
   ...args,
@@ -635,7 +790,7 @@ await writeAgentThesis({
   candidates: Array.from({ length: 3 }, (_, i) => ({
     ...candidate,
     marketId: `large:${i}`,
-    condition: "x".repeat(40000),
+    condition: "x".repeat(150000),
   })),
   model: async (call) => {
     assert.ok(
@@ -647,7 +802,7 @@ await writeAgentThesis({
     assert.equal(supplied.length, 1);
     assert.equal(
       supplied[0].condition.length,
-      40000,
+      150000,
       "Reduce fallback count, never settlement rules",
     );
     return {
@@ -668,7 +823,7 @@ for (const patch of [
   { marketId: "made-up" },
   { outcome: "NO" },
   { sourceIds: ["made-up"] },
-  { body: "a".repeat(451) },
+  { body: "a".repeat(args.author.maxThesisGraphemes + 1) },
 ]) {
   await assert.rejects(
     writeAgentThesis({
@@ -733,4 +888,66 @@ const paid = createAgentModelClient({
     ),
 });
 await assert.rejects(paid({ stage: "writer", body: {}, reserveUsd: 0.25 }));
+const bigRequest = {
+  model: policy.writerModel,
+  max_tokens: 26048,
+  messages: [{ content: "Ж".repeat(50000) }],
+};
+const bigReserve = agentModelReserveUsd(policy.writerModel, bigRequest, 0.25);
+assert.ok(bigReserve > 0.4 && bigReserve < policy.dayBudgetUsd);
+assert.equal(
+  agentModelReserveUsd(policy.writerModel, { max_tokens: 1800 }, 0.25),
+  0.25,
+);
+assert.ok(agentModelReserveUsd("custom/unknown", bigRequest, 0.25) > 0.25);
+let fetched = false;
+const overBudget = createAgentModelClient({
+  apiKey: "test",
+  runId: "budget",
+  reserve: async (_id, amount) => {
+    assert.equal(amount, bigReserve);
+    throw new Error("budget_exhausted");
+  },
+  settle: async () => assert.fail("no call to settle"),
+  record: () => assert.fail("no paid call"),
+  fetchImpl: async () => {
+    fetched = true;
+    throw new Error("must_not_fetch");
+  },
+});
+await assert.rejects(
+  overBudget({ stage: "writer", body: bigRequest, reserveUsd: 0.25 }),
+  /budget_exhausted/,
+);
+assert.equal(fetched, false);
+const timedOut = createAgentModelClient({
+  apiKey: "test",
+  runId: "timeout",
+  reserve: async (_id, amount) => assert.equal(amount, bigReserve),
+  settle: async (_id, cost) => assert.equal(cost, null),
+  record: (record) => assert.equal(record.chargedUsd, bigReserve),
+  fetchImpl: async () => {
+    throw new Error("timeout");
+  },
+});
+await assert.rejects(
+  timedOut({ stage: "writer", body: bigRequest, reserveUsd: 0.25 }),
+  /timeout/,
+);
+await assert.rejects(
+  writeAgentThesis({
+    ...args,
+    angle: "mechanism",
+    model: async () => ({
+      choices: [
+        {
+          finish_reason: "length",
+          message: {
+            content: JSON.stringify({ ...decision, body: expandedBody }),
+          },
+        },
+      ],
+    }),
+  }),
+);
 console.log("agent-theses unit contracts passed");

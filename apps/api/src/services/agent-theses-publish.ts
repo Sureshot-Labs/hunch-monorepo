@@ -135,10 +135,7 @@ export async function publishAgentThesis(input: {
     const previous = history.rows[0];
     if ((previous?.id ?? null) !== input.provenance.previousThesisId)
       throw new SocialError("previous_thesis_changed", 409);
-    const body = socialText(
-      input.body,
-      Math.min(450, social.policy.thesisMaxGraphemes),
-    );
+    const body = socialText(input.body, author.maxThesisGraphemes);
     if (
       previous &&
       (previous.body === body ||

@@ -158,7 +158,11 @@ try {
     db,
     userId: author,
     idempotencyKey: key,
-    body: "Away has a supported advantage, but the opposing record matters.",
+    body:
+      "Моя позиция: Away.\n\n" +
+      "Это развёрнутый взгляд на матч, а не подтверждённая новость. "
+        .repeat(60)
+        .trim(),
     instrument,
     provenance,
     maxEntryPrice: "0.51",
@@ -168,6 +172,10 @@ try {
   await assert.rejects(
     publishAgentThesis({ ...input, userId: viewer }),
     /agent_unavailable/,
+  );
+  await assert.rejects(
+    publishAgentThesis({ ...input, body: "x".repeat(6001) }),
+    /invalid_text_length/,
   );
   await assert.rejects(
     publishAgentThesis({
@@ -257,6 +265,11 @@ try {
     await service.getThesis(viewer, published.id),
   );
   assert.equal(thesis.purchaseMode, "paper");
+  assert.equal(
+    thesis.body,
+    input.body,
+    "Long multi-paragraph paper text survives the normal social 450 limit",
+  );
   assert.equal(thesis.author.isAgent, true);
   assert.equal(thesis.instrument.outcomeLabel, "Away");
   assert.equal(thesis.netShares, "200");

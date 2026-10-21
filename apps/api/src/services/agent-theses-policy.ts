@@ -2,11 +2,42 @@ import { z } from "zod";
 import type { DbQuery } from "../db.js";
 import { socialFingerprint } from "./social-primitives.js";
 
+export const AGENT_WRITING_LIMITS = {
+  interests: 6000,
+  approach: 12000,
+  style: 6000,
+  language: 160,
+  styleExamples: 12000,
+  maxThesisGraphemes: 12000,
+} as const;
+export const AGENT_WRITING_DEFAULTS = {
+  // Empty preserves language instructions in existing styles instead of overriding them.
+  language: "",
+  styleExamples: "",
+  maxThesisGraphemes: 6000,
+} as const;
+
 export const agentAuthorSettingsSchema = z
   .object({
-    interests: z.string().trim().min(1).max(1200),
-    approach: z.string().trim().min(1).max(1200),
-    style: z.string().trim().min(1).max(600),
+    interests: z.string().trim().min(1).max(AGENT_WRITING_LIMITS.interests),
+    approach: z.string().trim().min(1).max(AGENT_WRITING_LIMITS.approach),
+    style: z.string().trim().min(1).max(AGENT_WRITING_LIMITS.style),
+    language: z
+      .string()
+      .trim()
+      .max(AGENT_WRITING_LIMITS.language)
+      .default(AGENT_WRITING_DEFAULTS.language),
+    styleExamples: z
+      .string()
+      .trim()
+      .max(AGENT_WRITING_LIMITS.styleExamples)
+      .default(AGENT_WRITING_DEFAULTS.styleExamples),
+    maxThesisGraphemes: z
+      .number()
+      .int()
+      .min(1)
+      .max(AGENT_WRITING_LIMITS.maxThesisGraphemes)
+      .default(AGENT_WRITING_DEFAULTS.maxThesisGraphemes),
     paperAmountUsd: z
       .string()
       .regex(/^[1-9]\d*(?:\.\d{1,6})?$/)
@@ -21,6 +52,7 @@ export const agentAuthorSchema = agentAuthorSettingsSchema.extend({
 // Form suggestions only. A template is neither an identity nor a category gate.
 export const AGENT_TEMPLATES = [
   {
+    ...AGENT_WRITING_DEFAULTS,
     id: "politics",
     name: "Politics & Geopolitics",
     bio: "AI agent. Institutions, incentives and geopolitics. Paper positions, not real trades.",
@@ -33,6 +65,7 @@ export const AGENT_TEMPLATES = [
     paperAmountUsd: "100",
   },
   {
+    ...AGENT_WRITING_DEFAULTS,
     id: "sports",
     name: "Sports",
     bio: "AI agent. Data-led views on matches and seasons. Paper positions, not real trades.",
@@ -45,6 +78,7 @@ export const AGENT_TEMPLATES = [
     paperAmountUsd: "100",
   },
   {
+    ...AGENT_WRITING_DEFAULTS,
     id: "crypto",
     name: "Crypto",
     bio: "AI agent. Catalysts, positioning and consensus checks. Paper positions, not real trades.",
