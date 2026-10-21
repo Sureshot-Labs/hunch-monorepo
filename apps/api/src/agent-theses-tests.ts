@@ -113,6 +113,12 @@ assert.throws(() =>
   }),
 );
 assert.equal(policy.dayBudgetUsd, 2);
+assert.equal(policy.previewDayBudgetUsd, 2);
+const { previewDayBudgetUsd: _testBudget, ...oldBudgetPolicy } = policy;
+assert.equal(
+  normalizeAgentThesesPolicy(oldBudgetPolicy).previewDayBudgetUsd,
+  2,
+);
 assert.equal(policy.publishIntervalSeconds, 14400);
 assert.equal(policy.maxMarkets, 120);
 assert.equal(policy.authors[0].maxThesisGraphemes, 6000);

@@ -44,6 +44,45 @@ supported for configured policies. An unexpected revision uses normal fallback,
 not an unverified result. This changes only the agent default, not other pipelines.
 No external search, additional research or embedding generation occurs.
 
+## Paid previews (admin only)
+
+**Try — paid run** tests one existing agent with its unsaved interests, voice,
+language, examples, length and paper amount. Team models and pool limits always
+come from the saved server policy. It works while automatic publication or the
+agent is paused and during publication cooldown; unavailable/suspended profiles
+cannot run. Jev `none`, writer `skip`, empty candidates and validation failures
+are valid outcomes; a test never forces a thesis.
+
+- `POST /admin/agent-theses/authors/:userId/preview`: `{requestId: UUID, settings}`;
+  returns `202` with a run. Requires an admin session, CSRF, `intel:write` and
+  `users:write`. Reusing the same admin/request ID returns the existing run;
+  changing its settings returns a conflict.
+- `GET /admin/agent-theses/previews/:runId`: requires `intel:read`; returns stage,
+  selected market/condition, safe draft, checked sources, side, entry boundary,
+  hypothetical amount/shares, diagnostics and costs. Responses are private/no-store.
+- `previewDayBudgetUsd` defaults to **$2 per rolling 24 hours**, separate from
+  scheduled publication spend and shared by all admins/agents. The server rereads
+  this saved cap before reserving each model call; the request cannot raise it.
+  Actual provider cost and unknown-cost reserves are shown separately.
+- One renewable preview lease per team, independent of the scheduled runner.
+  The API executes the common research pipeline asynchronously; Redis keeps
+  progress/results for 24 hours. No new queue, container or schedule is needed.
+  Losing the executor/lease marks the run interrupted when read, never retries it.
+  Unknown timeout costs remain reserved. Closing the panel does not cancel a call.
+- SQL reads use bounded read-only transactions, released before model work.
+  No thesis, purchase ID, financial record, settings, cooldown, discovery cursor,
+  considered timestamp or production-run history is written. Existing stored
+  context/embeddings are reused, without generating embeddings or doing research.
+- Post-generation rejection keeps the draft visible; unvalidated text is not a
+  valid paper entry. There is no publish action in the preview panel. Text is
+  rendered as plain text; only validated context URLs can become source links.
+
+The four-hour interval is **per agent between successful publications**. Every
+30 minutes the scheduled runner processes eligible agents sequentially within
+the shared automatic budget; several agents may publish in the same pass.
+Errors, skips and previews do not start that interval. This is not one agent
+every four hours and is not a guaranteed publication schedule.
+
 Both models and per-call reserves are policy-configurable. A model replacement
 must use a conservative reserve appropriate to its bounded input/output; reserves
 are **not provider-enforced dollar limits**. Writer output allowance is

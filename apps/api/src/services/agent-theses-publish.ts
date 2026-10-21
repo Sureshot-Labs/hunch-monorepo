@@ -126,65 +126,14 @@ export async function publishAgentThesis(input: {
         policy.publishIntervalSeconds * 1000
     )
       throw new SocialError("publication_cooldown", 409);
-    // Market index, exact contract. The latest public thesis is not necessarily the author's last post overall.
-    const history = await db.query(
-      `select id,outcome,body,buy_snapshot from user_theses where author_id=$1 and market_id=$2
-       order by published_at desc,id desc limit 1`,
-      [input.userId, input.instrument.marketId],
-    );
-    const previous = history.rows[0];
-    if ((previous?.id ?? null) !== input.provenance.previousThesisId)
-      throw new SocialError("previous_thesis_changed", 409);
-    const body = socialText(input.body, author.maxThesisGraphemes);
-    if (
-      previous &&
-      (previous.body === body ||
-        previous.buy_snapshot?.provenance?.argumentKey ===
-          input.provenance.argumentKey)
-    )
-      throw new SocialError("repeated_argument", 409);
-    if (previous && !input.provenance.changeReason?.trim())
-      throw new SocialError("change_reason_required", 409);
-    const selected = await readSocialMarket(
-      db,
-      input.instrument.marketId,
-      true,
-    );
-    if (!selected || !socialMarketAccepting(selected))
-      throw new SocialError("market_closed", 409);
-    const tokens = await db.query(
-      `select token_id from unified_tokens where token_id=$1 and market_id=$2 and side=$3 for share`,
-      [
-        input.instrument.tokenId,
-        input.instrument.marketId,
-        input.instrument.outcome,
-      ],
-    );
-    selected.current_token_id = tokens.rows[0]?.token_id ?? null;
-    if (
-      !socialInstrumentMatches(
-        input.instrument,
-        selected,
-        input.limitlessPositionContract,
-      )
-    )
-      throw new SocialError("instrument_changed", 409);
-    const quotes = await db.query(
-      `select best_ask::text,ts from unified_token_top_latest where token_id=$1`,
-      [input.instrument.tokenId],
-    );
-    // A quote may advance while earlier reads are in flight. Validate against
-    // observation time, not transaction-start time; genuinely future quotes fail.
-    const now = new Date();
-    const quote = validatePaperQuote({
-      ask: quotes.rows[0]?.best_ask ?? null,
-      asOf: quotes.rows[0]?.ts ?? null,
-      now,
-      maxAgeSeconds: social.policy.markMaxAgeSeconds,
-      maxEntryPrice: input.maxEntryPrice,
-    });
-    const shares = divideSocialDecimal(author.paperAmountUsd, quote.ask);
-    if (!shares) throw new SocialError("invalid_paper_amount", 409);
+    const { body, selected, quote, shares, now } =
+      await evaluateAgentPaperEntry(db, {
+        ...input,
+        lock: true,
+        maxThesisGraphemes: author.maxThesisGraphemes,
+        paperAmountUsd: author.paperAmountUsd,
+        maxQuoteAgeSeconds: social.policy.markMaxAgeSeconds,
+      });
     const snapshot = paperBuySnapshotSchema.parse({
       version: 1,
       canonicalPurchaseKey: `paper:${input.userId}:${input.idempotencyKey}`,
@@ -226,4 +175,83 @@ export async function publishAgentThesis(input: {
     await input.assertLease();
     return { id: created.rows[0].id as string, replayed: false };
   });
+}
+
+/** Shared read-only evaluation; publication requests row locks inside its existing transaction. */
+export async function evaluateAgentPaperEntry(
+  db: DbQuery,
+  input: {
+    userId: string;
+    body: string;
+    instrument: SocialBuySnapshot["instrument"];
+    maxEntryPrice: string;
+    provenance: PaperBuySnapshot["provenance"];
+    maxThesisGraphemes: number;
+    paperAmountUsd: string;
+    maxQuoteAgeSeconds: number;
+    limitlessPositionContract?: string;
+    lock?: boolean;
+  },
+) {
+  // Market index, exact contract. The latest public thesis is not necessarily the author's last post overall.
+  const history = await db.query(
+    `select id,outcome,body,buy_snapshot from user_theses where author_id=$1 and market_id=$2
+     order by published_at desc,id desc limit 1`,
+    [input.userId, input.instrument.marketId],
+  );
+  const previous = history.rows[0];
+  if ((previous?.id ?? null) !== input.provenance.previousThesisId)
+    throw new SocialError("previous_thesis_changed", 409);
+  const body = socialText(input.body, input.maxThesisGraphemes);
+  if (
+    previous &&
+    (previous.body === body ||
+      previous.buy_snapshot?.provenance?.argumentKey ===
+        input.provenance.argumentKey)
+  )
+    throw new SocialError("repeated_argument", 409);
+  if (previous && !input.provenance.changeReason?.trim())
+    throw new SocialError("change_reason_required", 409);
+  const selected = await readSocialMarket(
+    db,
+    input.instrument.marketId,
+    input.lock ?? false,
+  );
+  if (!selected || !socialMarketAccepting(selected))
+    throw new SocialError("market_closed", 409);
+  const tokens = await db.query(
+    `select token_id from unified_tokens where token_id=$1 and market_id=$2 and side=$3 ${input.lock ? "for share" : ""}`,
+    [
+      input.instrument.tokenId,
+      input.instrument.marketId,
+      input.instrument.outcome,
+    ],
+  );
+  selected.current_token_id = tokens.rows[0]?.token_id ?? null;
+  if (
+    !socialInstrumentMatches(
+      input.instrument,
+      selected,
+      input.limitlessPositionContract,
+    )
+  )
+    throw new SocialError("instrument_changed", 409);
+  const quotes = await db.query(
+    `select best_ask::text,ts from unified_token_top_latest where token_id=$1`,
+    [input.instrument.tokenId],
+  );
+  // A quote may advance while earlier reads are in flight. Validate against
+  // observation time, not transaction-start time; genuinely future quotes fail.
+  const now = new Date();
+  const quote = validatePaperQuote({
+    ask: quotes.rows[0]?.best_ask ?? null,
+    asOf: quotes.rows[0]?.ts ?? null,
+    now,
+    maxAgeSeconds: input.maxQuoteAgeSeconds,
+    maxEntryPrice: input.maxEntryPrice,
+  });
+  const shares = divideSocialDecimal(input.paperAmountUsd, quote.ask);
+  if (!shares) throw new SocialError("invalid_paper_amount", 409);
+
+  return { body, selected, quote, shares, now };
 }
