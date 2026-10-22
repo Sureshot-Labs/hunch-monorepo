@@ -281,6 +281,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "explicitly killing FFmpeg cannot be mistaken for a successful exit",
+    run: async () => {
+      const { completion, process: child } = startEditorialMediaFfmpeg({
+        childProcessEnv: editorialMediaChildProcessEnv(),
+        ffmpegPath: process.execPath,
+        fps: 30,
+        outputPath: "/tmp/hunch-unused-ffmpeg-output.mp4",
+        spec: X_EDITORIAL_MEDIA_PROFILE_SPECS.mobile,
+      });
+      child.stdin.destroy();
+      child.kill("SIGKILL");
+      assert.ok((await completion) instanceof Error);
+    },
+  },
+  {
     name: "capture URL fence only accepts tracking-wallet pages on configured origins",
     run: () => {
       const allowedOrigins = ["https://app.hunch.trade"];
