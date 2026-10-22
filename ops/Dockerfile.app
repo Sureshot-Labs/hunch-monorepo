@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.4
 
 FROM node:24.22.1-bookworm-slim AS builder
 

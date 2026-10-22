@@ -405,11 +405,15 @@ export function startEditorialMediaFfmpeg(input: {
       stderr = `${stderr}${chunk}`.slice(-8_000);
     });
     child.once("error", (error) => resolve(error));
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
+      // Bun can report code 0 / signal null after a successful SIGKILL.
+      // An explicitly terminated or aborted encoder never produced success.
       resolve(
-        code === 0
+        code === 0 && !signal && !child.killed && !input.signal?.aborted
           ? null
-          : new Error(`FFmpeg exited with code ${code}: ${stderr}`),
+          : new Error(
+              `FFmpeg exited with code ${code}, signal ${signal}, killed ${child.killed}: ${stderr}`,
+            ),
       );
     });
   });

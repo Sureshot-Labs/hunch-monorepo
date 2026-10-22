@@ -1,35 +1,46 @@
-# October 2026 security update (pending Bun)
+# October 2026 security update
 
-Release status: **partial remediation authorized on 2026-10-22**. The user
-explicitly authorized releasing the Node, nginx and frontend dependency fixes
-while retaining Bun and deferring its fix. This is not full security clearance.
+The initial release on 2026-10-22 updated Node, nginx and frontend dependencies
+while deferring Bun until a patched stable release existed. The follow-up pins
+Bun `1.4.4`, released later that day, in both backend and frontend Dockerfiles
+and in the frontend package-manager declaration. Runtime selection is unchanged.
 
 - Node builder and runtime base: `24.22.1-bookworm-slim`.
 - nginx: `1.30.6-alpine`.
-- Bun remains `1.4.0`; the existing runtime selection is unchanged.
+- Bun: `1.4.4`, including Brotli `1.2.1`.
 - No production configuration, schedules, data or host Docker packages change.
 
-On 2026-10-22 the latest stable Bun release was still `1.4.3`, which predates
-the Brotli CVE-2026-111497 fix. The fix was merged in
-[Bun PR 46392](https://github.com/oven-sh/bun/pull/46392), but a merge is not a
-patched release. Updating the bundled Node alone does not protect Bun services.
+At the initial release, stable Bun `1.4.3` still predated the Brotli
+CVE-2026-111497 fix. The subsequent
+[Bun 1.4.4 release](https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4)
+includes [PR 46392](https://github.com/oven-sh/bun/pull/46392) and pins Brotli
+`1.2.1`. Updating the bundled Node alone does not protect Bun services.
 
-For the follow-up Bun remediation, confirm the stable release includes that fix, update the
-Bun image/version assertions in both repositories and frontend package-manager
-pin, rerun the builds and runtime/application smoke tests under that exact Bun
-version, and review the final diff. Until then, the Bun vulnerability remains open.
+Verify both actual binaries and application compatibility before deployment.
+This addresses the identified Brotli issue, not a claim that every dependency
+is free of vulnerabilities. No lockfile dependency resolution changes are needed.
 
-Run the Node-only regression probe against a locally built backend image by
+Residual upstream risk: Bun `1.4.4` still pins c-ares `1.34.8` (commit
+`c7a3138dcfe3bb0eaaf10c0c24c36dc66dc790ab`). The separate
+[c-ares 1.34.9 security release](https://github.com/c-ares/c-ares/releases/tag/v1.34.9)
+fixes DNS reply validation and memory-safety issues. This Bun update must not be
+reported as remediating those advisories; Hunch-specific exploitability has not
+been established. Replacing a system package does not update Bun's bundled copy.
+The user explicitly approved releasing `1.4.4` with this DNS issue left open.
+
+Run the regression probe against a locally built image using **each** binary by
 feeding the source on stdin (the probe is not copied into the runtime image):
 
 ```sh
 docker run --rm --network none -i --entrypoint node <built-image> \
   --input-type=module < ops/runtime-security-smoke.mjs
+docker run --rm --network none -i --entrypoint bun <built-image> \
+  run - < ops/runtime-security-smoke.mjs
 ```
 
-It verifies the CVE regression behavior rather than relying on
-`process.versions.brotli`, which does not reflect backports. It must never be
-mistaken for a Bun security test.
+It verifies both synchronous and byte-at-a-time streaming CVE regression
+behavior rather than relying on `process.versions.brotli`, which does not
+reflect backports. A pass under one binary does not certify the other.
 
 Companion frontend changes pin Node `24.22.1`, Next.js `16.4.1`, and sharp
 `0.35.5`. The dev-only `eslint-config-next` remains `16.3.4`: upgrading its
@@ -39,7 +50,36 @@ Existing frontend production-only native-wallet
 commits are not merged into develop by this patch and must be preserved during
 the authorized release merge.
 
-## Local verification (2026-10-22)
+## Bun 1.4.4 follow-up verification
+
+- Full backend workspace build/typecheck/lint: 47/47 tasks. Fresh Linux ARM64
+  image build: frozen dependency installation and 16/16 workspace builds passed.
+- The final backend image passed 65/65 fast-suite files under Node `24.22.1`
+  and all 62 Bun-compatible files under Bun `1.4.4`; three Node-only mocking
+  wrappers remain tested under Node. Both binaries passed synchronous and
+  streaming Brotli regression checks. Tests were offline with dummy settings.
+- Bun `1.4.4` can report a killed child as exit code `0` / signal `null`.
+  The FFmpeg wrapper now also checks explicit termination and abort state before
+  reporting success. Abort and direct-kill tests cover this compatibility fix.
+- Frontend frozen installation requires native compiler prerequisites for
+  ARM64 `bufferutil`. Its dependency stage now uses the same Node/bookworm base
+  as the build and runtime, with Python/make/g++ confined to that build stage.
+  Runtime remains non-root and does not contain the compiler toolchain.
+- Frontend develop tests: 1,663 passed; merged production-tree tests: 1,677
+  passed. Full frontend typecheck and lint passed. The existing unrelated
+  `AGENTS.md` second-heading markdownlint warning remains unchanged.
+- The merged frontend ARM64 image passed Node/Turbopack build, both runtime
+  Brotli probes, and offline HTTP 200 smoke checks for SSR, static PNG, Next
+  image optimization, and native-wallet HTML/JS under both Node and Bun.
+  No restarts or OOM occurred. Public app IDs were synthetic, not production
+  credentials; authenticated flows were not exercised.
+- Independent review covered runtime pins, Docker stages, regression probes
+  and the FFmpeg fix; no blocking findings remain in the code review.
+
+Local build/compatibility checks do not replace post-deployment image, health
+and natural worker-cycle verification, or authenticated production smoke tests.
+
+## Initial release verification (2026-10-22, before Bun 1.4.4)
 
 - Backend workspace build/typecheck/lint: 47/47 tasks; local fast suite passed.
   A fresh Linux ARM64 Docker build also completed its frozen install and full
@@ -59,7 +99,7 @@ the authorized release merge.
   network with mock upstreams and a temporary test certificate.
 - Independent diff review completed; reported test/documentation issues fixed.
 
-These compatibility checks do not remediate the Bun vulnerability. The initial
+Those initial compatibility checks did not remediate the Bun vulnerability. The initial
 patch verification made no production changes or live transactions. The user
 subsequently authorized commit, merge, push and deployment monitoring, with Bun
 remediation explicitly deferred; production configuration and schedules remain
