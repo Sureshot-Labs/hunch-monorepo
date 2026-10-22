@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import {
   buildOpenRouterReasoningOptions,
+  isModernOpenAIReasoningModel,
+  supportsOpenRouterReasoningEffort,
   type OpenRouterReasoningEffort,
 } from "../lib/openrouter-reasoning.js";
 import {
@@ -2099,6 +2101,7 @@ async function callOpenRouter(
     "https://openrouter.ai/api/v1/chat/completions",
     {
       method: "POST",
+      signal: AbortSignal.timeout(120_000),
       headers: {
         Authorization: `Bearer ${env.openRouterKey}`,
         "Content-Type": "application/json",
@@ -2115,8 +2118,8 @@ async function callOpenRouter(
   );
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenRouter ${response.status}: ${text}`);
+    await response.body?.cancel();
+    throw new Error(`OpenRouter ${response.status}`);
   }
 
   const payload = (await response.json()) as {
@@ -2146,7 +2149,65 @@ async function callOpenRouter(
   return "";
 }
 
-export const whaleProfileModelTestHooks = { callOpenRouter };
+function compactProfileEffort(
+  model: string,
+  effort?: OpenRouterReasoningEffort | null,
+) {
+  if (!isModernOpenAIReasoningModel(model)) return effort;
+  // The same output cap covers reasoning and visible JSON. Do not repeat high
+  // reasoning inside the smaller fallback cap, and never raise token budgets.
+  return (
+    (["none", "low", "medium"] as const).find((candidate) =>
+      supportsOpenRouterReasoningEffort(model, candidate),
+    ) ?? effort
+  );
+}
+
+async function generateProfileDraft(options: {
+  model: string;
+  system: string;
+  user: string;
+  compactUser: string;
+  maxTokens: number;
+  maxTokensFallback: number;
+  reasoningEffort?: OpenRouterReasoningEffort | null;
+}) {
+  let raw = await callOpenRouter(
+    options.model,
+    [
+      { role: "system", content: options.system },
+      { role: "user", content: options.user },
+    ],
+    options.maxTokens,
+    options.reasoningEffort,
+  );
+  let parsed = parseProfileJson(raw);
+  if (!normalizeWhaleProfile(parsed)) {
+    const effort = compactProfileEffort(options.model, options.reasoningEffort);
+    console.info("[whale-profile] compact fallback", {
+      model: options.model,
+      effort,
+      maxTokens: options.maxTokensFallback,
+    });
+    raw = await callOpenRouter(
+      options.model,
+      [
+        { role: "system", content: options.system },
+        { role: "user", content: options.compactUser },
+      ],
+      options.maxTokensFallback,
+      effort,
+    );
+    parsed = parseProfileJson(raw);
+  }
+  return { raw, parsed };
+}
+
+export const whaleProfileModelTestHooks = {
+  callOpenRouter,
+  generateProfileDraft,
+  compactProfileEffort,
+};
 
 function toActivityKind(
   hasTrade: boolean | null,
@@ -3226,16 +3287,16 @@ Whale data (JSON):\n${JSON.stringify(input)}`;
 Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines. Before returning JSON, verify that label_short sounds like a natural trader archetype, not a comma-separated trait list, metadata tags, analyst shorthand, or a broad template; label_short contains no parentheses and no Safe/Gnosis/multisig wording; label_long is exactly one sentence; each bullet covers a different angle; and the wording avoids numeric clutter unless essential.`;
 
       let profileRaw = "";
+      let parsed: unknown = null;
       try {
-        profileRaw = await callOpenRouter(
-          policy.model,
-          [
-            { role: "system", content: system },
-            { role: "user", content: user },
-          ],
-          policy.maxTokens,
-          policy.reasoningEffort,
-        );
+        const draft = await generateProfileDraft({
+          ...policy,
+          system,
+          user,
+          compactUser,
+        });
+        profileRaw = draft.raw;
+        parsed = draft.parsed;
       } catch (error) {
         failed += 1;
         console.warn("[whale-profile] openrouter error", {
@@ -3253,39 +3314,6 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
           });
         }
         continue;
-      }
-
-      let parsed = parseProfileJson(profileRaw);
-      if (!parsed) {
-        try {
-          profileRaw = await callOpenRouter(
-            policy.model,
-            [
-              { role: "system", content: system },
-              { role: "user", content: compactUser },
-            ],
-            policy.maxTokensFallback,
-            policy.reasoningEffort,
-          );
-          parsed = parseProfileJson(profileRaw);
-        } catch (error) {
-          failed += 1;
-          console.warn("[whale-profile] openrouter retry failed", {
-            walletId: whale.id,
-            address: whale.address,
-            error,
-          });
-          if (!verbose && processed % logEvery === 0) {
-            console.log("[whale-profile] progress", {
-              processed,
-              total: selectedWhaleRows.length,
-              updated,
-              skipped,
-              failed,
-            });
-          }
-          continue;
-        }
       }
 
       let normalized = normalizeWhaleProfile(parsed);

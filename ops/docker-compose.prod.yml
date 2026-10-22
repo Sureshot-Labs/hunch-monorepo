@@ -1,3 +1,11 @@
+# Applies on container recreation, not to existing containers. Infrastructure
+# recreation remains a separately approved operation; deploy keeps PG/Redis up.
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 networks:
   hunch-net:
     driver: bridge
@@ -10,6 +18,7 @@ services:
   postgres:
     image: timescale/timescaledb:2.14.2-pg16
     container_name: hunch-postgres
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -62,6 +71,7 @@ services:
   redis:
     image: redis/redis-stack-server:latest
     container_name: hunch-redis
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -82,6 +92,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-api
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       hunch-net:
@@ -132,6 +143,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-indexer-polymarket
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -158,6 +170,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-indexer-limitless
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -184,6 +197,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-indexer-dflow
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -210,6 +224,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-ai-worker
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -234,6 +249,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-market-matcher
+    logging: *bounded-logging
     restart: unless-stopped
     stop_grace_period: 120s
     networks:
@@ -268,6 +284,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-finance-worker
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -297,6 +314,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-signal-bot
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -325,6 +343,7 @@ services:
       dockerfile: ops/Dockerfile.app
       target: social-media-runtime
     container_name: hunch-social-media-worker
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -355,6 +374,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.app
     container_name: hunch-native-onboarding-worker
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net
@@ -379,6 +399,7 @@ services:
   nginx:
     image: nginx:1.30.6-alpine
     container_name: hunch-nginx
+    logging: *bounded-logging
     restart: unless-stopped
     networks:
       - hunch-net

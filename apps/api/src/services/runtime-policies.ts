@@ -33,6 +33,7 @@ import {
 import { env } from "../env.js";
 import {
   openRouterReasoningEffortSchema,
+  isModernOpenAIReasoningModel,
   supportsOpenRouterReasoningEffort,
   type OpenRouterReasoningEffort,
 } from "../lib/openrouter-reasoning.js";
@@ -1732,7 +1733,9 @@ function getDefaults(): IntelPolicyMap {
       selectionSignalsWindowHours:
         env.aiWhaleProfileSelectionSignalsWindowHours,
       model: env.aiWhaleProfileModel,
-      reasoningEffort: "high",
+      reasoningEffort: isModernOpenAIReasoningModel(env.aiWhaleProfileModel)
+        ? "low"
+        : "high",
       styleGuide: env.aiWhaleProfileStyleGuide,
       maxTokens: env.aiWhaleProfileMaxTokens,
       maxTokensFallback: env.aiWhaleProfileMaxTokensFallback,
@@ -3579,6 +3582,19 @@ function resolveFromRow<K extends IntelPolicyKey>(
   }
 
   const merged = deepMerge(defaults, parsed.value ?? {}) as IntelPolicyMap[K];
+  if (key === "ai_whale_profiles") {
+    const override = parsed.value as Partial<AiWhaleProfilesPolicy>;
+    const whalePolicy = merged as AiWhaleProfilesPolicy;
+    // Model-only overrides must not inherit Luna's low effort for 5.4-pro.
+    // An explicitly selected effort (including null) remains untouched.
+    if (override.reasoningEffort === undefined) {
+      whalePolicy.reasoningEffort = isModernOpenAIReasoningModel(
+        whalePolicy.model,
+      )
+        ? "low"
+        : "high";
+    }
+  }
   if (key === "holder_research") {
     const horizonRules = (parsed.value as Partial<HolderResearchPolicy>)
       .maxPublishHorizonHoursByCategory;

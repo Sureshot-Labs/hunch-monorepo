@@ -1,6 +1,14 @@
 import type { PoolClient } from "pg";
+import { pathToFileURL } from "node:url";
 import { fetchGammaEntityById, normalizeGammaLifecycle } from "@hunch/shared";
 import { createClient } from "redis";
+import {
+  kalshiRepairPayloadError,
+  lookupLimitlessRepairMarket,
+  repairValidationState,
+  summarizeRepairValidations,
+  type RepairValidationState,
+} from "./lib/market-repair-validation.js";
 import {
   MARKET_REPAIR_CANDIDATES_SQL,
   parseRepairCursor,
@@ -20,10 +28,7 @@ import {
   dflowRequest,
   extractDflowErrorMessage,
 } from "./services/dflow-client.js";
-import {
-  extractLimitlessMessage,
-  limitlessRequest,
-} from "./services/limitless-client.js";
+import { limitlessRequest } from "./services/limitless-client.js";
 import {
   buildPolymarketSourceRepair,
   hasSafeResolutionOutcome,
@@ -73,6 +78,7 @@ type CandidateRow = {
 };
 
 type ValidationRow = CandidateRow & {
+  validation_state: RepairValidationState;
   current_status: "ACTIVE";
   target_status: Exclude<UnifiedStatus, "ACTIVE"> | null;
   reason: string;
@@ -191,7 +197,10 @@ refreshes wallet metrics for markets whose outcome was newly filled.
 Dry-run is the default. Update mode only runs when both --execute and
 --confirm-update are present. Progress is stored in Redis per venue filter and
 cutoff; dry-run reads but never advances it. A completed sweep resets progress
-for the NEXT run. API failures are reported as PARTIAL and revisited next sweep.
+for the NEXT run. Missing Gamma/Limitless/public-Kalshi records are reported as
+deferred (unchanged), not as verified closures. Existing DFlow batch omission
+handling is unchanged. API failures are PARTIAL errors; an all-error page
+stops without advancing its checkpoint. Deferred records are retried next sweep.
 Each page commits separately; a later failure does not undo previous pages.
 --json emits one object with per-page reports under batches and a sweep summary.`);
 }
@@ -346,57 +355,41 @@ async function validateLimitless(
   timeoutMs: number,
   rateLimitBackoff: SharedRateLimitBackoff,
 ): Promise<ValidationRow> {
-  const marketRef = candidate.slug ?? candidate.venue_market_id;
-  if (!marketRef) {
-    return buildValidation(candidate, null, "limitless_missing_market_ref");
-  }
-
-  for (
-    let attempt = 0;
-    attempt < LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS;
-    attempt += 1
-  ) {
-    let res: Awaited<ReturnType<typeof limitlessRequest>>;
-    try {
-      await rateLimitBackoff.wait();
-      res = await limitlessRequest({
-        method: "GET",
-        requestPath: `/markets/${encodeURIComponent(marketRef)}`,
-        auth: "none",
-        allowRetry: false,
-        timeoutMs,
-      });
-    } catch (error) {
+  try {
+    const lookup = await lookupLimitlessRepairMarket(
+      candidate,
+      async (marketRef) => {
+        for (let attempt = 0; ; attempt += 1) {
+          await rateLimitBackoff.wait();
+          const res = await limitlessRequest({
+            method: "GET",
+            requestPath: `/markets/${encodeURIComponent(marketRef)}`,
+            auth: "none",
+            allowRetry: false,
+            timeoutMs,
+          });
+          if (
+            !res.ok &&
+            res.status === 429 &&
+            attempt < LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS - 1
+          ) {
+            rateLimitBackoff.noteRateLimit();
+            continue;
+          }
+          if (res.ok) rateLimitBackoff.noteSuccess();
+          return res;
+        }
+      },
+      firstRecord,
+    );
+    if (lookup.kind !== "found") {
       return buildValidation(
         candidate,
         null,
-        `limitless_error:${errorMessage(error)}`,
+        lookup.kind === "not_found" ? "limitless_not_found" : lookup.reason,
       );
     }
-
-    if (!res.ok) {
-      if (
-        res.status === 429 &&
-        attempt < LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS - 1
-      ) {
-        rateLimitBackoff.noteRateLimit();
-        continue;
-      }
-
-      const message = extractLimitlessMessage(res.payload);
-      return buildValidation(
-        candidate,
-        null,
-        `limitless_error:${res.status}${message ? `:${message}` : ""}`,
-      );
-    }
-
-    rateLimitBackoff.noteSuccess();
-    const market = firstRecord(res.payload);
-    if (!market) {
-      return buildValidation(candidate, null, "limitless_not_found");
-    }
-
+    const market = lookup.market;
     const status = stringValue(market.status)?.toUpperCase() ?? "";
     const expired = boolValue(market, ["expired"]);
     if (status === "RESOLVED") {
@@ -416,9 +409,13 @@ async function validateLimitless(
       );
     }
     return buildValidation(candidate, null, "limitless_active");
+  } catch (error) {
+    return buildValidation(
+      candidate,
+      null,
+      `limitless_error:${errorMessage(error)}`,
+    );
   }
-
-  return buildValidation(candidate, null, "limitless_error:429");
 }
 
 function mapDflowStatusToUnified(value: unknown): UnifiedStatus {
@@ -585,7 +582,8 @@ async function fetchKalshiPublicMarket(
     }
 
     const market = firstKalshiPublicMarketRecord(res.payload);
-    if (!market) return { kind: "not_found", source: "kalshi_public_market" };
+    if (!market)
+      return { kind: "error", reason: "kalshi_public_invalid_payload" };
     return { kind: "found", market, source: "kalshi_public_market" };
   } catch (error) {
     return {
@@ -695,17 +693,28 @@ async function applyKalshiPublicFallbacks(
     if (!previous) continue;
 
     if (lookup.kind === "found") {
+      const payloadError = kalshiRepairPayloadError(
+        lookup.market,
+        candidate.venue_market_id,
+      );
+      if (payloadError) {
+        fallbackById.set(
+          candidate.market_id,
+          buildValidation(candidate, null, payloadError),
+        );
+        continue;
+      }
       const rawStatus = stringValue(lookup.market.status);
       const targetStatus = mapDflowStatusToUnified(rawStatus);
       if (targetStatus === "ACTIVE") {
-        fallbackById.set(
-          candidate.market_id,
-          buildValidation(
+        fallbackById.set(candidate.market_id, {
+          ...buildValidation(
             candidate,
             null,
             `${previous.reason}_${lookup.source}_active`,
           ),
-        );
+          validation_state: "verified",
+        });
       } else {
         fallbackById.set(
           candidate.market_id,
@@ -721,14 +730,14 @@ async function applyKalshiPublicFallbacks(
     }
 
     if (lookup.kind === "not_found") {
-      fallbackById.set(
-        candidate.market_id,
-        buildValidation(
+      fallbackById.set(candidate.market_id, {
+        ...buildValidation(
           candidate,
           null,
           `${previous.reason}_${lookup.source}_not_found`,
         ),
-      );
+        validation_state: "deferred",
+      });
       continue;
     }
 
@@ -811,6 +820,7 @@ function buildValidation(
     ...candidate,
     current_status: "ACTIVE",
     target_status: targetStatus,
+    validation_state: repairValidationState(targetStatus, reason),
     reason,
     resolved_outcome: outcome.resolvedOutcome,
     resolved_outcome_pct: outcome.resolvedOutcomePct,
@@ -1526,7 +1536,8 @@ async function main(): Promise<void> {
       : parseRepairCursor(redis ? await redis.get(key) : null);
     const cutoff = new Date(Date.now() - args.cutoffDays * 86400_000);
     const reports: unknown[] = [];
-    let unverified = 0;
+    let deferred = 0;
+    let errors = 0;
     let batches = 0;
     const sweep = await runRepairSweep({
       cursor,
@@ -1535,21 +1546,12 @@ async function main(): Promise<void> {
       load: (after, limit) => loadCandidates(args, after, limit, cutoff),
       process: async (candidates) => {
         const validations = await validateCandidates(candidates, args);
-        const batchUnverified = validations.filter(
-          (row) =>
-            row.target_status === null &&
-            ![
-              "gamma_active",
-              "limitless_active",
-              "dflow_active",
-              "kalshi_public_event_active",
-              "kalshi_public_market_active",
-            ].includes(row.reason),
-        ).length;
-        unverified += batchUnverified;
-        if (batchUnverified === validations.length) {
+        const counts = summarizeRepairValidations(validations);
+        deferred += counts.deferred;
+        errors += counts.errors;
+        if (counts.errors === validations.length) {
           throw new Error(
-            "Entire repair page is unverified; stopped without advancing its checkpoint",
+            "Entire repair page failed validation; stopped without advancing its checkpoint",
           );
         }
         await processBatch(args, validations, client, reports);
@@ -1561,13 +1563,31 @@ async function main(): Promise<void> {
         else await redis.del(key);
       },
     });
-    const summary = { ...sweep, batches, unverified, readOnly: !args.execute };
+    const summary = {
+      ...sweep,
+      batches,
+      unverified: deferred + errors,
+      deferred,
+      errors,
+      status: errors
+        ? "partial_error"
+        : deferred
+          ? "completed_with_deferred"
+          : "ok",
+      readOnly: !args.execute,
+    };
     if (args.json)
       console.log(
         JSON.stringify({ args, batches: reports, sweep: summary }, null, 2),
       );
     else console.log("[market:active-status-repair] sweep", summary);
-    if (unverified) {
+    if (deferred) {
+      console.warn(
+        "[market:active-status-repair] DEFERRED: missing upstream records remain unchanged; retry on next sweep",
+        { deferred },
+      );
+    }
+    if (errors) {
       console.error(
         "[market:active-status-repair] PARTIAL: unverified markets remain unchanged and will be revisited next sweep",
       );
@@ -1581,9 +1601,20 @@ async function main(): Promise<void> {
   }
 }
 
-main()
-  .catch((error) => {
-    console.error("[market:active-status-repair] failed", error);
-    process.exitCode = 1;
-  })
-  .finally(() => pool.end());
+export const marketRepairValidationTestHooks = {
+  validateLimitless,
+  applyKalshiPublicFallbacks,
+  buildValidation,
+};
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main()
+    .catch((error) => {
+      console.error("[market:active-status-repair] failed", error);
+      process.exitCode = 1;
+    })
+    .finally(() => pool.end());
+}

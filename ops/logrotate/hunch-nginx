@@ -1,0 +1,12 @@
+# Replacement for the existing hunch-nginx policy, not an additional policy.
+# maxsize augments daily; size would override the daily interval.
+/opt/hunch-data/nginx/*.log {
+    daily
+    maxsize 100M
+    rotate 14
+    compress
+    missingok
+    notifempty
+    su root root
+    copytruncate
+}
