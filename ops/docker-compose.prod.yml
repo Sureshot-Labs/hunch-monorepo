@@ -377,7 +377,7 @@ services:
       - apps/api/dist/native-push-worker.js
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.30.6-alpine
     container_name: hunch-nginx
     restart: unless-stopped
     networks:
