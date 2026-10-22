@@ -1,6 +1,6 @@
 ARG BUN_VERSION=1.4.0
 
-FROM node:24-bookworm-slim AS builder
+FROM node:24.22.1-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -40,7 +40,7 @@ RUN pnpm build
 # instead of running the installer script inside the production runtime image.
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
-FROM node:24-bookworm-slim AS runtime-base
+FROM node:24.22.1-bookworm-slim AS runtime-base
 
 ARG BUN_VERSION
 WORKDIR /app
