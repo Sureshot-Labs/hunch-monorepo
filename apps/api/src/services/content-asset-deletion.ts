@@ -41,6 +41,8 @@ export async function enqueueContentStorageDeletion(
       else least(content_storage_deletion_jobs.available_at,excluded.available_at) end,
     attempts=case when $4::boolean then 0 else content_storage_deletion_jobs.attempts end,
     last_error=case when $4::boolean then null else content_storage_deletion_jobs.last_error end,
+    cdn_invalidation_id=case when $4::boolean then null else content_storage_deletion_jobs.cdn_invalidation_id end,
+    cdn_invalidation_reference=case when $4::boolean then gen_random_uuid() else content_storage_deletion_jobs.cdn_invalidation_reference end,
     locked_at=null,locked_by=null`,
     [key, availableAt, staging, options.reopenAfterPossibleWrite ?? false],
   );

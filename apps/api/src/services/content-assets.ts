@@ -1,8 +1,8 @@
+import { eraseObjectVersions } from "./content-storage-erasure.js";
 import { randomUUID } from "node:crypto";
 
 import {
   CopyObjectCommand,
-  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -1134,12 +1134,10 @@ export async function deleteContentAsset(
 export async function deleteStoredContentObject(
   storageKey: string,
 ): Promise<void> {
-  const client = requireStorage();
-  await client.send(
-    new DeleteObjectCommand({
-      Bucket: getContentServiceRuntime().assetS3Bucket,
-      Key: storageKey,
-    }),
+  await eraseObjectVersions(
+    requireStorage(),
+    getContentServiceRuntime().assetS3Bucket,
+    storageKey,
   );
 }
 

@@ -1,3 +1,7 @@
+import {
+  invalidateStoredContent,
+  StorageErasureInProgress,
+} from "./content-storage-erasure.js";
 import { randomUUID } from "node:crypto";
 
 import { tx, type Pool } from "@hunch/infra";
@@ -54,6 +58,8 @@ type OutboxRow = {
 type StorageDeletionJobRow = {
   id: string | number | bigint;
   storage_key: string;
+  cdn_invalidation_id: string | null;
+  cdn_invalidation_reference: string | null;
   attempts: number;
 };
 
@@ -458,7 +464,7 @@ async function claimStorageDeletion(
     );
     const { rows } = await db.query<StorageDeletionJobRow>(
       `
-        select id, storage_key, attempts
+        select id, storage_key, attempts, cdn_invalidation_id, cdn_invalidation_reference
         from content_storage_deletion_jobs
         where status = 'pending'
           and locked_at is null
@@ -472,20 +478,27 @@ async function claimStorageDeletion(
     );
     const row = rows[0];
     if (!row) return null;
-    await db.query(
+    const claimed = await db.query<{ cdn_invalidation_reference: string }>(
       `
         update content_storage_deletion_jobs
         set
+          cdn_invalidation_reference = coalesce(cdn_invalidation_reference,gen_random_uuid()),
           status = 'processing',
           attempts = attempts + 1,
           locked_at = now(),
           locked_by = $2,
           last_error = null
         where id = $1
+        returning cdn_invalidation_reference
       `,
       [row.id, workerId],
     );
-    return { ...row, attempts: row.attempts + 1 };
+    return {
+      ...row,
+      cdn_invalidation_reference:
+        claimed.rows[0]?.cdn_invalidation_reference ?? null,
+      attempts: row.attempts + 1,
+    };
   });
 }
 
@@ -501,7 +514,25 @@ export async function dispatchContentStorageDeletions(
     const job = await claimStorageDeletion(pool, workerId);
     if (!job) break;
     try {
-      await deleteStoredContentObject(job.storage_key);
+      if (!job.cdn_invalidation_id)
+        await deleteStoredContentObject(job.storage_key);
+      if (!job.cdn_invalidation_reference)
+        throw new Error("Missing CDN invalidation generation");
+      const invalidation = await invalidateStoredContent(
+        job.storage_key,
+        job.cdn_invalidation_reference,
+        job.cdn_invalidation_id,
+      );
+      if (!invalidation.completed) {
+        await pool.query(
+          `update content_storage_deletion_jobs set status='pending',
+            cdn_invalidation_id=$3, attempts=greatest(attempts-1,0),
+            available_at=now()+interval '30 seconds', locked_at=null, locked_by=null
+           where id=$1 and locked_by=$2`,
+          [job.id, workerId, invalidation.id],
+        );
+        continue;
+      }
       await pool.query(
         `
           update content_storage_deletion_jobs
@@ -517,6 +548,15 @@ export async function dispatchContentStorageDeletions(
       );
       processed += 1;
     } catch (error) {
+      if (error instanceof StorageErasureInProgress) {
+        await pool.query(
+          `update content_storage_deletion_jobs set status='pending',
+            attempts=greatest(attempts-1,0), available_at=now()+interval '1 second',
+            locked_at=null, locked_by=null where id=$1 and locked_by=$2`,
+          [job.id, workerId],
+        );
+        continue;
+      }
       const terminal =
         job.attempts >= getContentServiceRuntime().workerMaxAttempts;
       recordContentStorageDeletionRetry(terminal);

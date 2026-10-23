@@ -1,3 +1,4 @@
+import { recordAccountErasure } from "../services/account-erasure-journal.js";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
@@ -722,6 +723,15 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       const privyUserId = user.privyUserId;
 
+      try {
+        await recordAccountErasure(user.id);
+      } catch {
+        app.log.error(
+          { userId: user.id },
+          "Account erasure journal could not be acknowledged",
+        );
+        return reply.code(503).send({ error: "account_deletion_unavailable" });
+      }
       let deletion;
       try {
         deletion = await AuthService.deleteUser(user.id);
@@ -751,6 +761,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
+        storageDeletionPending: true,
         disposition: deletion.disposition,
         activeMovement: deletion.activeMovement,
         privyDeleted,

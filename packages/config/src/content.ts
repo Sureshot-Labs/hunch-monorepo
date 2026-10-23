@@ -23,6 +23,7 @@ export type ContentRuntimeConfig = {
   revalidateSecret: string;
   revalidateTimeoutMs: number;
   previewSecret: string;
+  assetCloudFrontDistributionId?: string;
   assetS3Endpoint: string;
   assetS3Region: string;
   assetS3Bucket: string;
@@ -234,6 +235,10 @@ export function resolveContentRuntimeConfig(
       30_000,
     ),
     previewSecret,
+    assetCloudFrontDistributionId: text(
+      source,
+      "CONTENT_ASSET_CLOUDFRONT_DISTRIBUTION_ID",
+    ),
     assetS3Endpoint: endpoint,
     assetS3Region,
     assetS3Bucket,
