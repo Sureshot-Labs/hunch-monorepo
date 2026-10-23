@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mock } from "node:test";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import Fastify from "fastify";
 import {
   serializerCompiler,
@@ -14,30 +15,27 @@ Object.assign(process.env, {
   JWT_SECRET: "erasure-route-fixture",
   PRIVY_APP_ID: "erasure-fixture",
   PRIVY_APP_SECRET: "erasure-fixture",
+  ACCOUNT_ERASURE_JOURNAL_BUCKET: "route-private-journal",
+  CONTENT_ASSET_S3_BUCKET: "route-public-assets",
+  CONTENT_ASSET_PUBLIC_BASE_URL: "https://images.example.test",
 });
 const events: string[] = [];
 let journalFails = true;
 let databaseFails = false;
-mock.module(new URL("./db.ts", import.meta.url).href, {
-  namedExports: {
-    pool: {
-      query() {
-        throw new Error("Unexpected DB access");
-      },
-    },
-  },
+const { pool } = await import("./db.js");
+mock.method(pool, "query", () => {
+  throw new Error("Unexpected DB access");
 });
-mock.module(
-  new URL("./services/account-erasure-journal.ts", import.meta.url).href,
-  {
-    namedExports: {
-      recordAccountErasure: async () => {
-        events.push("journal");
-        if (journalFails) throw new Error("Journal unavailable");
-      },
-    },
-  },
-);
+// Exercise the real journal implementation. Only the remote SDK boundary is
+// replaced; node:test mock.module is not supported by Bun.
+mock.method(S3Client.prototype, "send", async (command: unknown) => {
+  assert.ok(command instanceof PutObjectCommand);
+  assert.equal(command.input.Bucket, "route-private-journal");
+  assert.equal(command.input.IfNoneMatch, "*");
+  events.push("journal");
+  if (journalFails) throw new Error("Journal unavailable");
+  return {};
+});
 globalThis.fetch = async () => {
   throw new Error("Network forbidden in route fixture");
 };
@@ -121,6 +119,7 @@ try {
 } finally {
   await app.close();
   mock.restoreAll();
+  await pool.end();
 }
 console.log(
   "[account-erasure-route] journal failure, acknowledgement ordering and pending receipt passed",

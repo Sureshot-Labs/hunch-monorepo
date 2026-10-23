@@ -29,7 +29,32 @@ Nothing in this branch deploys infrastructure or deletes production snapshots.
   spending failure retries. Late remote writes reset the invalidation generation.
 - The restore CLI validates the live journal by default. `--apply` reuses the
   existing DB erasure/financial safeguards and requires explicit restore isolation.
+  Both modes require `--database-url` and `--expect-database`. After loading
+  credentials/content settings it pins that URL before importing the common
+  pool, checks `current_database()` before journal access or mutation, and
+  configures content runtime before erasing restored staging uploads.
   It initiates no new trade, transfer, payout or withdrawal.
+- Newly promoted user-owned media sends
+  `Cache-Control: public, max-age=0, s-maxage=300, must-revalidate`: browsers
+  revalidate and shared caches may retain it for five minutes. The worker still
+  invalidates CloudFront. CMS-owned immutable media keeps its original policy.
+  Existing year-fresh browser copies cannot be recalled by changing this code.
+
+## Infrastructure update received — 23 October 2026
+
+The backend/infra owner reports the private journal bucket is created in
+`eu-north-1`, both required environment variables are present in `/opt/hunch/.env`,
+and `hunch-prod-ec2-role` has journal, exact content-version erasure and CloudFront
+permissions. The SDK uses the role credential chain; static AWS keys are not
+required. These are owner-reported infrastructure results, not a live deletion
+verification from this checkout. Code has not yet been deployed.
+
+The DLM description now matches the applied template exactly:
+`Daily Hunch tagged-volume snapshots - maximum 30 days.`
+Snapshot automation and journal expiry remain **DISABLED**; old manual snapshots
+remain intact. Do not enable journal expiry before every restorable older backup
+has been addressed. The private report/applied template are on the infra owner's
+machine; their full contents have not been independently compared here.
 
 ## First-release retention rules
 
@@ -88,19 +113,63 @@ isolated DB, apply current migrations and grant the restore operator List/Get
 access only to the live journal's `account-erasure/v1/` prefix. Do not overwrite
 the live journal with a restored copy.
 
-Run `node apps/api/dist/account-erasure-replay.js` to validate records without
-DB mutation. Then set `ACCOUNT_ERASURE_RESTORE_ISOLATED=true` and run it with
-`--apply`. The CLI checks pages of 100 records and reuses `AuthService.deleteUser`.
+Set `HUNCH_RESTORED_DATABASE_URL` to the isolated restored DB's connection URL.
+Specify its exact name separately; never use the live production DB. The optional
+`--env-file` loads normal credentials/content settings, then the CLI overrides
+only `DATABASE_URL` with the explicit restore target and prevents `env.ts` from
+loading the repository `.env` again. Its isolation acknowledgement must already
+be present in the invoking environment, not supplied by that file.
+
+Validate without DB mutation first:
+
+```sh
+node apps/api/dist/account-erasure-replay.js \
+  --env-file /opt/hunch/.env \
+  --database-url "$HUNCH_RESTORED_DATABASE_URL" \
+  --expect-database hunch_restore_20261023
+```
+
+After confirming isolation and reviewing the dry run:
+
+```sh
+ACCOUNT_ERASURE_RESTORE_ISOLATED=true node apps/api/dist/account-erasure-replay.js \
+  --env-file /opt/hunch/.env \
+  --database-url "$HUNCH_RESTORED_DATABASE_URL" \
+  --expect-database hunch_restore_20261023 \
+  --apply
+```
+
+The CLI checks pages of 100 records and reuses `AuthService.deleteUser`.
 After replay, reconcile erasure/provider/storage queues with financial execution
 still stopped. Confirm deleted public accounts/media stay absent before reopening
 traffic. Repeat safely after interruption.
 
 ## Verification
 
-Local verification passes: all 16 workspace build targets; five unit/route/worker
-regression files (erasure SDK, API ordering/503, worker progress, existing content
-and Privy reconciliation); changed TypeScript ESLint; and the fenced PostgreSQL
-16.15 test with one million storage jobs and 15 EXPLAIN ANALYZE/BUFFERS plans.
+The initial `f7000ddd` verification passed 16 workspace build targets, five
+regression files and 15 SQL plans. Review corrections add real-entrypoint replay
+tests and actual asset-promotion cache checks. The route fixture now exercises
+the real journal with only the SDK boundary replaced, without `mock.module` or
+a Node-only child-process flag. Node and Bun use their own executable.
+
+Replay coverage exercises conflicting ambient/env-file DB URLs, actual connected
+DB mismatch before journal access, URL/name mismatch, missing explicit target,
+missing isolation acknowledgement, read-only dry run, invalid journal identity,
+and the real `AuthService.deleteUser` staging cleanup path with configured TTL.
+The same harness runs from source and compiled JavaScript. The SQL fixture now
+plans the constant `current_database()` identity check as well (16 plans total).
+
+Review follow-up verification passes on 23 October 2026:
+
+- Full workspace build: 16/16 targets (14 cached, API and finance-worker rebuilt).
+- Node 24.13.0 and Bun 1.4.4: 7/7 selected source regression files each.
+- Compiled JavaScript replay CLI: all seven scenarios under each runtime,
+  including real account/staging erasure with fake DB/AWS boundaries.
+- PostgreSQL 16.15: 1m storage jobs and 16 EXPLAIN ANALYZE/BUFFERS plans under
+  each runtime. The added identity check is a Result node, 0.013 ms with zero
+  shared-buffer accesses in the last run. No production SQL was executed.
+- Changed TS ESLint, scoped Prettier, `git diff --check`, CloudFormation JSON
+  and the exact applied DLM description/disabled snapshot state.
 
 | Operation                             | Observed execution time | Access path                         |
 | ------------------------------------- | ----------------------- | ----------------------------------- |
@@ -127,8 +196,12 @@ non-installing build command is:
 pnpm_config_verify_deps_before_run=warn PNPM_CONFIG_PM_ON_FAIL=ignore ./node_modules/.bin/turbo run build --env-mode=loose
 ```
 
-CloudFormation JSON parsing passes; AWS change-set/IAM/CDN validation and an
-actual isolated backup restore remain rollout checks.
+CloudFormation JSON parsing passes. The owner reports AWS prerequisites applied;
+runtime role/env adoption, a controlled account erasure and an actual isolated
+backup restore remain rollout checks. Old completed storage jobs need individual
+live-reference verification before any repair; no mass requeue is implemented.
+Clean frozen-lockfile installation and a deploy-equivalent Docker build are not
+established by the local build with copied dependencies.
 
 Primary references: [S3 versions](https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeletingObjectVersions.html),
 [CloudFront invalidation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html).

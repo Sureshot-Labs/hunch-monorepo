@@ -202,7 +202,7 @@
     "TaggedVolumeSnapshots": {
       "Type": "AWS::DLM::LifecyclePolicy",
       "Properties": {
-        "Description": "Daily Hunch tagged-volume snapshots, maximum 30 days (first-release retention policy)",
+        "Description": "Daily Hunch tagged-volume snapshots - maximum 30 days.",
         "State": "DISABLED",
         "ExecutionRoleArn": {
           "Fn::GetAtt": ["SnapshotLifecycleRole", "Arn"]

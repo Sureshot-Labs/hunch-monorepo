@@ -793,7 +793,11 @@ export async function completeContentAssetUpload(
         ChecksumAlgorithm: "SHA256",
         MetadataDirective: "REPLACE",
         ContentType: existing.mime_type,
-        CacheControl: "public, max-age=31536000, immutable",
+        // User media must revalidate in browsers after erasure. Keep a short
+        // shared-cache lifetime; the worker also invalidates CloudFront.
+        CacheControl: existing.owner_user_id
+          ? "public, max-age=0, s-maxage=300, must-revalidate"
+          : "public, max-age=31536000, immutable",
       }),
     );
     const promotedHead = await client.send(

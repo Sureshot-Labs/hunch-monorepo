@@ -58,6 +58,13 @@ try {
     ),
   );
   await client.query("analyze content_storage_deletion_jobs");
+  const identity = await db.query(
+    "select current_database() as current_database",
+  );
+  assert.equal(
+    identity.rows[0]?.current_database,
+    process.env.HUNCH_TEST_EXPECT_DATABASE,
+  );
   await enqueueContentStorageDeletion(db, "content/scale-1");
   await enqueueContentStorageDeletion(db, "content/new-key");
   await enqueueContentStorageDeletion(db, "content/scale-1", new Date(), {
