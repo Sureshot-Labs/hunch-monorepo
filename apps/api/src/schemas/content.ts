@@ -301,6 +301,7 @@ const contentAssetCreditUrlSchema = z
 export const contentAssetCreateBodySchema = z
   .object({
     kind: contentAssetKindSchema,
+    avatarModerationConsent: z.literal(true).optional(),
     originalFilename: z.string().trim().min(1).max(512),
     mimeType: z.string().trim().min(1).max(255),
     expectedByteSize: z.number().int().positive().max(500_000_000),

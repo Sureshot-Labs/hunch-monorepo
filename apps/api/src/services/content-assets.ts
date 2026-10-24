@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import {
+  checkAvatarContent,
+  AVATAR_MAX_FILTER_BYTES,
+} from "./social-content-filter.js";
 import { eraseObjectVersions } from "./content-storage-erasure.js";
 import { randomUUID } from "node:crypto";
 
@@ -338,6 +343,23 @@ export async function createContentAssetUpload(
       400,
     );
   }
+  if (actor.kind === "user") {
+    if (!body.avatarModerationConsent)
+      throw new ContentError(
+        "avatar_consent_required",
+        "Permission is required for the photo safety check",
+        422,
+      );
+    if (
+      !["image/jpeg", "image/png"].includes(body.mimeType.toLowerCase()) ||
+      body.expectedByteSize > AVATAR_MAX_FILTER_BYTES
+    )
+      throw new ContentError(
+        "avatar_unsupported",
+        "Choose a JPEG or PNG smaller than 5 MB",
+        422,
+      );
+  }
   assertUploadPolicy(
     body,
     actor.kind === "user" ? userPolicy?.maximumBytes : undefined,
@@ -403,7 +425,10 @@ export async function createContentAssetUpload(
         body.creditUrl ?? null,
         JSON.stringify({
           ...(actor.kind === "user"
-            ? { socialUploadPolicy: userPolicy }
+            ? {
+                socialUploadPolicy: userPolicy,
+                avatarModerationConsentVersion: 1,
+              }
             : (body.metadata ?? {})),
           uploadExpiresAt: expiresAt.toISOString(),
         }),
@@ -609,6 +634,7 @@ export async function completeContentAssetUpload(
   assetId: string,
   rawBody: ContentAssetCompleteBody,
   actorInput: ContentActorInput = null,
+  verifyAvatar: (bytes: Uint8Array) => Promise<void> = checkAvatarContent,
 ): Promise<ContentAsset> {
   const actor = normalizeContentActor(actorInput);
   const body = contentAssetCompleteBodySchema.parse(rawBody);
@@ -685,6 +711,7 @@ export async function completeContentAssetUpload(
   if (claim.ready) return assetFromRow(claim.existing);
 
   const existing = claim.existing;
+  const requiresAvatarCheck = existing.owner_user_id != null;
   const targetKey = claim.targetKey;
   const checksumSha256 = existing.checksum_sha256;
   if (!checksumSha256) {
@@ -693,6 +720,9 @@ export async function completeContentAssetUpload(
   const issues: string[] = [];
   let verifiedWidth: number | null = null;
   let verifiedHeight: number | null = null;
+  let verifiedVersionId: string | undefined;
+  let verifiedETag: string | undefined;
+  let avatarBytes: Buffer | undefined;
   try {
     const head = await client.send(
       new HeadObjectCommand({
@@ -701,6 +731,8 @@ export async function completeContentAssetUpload(
         ChecksumMode: "ENABLED",
       }),
     );
+    verifiedVersionId = head.VersionId;
+    verifiedETag = head.ETag;
     const storedSize = Number(head.ContentLength ?? -1);
     const storedType = head.ContentType?.toLowerCase() ?? "";
     if (
@@ -724,7 +756,29 @@ export async function completeContentAssetUpload(
       issues.push("uploaded checksum does not match the upload intent");
     }
 
-    const prefix = await readObjectPrefix(client, existing.storage_key);
+    let prefix: Buffer;
+    if (requiresAvatarCheck) {
+      const object = await client.send(
+        new GetObjectCommand({
+          Bucket: getContentServiceRuntime().assetS3Bucket,
+          Key: existing.storage_key,
+          VersionId: verifiedVersionId,
+          IfMatch: verifiedETag,
+          Range: `bytes=0-${AVATAR_MAX_FILTER_BYTES}`,
+        }),
+      );
+      if (!object.Body) throw new Error("Avatar body unavailable");
+      avatarBytes = Buffer.from(await object.Body.transformToByteArray());
+      if (
+        avatarBytes.length > AVATAR_MAX_FILTER_BYTES ||
+        createHash("sha256").update(avatarBytes).digest("hex") !==
+          checksumSha256
+      )
+        issues.push("avatar bytes do not match the upload intent");
+      prefix = avatarBytes;
+    } else {
+      prefix = await readObjectPrefix(client, existing.storage_key);
+    }
     if (!bytesMatchMime(existing.mime_type.toLowerCase(), prefix)) {
       issues.push("uploaded bytes do not match the declared MIME type");
     }
@@ -784,12 +838,52 @@ export async function completeContentAssetUpload(
       publicIssues,
     );
   }
+  if (requiresAvatarCheck) {
+    try {
+      if (
+        existing.metadata.avatarModerationConsentVersion !== 1 ||
+        !avatarBytes
+      )
+        throw new ContentError(
+          "avatar_consent_required",
+          "Permission is required for the photo safety check",
+          422,
+        );
+      await verifyAvatar(avatarBytes);
+    } catch (error) {
+      if (
+        error instanceof ContentError &&
+        error.code === "avatar_check_unavailable"
+      ) {
+        // Retry the same private upload; provider outages do not label a user as abusive.
+        await pool.query(
+          `update content_assets set status='pending' where id=$1 and status='verifying'
+            and storage_key=$2 and metadata->>'verificationTargetKey'=$3`,
+          [assetId, existing.storage_key, targetKey],
+        );
+      } else {
+        await failAssetVerification(
+          pool,
+          assetId,
+          existing.storage_key,
+          targetKey,
+          ["photo safety check rejected"],
+        );
+      }
+      throw error;
+    }
+  }
   try {
     await client.send(
       new CopyObjectCommand({
         Bucket: getContentServiceRuntime().assetS3Bucket,
         Key: targetKey,
-        CopySource: copySource(existing.storage_key),
+        CopySource:
+          copySource(existing.storage_key) +
+          (verifiedVersionId
+            ? `?versionId=${encodeURIComponent(verifiedVersionId)}`
+            : ""),
+        CopySourceIfMatch: verifiedETag,
         ChecksumAlgorithm: "SHA256",
         MetadataDirective: "REPLACE",
         ContentType: existing.mime_type,

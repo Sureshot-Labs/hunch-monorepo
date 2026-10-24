@@ -1,4 +1,9 @@
+import { confirmAdultAccount } from "../services/account-age-confirmation.js";
 import { recordAccountErasure } from "../services/account-erasure-journal.js";
+import {
+  adultConfirmationBodySchema,
+  authUserSchema,
+} from "../schemas/auth.js";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
@@ -106,6 +111,7 @@ function buildAuthUserPayload(user: User) {
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
+    adultConfirmedAt: user.adultConfirmedAt?.toISOString(),
     handle: user.handle,
     bio: user.bio,
     avatarAssetId: user.avatarAssetId,
@@ -704,6 +710,32 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           error: "Failed to get user information",
         });
       }
+    },
+  );
+
+  z.post(
+    "/auth/me/age-confirmation",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        body: adultConfirmationBodySchema,
+        response: {
+          200: zod.object({ user: authUserSchema }),
+          401: authErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!request.user) return reply.code(401).send({ error: "Unauthorized" });
+      const confirmedAt = await confirmAdultAccount(pool, request.user.id);
+      if (!confirmedAt) return reply.code(401).send({ error: "Unauthorized" });
+      reply.header("Cache-Control", "private, no-store");
+      return {
+        user: buildAuthUserPayload({
+          ...request.user,
+          adultConfirmedAt: confirmedAt,
+        }),
+      };
     },
   );
 

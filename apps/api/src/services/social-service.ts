@@ -1,3 +1,7 @@
+import {
+  requireAllowedSocialText,
+  isSocialTextAllowed,
+} from "./social-content-filter.js";
 import { tx, type Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
 import { readDflowNativeAcceptingOrders } from "../lib/market-availability.js";
@@ -121,9 +125,14 @@ function profile(row: Row) {
   return {
     id: row.id,
     isAgent: Boolean(row.is_agent),
-    handle: row.handle ?? null,
-    displayName: row.display_name?.trim() || row.handle || "Hunch trader",
-    bio: row.bio ?? null,
+    handle: row.handle && isSocialTextAllowed(row.handle) ? row.handle : null,
+    displayName: isSocialTextAllowed(row.display_name ?? "")
+      ? row.display_name?.trim() ||
+        (row.handle && isSocialTextAllowed(row.handle)
+          ? row.handle
+          : "Hunch trader")
+      : "Hunch trader",
+    bio: isSocialTextAllowed(row.bio ?? "") ? (row.bio ?? null) : null,
     avatarUrl: row.avatar_url ?? null,
     joinedAt: row.joined_at,
     isFollowing: Boolean(row.is_following),
@@ -435,26 +444,32 @@ export class SocialService {
     const handle =
       input.handle === undefined
         ? undefined
-        : normalizeSocialHandle(
-            input.handle,
-            policy.handleMinLength,
-            policy.handleMaxLength,
+        : requireAllowedSocialText(
+            normalizeSocialHandle(
+              input.handle,
+              policy.handleMinLength,
+              policy.handleMaxLength,
+            ),
           );
     const displayName =
       input.displayName === undefined
         ? undefined
-        : socialText(input.displayName, policy.displayNameMaxGraphemes);
+        : requireAllowedSocialText(
+            socialText(input.displayName, policy.displayNameMaxGraphemes),
+          );
     const bio =
       input.bio === undefined
         ? undefined
-        : socialText(input.bio, policy.bioMaxGraphemes, true);
+        : requireAllowedSocialText(
+            socialText(input.bio, policy.bioMaxGraphemes, true),
+          );
     try {
       await tx(this.db, async (db) => {
         await actor(db, userId);
         let avatarUrl: string | null = null;
         if (input.avatarAssetId) {
           const assets = await db.query(
-            `select public_url from content_assets where id=$1 and owner_user_id=$2 and kind='image' and status='ready' for update`,
+            `select public_url from content_assets where id=$1 and owner_user_id=$2 and kind='image' and status='ready' and metadata @> '{"avatarModerationConsentVersion":1}'::jsonb for update`,
             [input.avatarAssetId, userId],
           );
           if (!assets.rows[0]) throw new SocialError("avatar_unavailable", 409);
@@ -880,7 +895,9 @@ export class SocialService {
       if (!policy.enabled || !policy.publicationsEnabled)
         throw new SocialError("publications_disabled", 503);
       await this.checkWrite(userId, policy, "write");
-      const body = socialText(input.body, policy.thesisMaxGraphemes);
+      const body = requireAllowedSocialText(
+        socialText(input.body, policy.thesisMaxGraphemes),
+      );
       const buy = await readVerifiedBuy(db, {
         userId,
         purchaseRef: input.purchaseRef,
@@ -1006,7 +1023,9 @@ export class SocialService {
         simulation: paper?.success ? paper.data.simulation : null,
         id: row.thesis_id,
         author: profile(row),
-        body: row.body,
+        body: isSocialTextAllowed(row.body)
+          ? row.body
+          : "Content removed under the Community guidelines.",
         publishedAt: row.published_at,
         purchasedAt: facts.purchasedAt,
         instrument: {
@@ -1263,7 +1282,9 @@ export class SocialService {
       if (!policy.enabled || !policy.commentsEnabled)
         throw new SocialError("comments_disabled", 503);
       await this.checkWrite(userId, policy, "comment");
-      const body = socialText(input.body, policy.commentMaxGraphemes);
+      const body = requireAllowedSocialText(
+        socialText(input.body, policy.commentMaxGraphemes),
+      );
       const target = await this.commentTarget(db, userId, input.target);
       const { rows } = await db.query(
         `insert into social_comments(author_id,thesis_id,ai_note_id,observed_ai_note_id,body,idempotency_key,payload_hash) values($1,$2,$3,$4,$5,$6,$7) returning id`,
@@ -1318,7 +1339,9 @@ export class SocialService {
       items: page.map((row) => ({
         id: row.comment_id,
         author: profile(row),
-        body: row.body,
+        body: isSocialTextAllowed(row.body)
+          ? row.body
+          : "Content removed under the Community guidelines.",
         createdAt: row.comment_created_at,
         observedRevisionId: row.observed_ai_note_id,
         revisionAvailable:

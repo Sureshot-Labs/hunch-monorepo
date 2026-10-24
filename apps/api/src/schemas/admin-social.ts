@@ -13,6 +13,7 @@ export const adminSocialActionSchema = z.enum([
   "unhide",
   "suspend",
   "unsuspend",
+  "remove_avatar",
 ]);
 export type AdminSocialAction = z.infer<typeof adminSocialActionSchema>;
 const pageQuery = z.object({
@@ -39,14 +40,25 @@ export const adminSocialModerationBodySchema = z
     action: adminSocialActionSchema,
     reason: z.string(),
     reportId: uuid.optional(),
+    expectedAvatarUrl: z.string().url().max(2048).optional(),
   })
   .strict()
   .refine(
     (value) =>
       value.target.kind === "user"
-        ? value.action === "suspend" || value.action === "unsuspend"
+        ? value.action === "suspend" ||
+          value.action === "unsuspend" ||
+          value.action === "remove_avatar"
         : value.action === "hide" || value.action === "unhide",
     { message: "Action does not match target kind", path: ["action"] },
+  )
+  .refine(
+    (value) =>
+      value.action !== "remove_avatar" || value.expectedAvatarUrl !== undefined,
+    {
+      message: "Review the current avatar before removing it",
+      path: ["expectedAvatarUrl"],
+    },
   );
 export const adminSocialReportParamsSchema = z.object({ id: uuid });
 export const adminSocialResolveBodySchema = z
@@ -54,6 +66,7 @@ export const adminSocialResolveBodySchema = z
   .strict();
 export const adminSocialTargetPreviewSchema = z.object({
   text: z.string().nullable(),
+  avatarUrl: z.string().nullable(),
   authorUserId: uuid.nullable(),
   moderationHidden: z.boolean(),
   authorHidden: z.boolean(),
@@ -73,7 +86,14 @@ export const adminSocialReportSchema = z.object({
 export const adminSocialEventSchema = z.object({
   id: uuid,
   target: adminSocialTargetSchema,
-  action: z.enum(["hide", "unhide", "suspend", "unsuspend", "resolve_report"]),
+  action: z.enum([
+    "hide",
+    "unhide",
+    "suspend",
+    "unsuspend",
+    "remove_avatar",
+    "resolve_report",
+  ]),
   reason: z.string(),
   adminId: uuid.nullable(),
   reportId: uuid.nullable(),

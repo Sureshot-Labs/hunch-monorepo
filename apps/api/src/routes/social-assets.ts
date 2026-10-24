@@ -86,6 +86,7 @@ export const socialAssetsRoutes: FastifyPluginAsync = async (app) => {
       preHandler: createAuthMiddleware(),
       schema: {
         body: contentAssetCreateBodySchema.pick({
+          avatarModerationConsent: true,
           originalFilename: true,
           mimeType: true,
           expectedByteSize: true,

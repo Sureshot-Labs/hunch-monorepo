@@ -177,6 +177,32 @@
         }
       }
     },
+    "AvatarSafetyAccess": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "hunch-avatar-safety-check",
+        "Roles": [
+          {
+            "Ref": "ApiRoleName"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["rekognition:DetectModerationLabels"],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "eu-west-1"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
     "SnapshotLifecycleRole": {
       "Type": "AWS::IAM::Role",
       "Properties": {

@@ -5,8 +5,9 @@ object versions, public CDN copies and restorable snapshots behind. This branch
 purges exact-key object versions, waits for CloudFront invalidation and records
 deletion intent outside the database volume before acknowledging it.
 
-Scope is account/media erasure, recovery, tests and reviewable AWS configuration.
-It contains no age confirmation, content classifier, moderation UI or iOS changes.
+This integrates the reviewed account/media erasure branch with the separate
+first-iOS-release account safety changes: age confirmation, text/avatar checks
+and avatar moderation. Analytics work is excluded.
 Existing financial execution/deactivation protections are preserved.
 Nothing in this branch deploys infrastructure or deletes production snapshots.
 
@@ -205,3 +206,52 @@ established by the local build with copied dependencies.
 
 Primary references: [S3 versions](https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeletingObjectVersions.html),
 [CloudFront invalidation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html).
+
+## iOS account safety integration
+
+- `POST /auth/me/age-confirmation` accepts only
+  `{ "isAtLeast18": true, "policyVersion": 1 }`. It stores the first declaration
+  timestamp/version, never a birth date. Existing sessions do not fabricate a
+  declaration; account erasure clears it.
+- Profile fields, theses and comments are checked before writing. Public reads
+  also mask matching legacy text. The local rules cover selected English/Russian
+  obscenity, slurs and direct threats, with NFKC/zero-width normalization.
+  Reports and moderator reasons remain uncensored evidence; reports and human
+  review are still needed for content outside these rules.
+- User-owned avatar uploads require explicit AI-check permission, JPEG/PNG and
+  at most 5,000,000 bytes. SHA-256-verified bytes are sent to AWS Rekognition in
+  `eu-west-1`. Only a successful check permits public promotion; provider failure
+  leaves the upload private and retryable. Version/ETag conditions bind the check
+  to the promoted object. Administrators completing user-owned uploads follow
+  the same checks. CMS media retain their existing policy.
+- `remove_avatar` atomically clears the reviewed current avatar, marks its owned
+  asset deleted, enqueues storage cleanup and records the moderation decision.
+  The expected avatar URL rejects a stale moderator preview. The profile edit
+  marker prevents the next provider login from resurrecting the removed photo.
+  The current admin Social screen presents this action alongside suspension.
+
+The original account-safety checkout and the deletion branch were combined by
+individual changes; `new-analytics` was not merged. The first-release native
+sign-in disclosure and consent flow are maintained in the iOS repository.
+
+### Additional rollout steps
+
+1. Review the `AvatarSafetyAccess` template policy with the API role. It grants
+   only `rekognition:DetectModerationLabels`, constrained to `eu-west-1`.
+   Primary S3/journal storage remains in `eu-north-1`. This template change does
+   not apply IAM permissions or AWS settings. Check the provider arrangements
+   and AI-service data-use settings before enabling real uploads.
+2. Apply migrations `0288_account_age_confirmation.sql`,
+   `0289_content_erasure_invalidation.sql` and `0290_avatar_moderation_action.sql`
+   under the normal migration procedure. Do not run the restore CLI against the
+   live production database.
+3. Deploy backend/admin with the reviewed journal/CDN prerequisites, then verify
+   one controlled account: age declaration, accepted/rejected avatar, stale
+   moderation preview, avatar removal, account deletion, S3 versions and
+   CloudFront `Completed`. This local integration does not deploy any service.
+
+Local verification evidence is kept outside source control. The combined safety
+and erasure SQL fixtures use an isolated PostgreSQL 16 cluster with one million
+users, assets and storage jobs. They check age idempotency/inactive accounts,
+atomic avatar removal, storage progress and sparse/resumed/generic queue plans.
+AWS end-to-end checks and production rollout remain separate.

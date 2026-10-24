@@ -62,7 +62,7 @@ try {
       mime_type: "image/png",
       byte_size: png.length,
       checksum_sha256: checksum,
-      metadata: {},
+      metadata: owned ? { avatarModerationConsentVersion: 1 } : {},
       created_at: new Date(),
       updated_at: new Date(),
     };
@@ -108,6 +108,14 @@ try {
         : actor === "admin-owned-user"
           ? adminContentActor("30000000-0000-4000-8000-000000000003")
           : null,
+      async (bytes) => {
+        assert.equal(
+          owned,
+          true,
+          "CMS uploads must not require avatar moderation",
+        );
+        assert.deepEqual(bytes, png);
+      },
     );
     assert.equal(ready.status, "ready");
     assert.equal(
