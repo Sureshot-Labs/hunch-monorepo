@@ -10,6 +10,7 @@ import {
   GetInvalidationCommand,
 } from "@aws-sdk/client-cloudfront";
 import { getContentServiceRuntime } from "../content-service-runtime.js";
+import { contentAssetPublicUrl } from "./content-asset-url.js";
 
 /** Progress is durable in S3; another bounded worker turn continues it. */
 export class StorageErasureInProgress extends Error {}
@@ -88,7 +89,7 @@ export async function invalidateStoredContent(
         CallerReference: reference,
         Paths: {
           Quantity: 1,
-          Items: ["/" + key.split("/").map(encodeURIComponent).join("/")],
+          Items: [new URL(contentAssetPublicUrl(key)).pathname],
         },
       },
     }),

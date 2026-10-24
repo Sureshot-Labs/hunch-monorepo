@@ -15,7 +15,9 @@ Nothing in this branch deploys infrastructure or deletes production snapshots.
 
 - The API writes a minimal private S3 journal record before the DB transaction.
   It stores only schema version, user UUID and request timestamp. Conditional
-  creation is idempotent; a prior record must be read and validated on HTTP 412.
+  creation is idempotent; a prior record must be read and validated on HTTP 412,
+  then refreshed with its ETag as a write precondition. Every acknowledged retry
+  restarts the journal's storage retention, including after a failed DB deletion.
   If the journal cannot be acknowledged, the API returns 503 without DB erasure.
   If the subsequent transaction fails, the recorded request remains actionable.
 - The deletion receipt adds `storageDeletionPending: true`. This is deliberately
@@ -28,6 +30,8 @@ Nothing in this branch deploys infrastructure or deletes production snapshots.
   falsely declaring a cached asset erased. Staging keys need no invalidation.
   The worker persists the invalidation ID and polls until `Completed` without
   spending failure retries. Late remote writes reset the invalidation generation.
+  Invalidation uses the same public URL path as asset promotion, including any
+  path prefix in `CONTENT_ASSET_PUBLIC_BASE_URL`.
 - The restore CLI validates the live journal by default. `--apply` reuses the
   existing DB erasure/financial safeguards and requires explicit restore isolation.
   Both modes require `--database-url` and `--expect-database`. After loading

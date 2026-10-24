@@ -39,33 +39,43 @@ export async function recordAccountErasure(
   });
   const s3 = client ?? new S3Client({ region, maxAttempts: 2 });
   const key = ERASURE_JOURNAL_PREFIX + userId + ".json";
-  try {
-    await s3.send(
+  const writeRecord = (condition: { IfNoneMatch: "*" } | { IfMatch: string }) =>
+    s3.send(
       new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         Body: JSON.stringify(record),
         ContentType: "application/json",
         ServerSideEncryption: "AES256",
-        IfNoneMatch: "*",
+        ...condition,
       }),
       { abortSignal: AbortSignal.timeout(10_000) },
     );
+  try {
+    await writeRecord({ IfNoneMatch: "*" });
   } catch (error) {
-    // An earlier confirmed request is sufficient, but do not trust an arbitrary 412.
+    // Validate an earlier request before refreshing its S3 lifecycle clock.
     if ((error as S3ServiceException).$metadata?.httpStatusCode !== 412)
       throw error;
     const stored = await s3.send(
       new GetObjectCommand({ Bucket: bucket, Key: key }),
       { abortSignal: AbortSignal.timeout(10_000) },
     );
-    if (!stored.Body || Number(stored.ContentLength ?? 0) > 1024)
+    if (
+      !stored.Body ||
+      !stored.ETag ||
+      Number(stored.ContentLength ?? 0) > 1024
+    )
       throw new Error("Invalid erasure journal record");
     const existing = erasureRecordSchema.parse(
       JSON.parse(await stored.Body.transformToString()),
     );
     if (existing.userId !== userId)
       throw new Error("Erasure journal owner mismatch");
+    // DB erasure may have failed long ago. Acknowledging that old object alone
+    // could let it expire before backups taken since the failed attempt.
+    // A concurrent change must fail this request, which can then be retried.
+    await writeRecord({ IfMatch: stored.ETag });
   } finally {
     if (!client && s3 instanceof S3Client) s3.destroy();
   }

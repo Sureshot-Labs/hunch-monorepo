@@ -6,24 +6,20 @@ import {
   GetObjectCommand,
   CopyObjectCommand,
 } from "@aws-sdk/client-s3";
+import {
+  CreateInvalidationCommand,
+  type CloudFrontClient,
+} from "@aws-sdk/client-cloudfront";
 import { resolveContentRuntimeConfig } from "@hunch/config/content";
 import type { Pool } from "@hunch/infra";
 import { configureContentServiceRuntime } from "./content-service-runtime.js";
 import { completeContentAssetUpload } from "./services/content-assets.js";
+import { invalidateStoredContent } from "./services/content-storage-erasure.js";
 import {
   adminContentActor,
   userContentActor,
 } from "./services/content-actor.js";
 
-configureContentServiceRuntime(
-  resolveContentRuntimeConfig(
-    {
-      CONTENT_ASSET_S3_BUCKET: "cache-fixture",
-      CONTENT_ASSET_PUBLIC_BASE_URL: "https://images.example.test",
-    },
-    "test",
-  ),
-);
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -49,6 +45,21 @@ S3Client.prototype.send = (async (command: unknown) => {
 
 try {
   for (const actor of ["user", "admin-owned-user", "cms"] as const) {
+    const publicBaseUrl = {
+      user: "https://images.example.test",
+      "admin-owned-user": "https://images.example.test/media/",
+      cms: "https://images.example.test/public%20media/avatars/",
+    }[actor];
+    configureContentServiceRuntime(
+      resolveContentRuntimeConfig(
+        {
+          CONTENT_ASSET_S3_BUCKET: "cache-fixture",
+          CONTENT_ASSET_PUBLIC_BASE_URL: publicBaseUrl,
+          CONTENT_ASSET_CLOUDFRONT_DISTRIBUTION_ID: "fixture-distribution",
+        },
+        "test",
+      ),
+    );
     const id = "20000000-0000-4000-8000-000000000002";
     const owned = actor !== "cms";
     const asset = {
@@ -119,6 +130,31 @@ try {
     );
     assert.equal(ready.status, "ready");
     assert.equal(
+      ready.publicUrl,
+      `${publicBaseUrl.replace(/\/+$/, "")}/${ready.storageKey}`,
+    );
+    assert.ok(ready.publicUrl);
+    const publicPath = new URL(ready.publicUrl).pathname;
+    let invalidations = 0;
+    const invalidation = await invalidateStoredContent(
+      ready.storageKey,
+      `cache-fixture-${actor}`,
+      null,
+      {
+        send: async (command: unknown) => {
+          assert.ok(command instanceof CreateInvalidationCommand);
+          assert.equal(command.input.DistributionId, "fixture-distribution");
+          assert.deepEqual(command.input.InvalidationBatch?.Paths?.Items, [
+            publicPath,
+          ]);
+          invalidations += 1;
+          return { Invalidation: { Id: "fixture-id", Status: "Completed" } };
+        },
+      } as unknown as Pick<CloudFrontClient, "send">,
+    );
+    assert.equal(invalidations, 1);
+    assert.equal(invalidation.completed, true);
+    assert.equal(
       copyCacheControl,
       owned
         ? "public, max-age=0, s-maxage=300, must-revalidate"
@@ -129,5 +165,5 @@ try {
   S3Client.prototype.send = originalSend;
 }
 console.log(
-  "[account-erasure-cache] real asset promotion: user and admin-completed user media revalidate; CMS cache unchanged",
+  "[account-erasure-cache] real asset promotion: user media revalidates; CDN invalidates actual root/prefixed/encoded public paths; CMS cache unchanged",
 );

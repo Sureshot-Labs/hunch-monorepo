@@ -28,6 +28,7 @@ import {
   type ContentAssetUpdateBody,
 } from "../schemas/content.js";
 import { ContentError } from "./content-errors.js";
+import { contentAssetPublicUrl } from "./content-asset-url.js";
 import {
   enqueueContentStorageDeletion as enqueueStorageDeletion,
   stagingDeletionAvailableAt as computeStagingDeletionAvailableAt,
@@ -298,13 +299,6 @@ function publicStorageKey(
   checksumSha256: string,
 ): string {
   return `content/${checksumSha256.slice(0, 2)}/${assetId}-${checksumSha256.slice(0, 16)}${extensionForMime(mimeType)}`;
-}
-
-function publicUrl(key: string): string {
-  return `${getContentServiceRuntime().assetPublicBaseUrl}/${key
-    .split("/")
-    .map(encodeURIComponent)
-    .join("/")}`;
 }
 
 function assertUploadPolicy(
@@ -942,7 +936,7 @@ export async function completeContentAssetUpload(
         [
           assetId,
           targetKey,
-          publicUrl(targetKey),
+          contentAssetPublicUrl(targetKey),
           body.byteSize,
           checksumSha256,
           verifiedWidth,

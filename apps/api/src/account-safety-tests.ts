@@ -279,10 +279,15 @@ await recordAccountErasure(
   uuid,
   {
     send: async (command: unknown) => {
-      if (command instanceof PutObjectCommand)
-        throw { $metadata: { httpStatusCode: 412 } };
+      if (command instanceof PutObjectCommand) {
+        if (command.input.IfNoneMatch === "*")
+          throw { $metadata: { httpStatusCode: 412 } };
+        assert.equal(command.input.IfMatch, '"journal-etag"');
+        return {};
+      }
       assert.ok(command instanceof GetObjectCommand);
       return {
+        ETag: '"journal-etag"',
         ContentLength: 160,
         Body: { transformToString: async () => JSON.stringify(journalRecord) },
       };
