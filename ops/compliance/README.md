@@ -223,8 +223,15 @@ Primary references: [S3 versions](https://docs.aws.amazon.com/AmazonS3/latest/us
   Reports and moderator reasons remain uncensored evidence; reports and human
   review are still needed for content outside these rules.
 - User-owned avatar uploads require explicit AI-check permission, JPEG/PNG and
-  at most 5,000,000 bytes. SHA-256-verified bytes are sent to AWS Rekognition in
-  `eu-west-1`. Only a successful check permits public promotion; provider failure
+  at most 5,000,000 bytes, with each dimension between 80 and 10,000 pixels.
+  Unsupported dimensions/formats are rejected before contacting the provider;
+  permanent provider image-input errors return `avatar_unsupported` (422) and
+  fail the upload. Transient failures remain retryable, including recovery of the
+  same private upload after the provider recovers.
+  [Image limits](https://docs.aws.amazon.com/rekognition/latest/dg/limits.html)
+  apply only to avatars.
+  SHA-256-verified bytes are sent to AWS Rekognition in
+  `eu-west-1`. Only a successful check permits public promotion; provider outages
   leaves the upload private and retryable. Version/ETag conditions bind the check
   to the promoted object. Administrators completing user-owned uploads follow
   the same checks. CMS media retain their existing policy.

@@ -3,11 +3,28 @@ import {
   RekognitionClient,
   type ModerationLabel,
 } from "@aws-sdk/client-rekognition";
+import { imageSize } from "image-size";
 import { ContentError } from "./content-errors.js";
 import { SocialError } from "./social-primitives.js";
 
 export const AVATAR_MAX_FILTER_BYTES = 5_000_000;
 export const AVATAR_MODERATION_REGION = "eu-west-1";
+const AVATAR_MIN_DIMENSION = 80;
+const AVATAR_MAX_DIMENSION = 10_000;
+
+function unsupportedAvatarError(): ContentError {
+  return new ContentError(
+    "avatar_unsupported",
+    "Choose a JPEG or PNG smaller than 5 MB, with each dimension between 80 and 10000 pixels",
+    422,
+  );
+}
+
+const invalidImageErrors = new Set([
+  "InvalidImageFormatException",
+  "ImageTooLargeException",
+  "InvalidParameterException",
+]);
 
 // Deliberately scoped to severe explicit content, targeted abuse and death threats.
 // Reports and moderator reasons must be able to quote abusive text.
@@ -66,11 +83,23 @@ export async function checkAvatarContent(
   client: Pick<RekognitionClient, "send"> = rekognition,
 ): Promise<void> {
   if (!bytes.length || bytes.length > AVATAR_MAX_FILTER_BYTES)
-    throw new ContentError(
-      "avatar_unsupported",
-      "Choose a JPEG or PNG smaller than 5 MB",
-      422,
-    );
+    throw unsupportedAvatarError();
+  let dimensions;
+  try {
+    dimensions = imageSize(bytes);
+  } catch {
+    throw unsupportedAvatarError();
+  }
+  if (
+    !["jpg", "png"].includes(dimensions.type ?? "") ||
+    !dimensions.width ||
+    !dimensions.height ||
+    dimensions.width < AVATAR_MIN_DIMENSION ||
+    dimensions.height < AVATAR_MIN_DIMENSION ||
+    dimensions.width > AVATAR_MAX_DIMENSION ||
+    dimensions.height > AVATAR_MAX_DIMENSION
+  )
+    throw unsupportedAvatarError();
   let result;
   try {
     result = await client.send(
@@ -80,7 +109,9 @@ export async function checkAvatarContent(
       }),
       { abortSignal: AbortSignal.timeout(15_000) },
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && invalidImageErrors.has(error.name))
+      throw unsupportedAvatarError();
     throw new ContentError(
       "avatar_check_unavailable",
       "Photo safety check is temporarily unavailable",

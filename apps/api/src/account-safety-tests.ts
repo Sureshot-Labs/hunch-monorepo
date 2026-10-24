@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { PNG } from "pngjs";
 import {
   S3Client,
   DeleteObjectCommand,
@@ -222,12 +223,13 @@ assert.equal(
 );
 assert.equal(invalidations, 1);
 
+const avatarPng = PNG.sync.write(new PNG({ width: 80, height: 80 }));
 for (const [labels, rejected] of [
   [[], false],
   [[{ Name: "Explicit", Confidence: 99 }], true],
   [[{ Name: "Hate Symbols", Confidence: 79 }], false],
 ] as const) {
-  const operation = checkAvatarContent(new Uint8Array([1]), {
+  const operation = checkAvatarContent(avatarPng, {
     send: async (command: unknown) => {
       assert.ok(command instanceof DetectModerationLabelsCommand);
       return { ModerationLabels: labels, ModerationModelVersion: "test" };
@@ -238,7 +240,7 @@ for (const [labels, rejected] of [
   else await operation;
 }
 await assert.rejects(
-  checkAvatarContent(new Uint8Array([1]), {
+  checkAvatarContent(avatarPng, {
     send: async () => {
       throw new Error("unavailable");
     },
