@@ -44,6 +44,42 @@ test("Quick Wins evaluates both sides and keeps named outcomes with event contex
     assert.equal(card.timing.settlementAt, null);
   }
 });
+test("Quick Wins applies inclusive 85–95 cents to both midpoint and ask, on either side", () => {
+  for (const side of ["YES", "NO"]) {
+    for (const [bid, ask, eligible] of [
+      ["0.85", "0.85", true],
+      ["0.84", "0.86", true],
+      ["0.88", "0.90", true],
+      ["0.93", "0.95", true],
+      ["0.95", "0.95", true],
+      ["0.849", "0.85", false], // ask passes, midpoint does not
+      ["0.849", "0.849", false],
+      ["0.94", "0.951", false], // midpoint passes, ask does not
+      ["0.96", "0.98", false],
+      ["0.90", "0.931", false], // keep the spread guard
+    ] as const) {
+      const card = marketCard(
+        discoveryTestRow("m", { side, best_bid: bid, best_ask: ask }),
+        now,
+        "0xctf",
+      );
+      assert.ok(card);
+      assert.equal(
+        quickEligible(card, "1000", "10", now),
+        eligible,
+        `${side} ${bid}/${ask}`,
+      );
+    }
+  }
+  assert.equal(
+    quickReason("0.95", "1000", "10").grossReturnIfWin,
+    "0.052631578947",
+  );
+  assert.equal(
+    quickReason("0.85", "1000", "10").grossReturnIfWin,
+    "0.176470588235",
+  );
+});
 test("Quick Wins rejects bad quotes, liquidity, unresolved instruments and expiry without inventing values", () => {
   for (const extra of [
     { best_bid: "0.99" },

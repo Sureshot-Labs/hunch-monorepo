@@ -22,6 +22,8 @@ import {
 } from "./social-primitives.js";
 
 export const DISCOVERY_QUOTE_AGE_MS = 300_000;
+export const DISCOVERY_QUICK_MIN_PRICE = "0.85";
+export const DISCOVERY_QUICK_MAX_PRICE = "0.95";
 export const DISCOVERY_SNAPSHOT_TTL_MS = 900_000;
 export const DISCOVERY_REFRESH_MS: Record<DiscoverySection, number> = {
   "quick-wins": 60_000,
@@ -288,10 +290,10 @@ export function quickPriceEligible(
     !!ask &&
     !!bid &&
     !!midpoint &&
-    cmp(ask, "0.90") >= 0 &&
-    cmp(ask, "0.98") <= 0 &&
-    cmp(midpoint, "0.90") >= 0 &&
-    cmp(midpoint, "0.98") <= 0 &&
+    cmp(ask, DISCOVERY_QUICK_MIN_PRICE) >= 0 &&
+    cmp(ask, DISCOVERY_QUICK_MAX_PRICE) <= 0 &&
+    cmp(midpoint, DISCOVERY_QUICK_MIN_PRICE) >= 0 &&
+    cmp(midpoint, DISCOVERY_QUICK_MAX_PRICE) <= 0 &&
     cmp(sub(ask, bid), "0.03") <= 0 &&
     cmp(liquidity, "1000") >= 0 &&
     cmp(volume, "0") > 0 &&

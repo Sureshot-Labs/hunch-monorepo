@@ -26,7 +26,7 @@ CREATE INDEX discovery_test_activity_events ON wallet_activity_events(wallet_id,
 INSERT INTO unified_events SELECT 'e'||n,'Event '||n,'ACTIVE','2026-10-25T14:00Z',null FROM generate_series(1,150) n;
 INSERT INTO unified_markets SELECT 'limitless:'||n,'e'||n,'limitless',n::text,'Outcome '||n,CASE WHEN n=150 THEN 'crypto' ELSE 'politics' END,'ACTIVE',null,null,'["Yes","No"]','2026-10-25T13:00Z',null,'2026-10-25T12:00Z',10000,null,'Official resolution rules','{}' FROM generate_series(1,150) n;
 INSERT INTO unified_market_tokens SELECT 'limitless:'||n,side_row.side,side_row.side||n,'2026-10-25T12:00Z' FROM generate_series(1,150) n CROSS JOIN (VALUES ('YES'),('NO')) side_row(side);
-INSERT INTO unified_token_top_latest SELECT side_row.side||n,CASE WHEN side_row.side='YES' THEN 0.94 ELSE 0.04 END,CASE WHEN side_row.side='YES' THEN 0.96 ELSE 0.06 END,'2026-10-25T12:00Z' FROM generate_series(1,150) n CROSS JOIN (VALUES ('YES'),('NO')) side_row(side);
+INSERT INTO unified_token_top_latest SELECT side_row.side||n,CASE WHEN side_row.side='YES' THEN 0.93 ELSE 0.05 END,CASE WHEN side_row.side='YES' THEN 0.95 ELSE 0.07 END,'2026-10-25T12:00Z' FROM generate_series(1,150) n CROSS JOIN (VALUES ('YES'),('NO')) side_row(side);
 INSERT INTO unified_market_activity_metrics_24h SELECT 'limitless:'||n,'limitless',2000,true,10000 FROM generate_series(1,150) n;
 INSERT INTO wallets SELECT ('00000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,'0x'||lpad(n::text,40,'0'),'evm',null,'{}' FROM generate_series(1,4) n;
 INSERT INTO wallet_intel_selector_snapshot SELECT id,'2026-10-25T12:00Z','2026-10-25T12:00Z',1000,30,0.1,1000,0,0,0 FROM wallets;

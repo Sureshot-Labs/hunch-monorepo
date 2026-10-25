@@ -42,8 +42,8 @@ export function discoveryTestRow(
     outcomes: '["30–34 seats","Not 30–34"]',
     side: "YES",
     token_id: `token:${id}`,
-    best_bid: "0.94",
-    best_ask: "0.96",
+    best_bid: "0.93",
+    best_ask: "0.95",
     quote_at: new Date(discoveryTestNow).toISOString(),
     expiration_time: new Date(discoveryTestNow + 3600000).toISOString(),
     event_end_time: new Date(discoveryTestNow + 7200000).toISOString(),
@@ -68,7 +68,7 @@ export function discoveryTestItem(
     ...card,
     id: `quick-wins:${id}:YES`,
     research: null,
-    reason: quickReason("0.96", "10000", "2000"),
+    reason: quickReason(card.quote.ask ?? "0.95", "10000", "2000"),
   };
 }
 export function discoveryTestSnapshot(

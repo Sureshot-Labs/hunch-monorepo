@@ -282,7 +282,7 @@ export class DiscoveryService {
   ): Promise<(DiscoveryItem | null)[]> {
     const ids = [...new Set(batch.map((i) => i.market.marketId))],
       now = this.clock();
-    const rows = await this.builder.repo.marketCards(ids);
+    const rows = await this.builder.marketCards(ids, scope, false, "read");
     const researchRows = await this.builder.repo.currentResearch(
       ids,
       new Date(now).toISOString(),
