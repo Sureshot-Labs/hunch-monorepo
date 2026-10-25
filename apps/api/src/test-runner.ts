@@ -11,6 +11,7 @@ import {
   type IntegrationDatabaseTarget,
 } from "./test-database-target.js";
 import { closeAcquiredRuntimeResources } from "./runtime-resource-cleanup.js";
+import { runIsolatedTestFile } from "./test-process.js";
 
 type TestMode = "all" | "integration" | "unit";
 
@@ -18,6 +19,7 @@ type TestFile = {
   absolute: string;
   databaseGuarded: boolean;
   integration: boolean;
+  isolated: boolean;
   relative: string;
   requiresDatabase: boolean;
 };
@@ -140,6 +142,7 @@ async function inspectTestFile(
     absolute,
     databaseGuarded,
     integration,
+    isolated: /@isolated-process\b/.test(source),
     relative,
     requiresDatabase,
   };
@@ -223,7 +226,8 @@ try {
     try {
       console.log(`[test-runner] running ${label}`);
       const url = `${pathToFileURL(file.absolute).href}?t=${Date.now()}`;
-      await import(url);
+      if (file.isolated) runIsolatedTestFile(new URL(url));
+      else await import(url);
       passed += 1;
       console.log(`[test-runner] ok ${label}`);
     } catch (error) {

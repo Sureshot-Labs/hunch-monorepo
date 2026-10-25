@@ -1,5 +1,6 @@
 import type { Pool as PgPool } from "pg";
 // @requires-db
+// @isolated-process: SDK mocks and the cached storage client must not leak to later suites.
 import { createIntegrationTestPool } from "./test-database-target.js";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";

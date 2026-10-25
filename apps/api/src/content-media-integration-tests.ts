@@ -1,5 +1,6 @@
 import { reconcileContentPromotionIntents } from "./services/content-promotion-intents.js";
 // @requires-db
+// @isolated-process: this local S3 endpoint must not reuse another suite's cached client.
 
 import assert from "node:assert/strict";
 import {
