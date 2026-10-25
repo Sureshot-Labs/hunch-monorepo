@@ -1,4 +1,5 @@
 import { tx, type Pool } from "@hunch/infra";
+import { requireAllowedSocialText } from "./social-content-filter.js";
 import type { DbQuery } from "../db.js";
 import {
   paperBuySnapshotSchema,
@@ -202,7 +203,9 @@ export async function evaluateAgentPaperEntry(
   const previous = history.rows[0];
   if ((previous?.id ?? null) !== input.provenance.previousThesisId)
     throw new SocialError("previous_thesis_changed", 409);
-  const body = socialText(input.body, input.maxThesisGraphemes);
+  const body = requireAllowedSocialText(
+    socialText(input.body, input.maxThesisGraphemes),
+  );
   if (
     previous &&
     (previous.body === body ||

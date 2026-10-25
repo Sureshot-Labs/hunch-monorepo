@@ -30,6 +30,7 @@ try {
   );
   for (const scenario of [
     "apply-staging",
+    "secret-bundle",
     "dry-run",
     "actual-database-mismatch",
     "url-database-mismatch",
@@ -58,7 +59,7 @@ try {
     assert.ok(output.includes(`[replay-fixture] ${scenario} passed`));
   }
   console.log(
-    `[account-erasure-replay] ${extension} CLI: 7 scenarios passed; explicit target, actual DB verification, dry run and real staging deletion`,
+    `[account-erasure-replay] ${extension} CLI: 8 scenarios passed; explicit target, actual DB verification, dry run and real staging deletion`,
   );
 } finally {
   await rm(directory, { recursive: true, force: true });

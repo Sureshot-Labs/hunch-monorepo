@@ -20,9 +20,12 @@ export async function eraseObjectVersions(
   bucket: string,
   key: string,
 ): Promise<void> {
-  // Covers unversioned buckets too. On versioned S3 this creates a marker,
-  // which is removed together with *all* historical versions below.
-  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  // Retain the current masking marker. Removing it in the same partial batch
+  // as data versions can expose surviving bytes after an S3 per-item failure.
+  // An opaque marker contains no media and safely remains after erasure.
+  const masked = await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: key }),
+  );
   for (let page = 0; page < 8; page += 1) {
     const listed = await client.send(
       new ListObjectVersionsCommand({
@@ -33,7 +36,10 @@ export async function eraseObjectVersions(
     );
     const objects = [
       ...(listed.Versions ?? []),
-      ...(listed.DeleteMarkers ?? []),
+      ...(listed.DeleteMarkers ?? []).filter(
+        (entry) =>
+          entry.VersionId !== masked.VersionId && entry.IsLatest !== true,
+      ),
     ]
       .filter((entry) => entry.Key === key && entry.VersionId != null)
       .map((entry) => ({ Key: key, VersionId: entry.VersionId }));

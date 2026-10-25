@@ -248,7 +248,8 @@ sign-in disclosure and consent flow are maintained in the iOS repository.
 ### Additional rollout steps
 
 1. Review the `AvatarSafetyAccess` template policy with the API role. It grants
-   only `rekognition:DetectModerationLabels`, constrained to `eu-west-1`.
+   `rekognition:DetectModerationLabels`, constrained to `eu-west-1`, and scoped
+   `s3:GetObjectVersion` access for pinned media reads/copies.
    Primary S3/journal storage remains in `eu-north-1`. This template change does
    not apply IAM permissions or AWS settings. Check the provider arrangements
    and AI-service data-use settings before enabling real uploads.
@@ -266,3 +267,54 @@ and erasure SQL fixtures use an isolated PostgreSQL 16 cluster with one million
 users, assets and storage jobs. They check age idempotency/inactive accounts,
 atomic avatar removal, storage progress and sparse/resumed/generic queue plans.
 AWS end-to-end checks and production rollout remain separate.
+
+### Audit corrections: migration and recovery
+
+Deploy the updated migration runner before applying `0291_account_merge_erasure.sql`
+and `0292_adult_confirmation_strict.sql`. Original migration files/checksums are
+unchanged. The runner records and commits the DDL phase of 0288/0290/0292 before
+`VALIDATE CONSTRAINT` scans the table. A failed validation can be retried with the
+same runner without repeating committed DDL. If 0292 detects an old timestamp
+with a NULL version, inspect the affected user IDs and clear that invalid pair
+by primary key before retrying; require a fresh self-declaration rather than
+inventing consent/version information.
+
+Account merges now retain transfer provenance, including `keepSource`, in the
+same transaction as the transfer. Account deletion locks the current owner,
+acknowledges root and transferred-identity records in the external journal, and
+then erases data. Replay erases a pre-merge identity only when its transfer is
+absent from the restored snapshot. This preserves new data in a source account
+that was kept active. The replay command bootstraps configured Secrets Manager
+bundles before constructing the explicitly pinned restore connection.
+
+Provenance starts with migration 0291. Earlier merges cannot be reconstructed
+from already deleted user rows. Before relying on replay for historical merges,
+recover their mapping and timing from retained administrator logs/backups and
+review the restore snapshot boundary, especially for `keepSource`. Do not seed
+unverified aliases or erase a currently independent source account automatically.
+
+Every remote promotion has a durable intent before CopyObject is sent. Successful
+publication removes its own intent atomically. Failed/unacknowledged attempts
+remain bounded periodic repair obligations without user/asset FKs or automatic
+expiry: remote cancellation cannot prove that a late write will never finish.
+The content worker revisits due intents every five minutes, including after an
+asset row or completed deletion job was removed. This is a repair cadence, not a
+waiting period for ordinary deletion. Retain these intents during housekeeping.
+
+Storage claims use a unique token for every attempt. Expired claims refund their
+unacknowledged attempt, and explicit redrive resets exhausted failure attempts.
+Version erasure retains the current opaque delete marker until all data versions
+are gone, including during partial S3 failures and bounded worker turns. The
+remaining marker contains no media; do not bulk-remove it alongside surviving
+versions. CloudFront invalidation still must complete for the current generation.
+
+The API IAM policy also needs `s3:GetObjectVersion` for the scoped content/staging
+prefixes used by pinned inspection and copy. The template includes it; local
+verification does not apply IAM, migrations or production changes.
+
+Regression suites cover actual SIGKILL during remote promotion, stale worker
+completion, abandoned final attempts, S3 outage/retry, reported-avatar deletion
+races, and pre/post-merge `pg_dump`/`pg_restore` with the real replay CLI. SQL
+fixtures exercise one million rows per relevant table and custom/generic,
+resumed/sparse/empty plans on PostgreSQL 16. These are local synthetic checks,
+not production performance or AWS end-to-end verification.

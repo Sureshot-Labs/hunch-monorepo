@@ -1,5 +1,5 @@
 import { confirmAdultAccount } from "../services/account-age-confirmation.js";
-import { recordAccountErasure } from "../services/account-erasure-journal.js";
+import { journalAccountErasureLineage } from "../services/account-erasure-lineage.js";
 import {
   adultConfirmationBodySchema,
   authUserSchema,
@@ -753,21 +753,34 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const privyUserId = user.privyUserId;
-
-      try {
-        await recordAccountErasure(user.id);
-      } catch {
-        app.log.error(
-          { userId: user.id },
-          "Account erasure journal could not be acknowledged",
-        );
-        return reply.code(503).send({ error: "account_deletion_unavailable" });
-      }
+      let privyUserId = user.privyUserId;
+      let deletionUserId = user.id;
+      let journalFailed = false;
       let deletion;
       try {
-        deletion = await AuthService.deleteUser(user.id);
+        deletion = await AuthService.deleteUser(user.id, undefined, {
+          resolveMergedIdentity: true,
+          beforeErasure: async (db, canonicalUserId, canonicalPrivyUserId) => {
+            deletionUserId = canonicalUserId;
+            privyUserId = canonicalPrivyUserId ?? undefined;
+            try {
+              await journalAccountErasureLineage(db, canonicalUserId);
+            } catch (error) {
+              journalFailed = true;
+              throw error;
+            }
+          },
+        });
       } catch (error) {
+        if (journalFailed) {
+          app.log.error(
+            { userId: user.id },
+            "Account erasure journal could not be acknowledged",
+          );
+          return reply
+            .code(503)
+            .send({ error: "account_deletion_unavailable" });
+        }
         app.log.error({ error, userId: user.id }, "Failed to delete user");
         reply.code(500);
         return reply.send({
@@ -779,7 +792,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       if (privyUserId && deletion.privyDeletionAllowed) {
         const reconciliation = await reconcilePendingPrivyDeletions(pool, {
           limit: 1,
-          userId: user.id,
+          userId: deletionUserId,
         });
         privyDeleted = reconciliation.completed === 1;
         if (reconciliation.failed > 0) {

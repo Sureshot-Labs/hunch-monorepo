@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  safeNativePushPayload,
+  safeNativePushText,
+} from "./native-push-text.js";
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
 import {
@@ -68,10 +72,7 @@ export async function enqueueNativePushInTransaction(
   await lockNativePushRecipients(db, input.userIds);
   const payload = {
     aps: {
-      alert: {
-        title: [...input.content.title].slice(0, 100).join(""),
-        body: [...input.content.body].slice(0, 240).join(""),
-      },
+      alert: safeNativePushText(input.content.title, input.content.body),
       sound: "default",
     },
     hunch: input.content.target ?? {},
@@ -189,7 +190,7 @@ export async function deliverNativePushBatch(input: {
           token: device.token,
           environment: device.environment,
           id: delivery.id,
-          payload: delivery.payload,
+          payload: safeNativePushPayload(delivery.payload),
           expiresAt:
             Math.floor(new Date(delivery.occurred_at).getTime() / 1000) +
             86_400,

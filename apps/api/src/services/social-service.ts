@@ -422,6 +422,7 @@ export class SocialService {
       policy.handleMinLength,
       policy.handleMaxLength,
     );
+    requireAllowedSocialText(handle);
     const { rows } = await this.db.query(
       `select id from users where handle=$1`,
       [handle],

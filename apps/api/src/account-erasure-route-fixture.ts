@@ -66,15 +66,26 @@ mock.method(
       ReturnType<typeof AuthService.getUserById>
     >,
 );
-mock.method(AuthService, "deleteUser", async () => {
-  events.push("delete");
-  if (databaseFails) throw new Error("DB unavailable");
-  return {
-    disposition: "hard_deleted",
-    activeMovement: false,
-    privyDeletionAllowed: false,
-  } as Awaited<ReturnType<typeof AuthService.deleteUser>>;
-});
+mock.method(
+  AuthService,
+  "deleteUser",
+  async (
+    ...[_id, _client, options]: Parameters<typeof AuthService.deleteUser>
+  ) => {
+    await options?.beforeErasure?.(
+      { query: async () => ({ rows: [] }) } as never,
+      id,
+      null,
+    );
+    events.push("delete");
+    if (databaseFails) throw new Error("DB unavailable");
+    return {
+      disposition: "hard_deleted",
+      activeMovement: false,
+      privyDeletionAllowed: false,
+    } as Awaited<ReturnType<typeof AuthService.deleteUser>>;
+  },
+);
 const app = Fastify();
 app.setValidatorCompiler(validatorCompiler);
 app.setSerializerCompiler(serializerCompiler);

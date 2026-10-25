@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { transferAccountErasureLineage } from "./services/account-erasure-lineage.js";
 
 import { pool } from "./db.js";
 import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
@@ -1263,6 +1264,12 @@ export async function mergeUsers(
         )
       ).rowCount ?? 0;
 
+    await transferAccountErasureLineage(
+      client,
+      source.id,
+      target.id,
+      options.keepSource,
+    );
     await mergeUserSocialData(client, source.id, target.id, options.keepSource);
     await mergeUserOnboardingData(client, source.id, target.id);
     if (!options.keepSource) {

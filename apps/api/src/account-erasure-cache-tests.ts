@@ -100,7 +100,8 @@ try {
         return { rows: [{ ...asset, status: "verifying" }] };
       if (
         ["begin", "commit", "rollback"].includes(sql.toLowerCase()) ||
-        sql.includes("insert into content_")
+        sql.includes("insert into content_") ||
+        sql.includes("delete from content_promotion_intents")
       )
         return { rows: [] };
       throw new Error("Unexpected asset promotion SQL");

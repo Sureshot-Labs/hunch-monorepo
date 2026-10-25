@@ -11,6 +11,11 @@
       "source": "./src/index.ts",
       "import": "./dist/index.js"
     },
+    "./secrets": {
+      "types": "./dist/secrets.d.ts",
+      "source": "./src/secrets.ts",
+      "import": "./dist/secrets.js"
+    },
     "./content": {
       "types": "./dist/content.d.ts",
       "source": "./src/content.ts",

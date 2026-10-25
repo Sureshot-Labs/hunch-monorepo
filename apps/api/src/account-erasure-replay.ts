@@ -2,6 +2,7 @@
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
+import { loadRuntimeSecrets } from "@hunch/config/secrets";
 
 const { values } = parseArgs({
   options: {
@@ -42,6 +43,11 @@ if (values["env-file"] || process.env.HUNCH_RUNTIME_SECRETS_LOADED !== "1") {
   });
   if (values["env-file"] && loaded.error)
     throw new Error("Could not load the requested replay environment file");
+  await loadRuntimeSecrets({
+    envPath:
+      values["env-file"] ??
+      fileURLToPath(new URL("../../../.env", import.meta.url)),
+  });
 }
 process.env.DATABASE_URL = databaseUrl;
 process.env.HUNCH_RUNTIME_SECRETS_LOADED = "1";
@@ -63,8 +69,12 @@ try {
   const { AuthService } = await import("./auth.js");
   const { GetObjectCommand, ListObjectsV2Command, S3Client } =
     await import("@aws-sdk/client-s3");
-  const { erasureJournalConfig, erasureRecordSchema, ERASURE_JOURNAL_PREFIX } =
-    await import("./services/account-erasure-journal.js");
+  const {
+    erasureJournalConfig,
+    erasureRecordSchema,
+    ERASURE_JOURNAL_PREFIX,
+    erasureJournalKey,
+  } = await import("./services/account-erasure-journal.js");
   const { bucket, region } = erasureJournalConfig();
   const s3 = new S3Client({ region });
   let cursor: string | undefined;
@@ -90,9 +100,16 @@ try {
         const record = erasureRecordSchema.parse(
           JSON.parse(await result.Body.transformToString()),
         );
-        if (object.Key !== ERASURE_JOURNAL_PREFIX + record.userId + ".json")
+        if (object.Key !== erasureJournalKey(record))
           throw new Error("Journal identity mismatch");
         checked += 1;
+        if (record.schemaVersion === 2) {
+          const transferred = await pool.query(
+            `select id from account_merge_transfers where id=$1`,
+            [record.mergeTransferId],
+          );
+          if (transferred.rows[0]) continue;
+        }
         if (apply) {
           // Reuses financial safety locks, social erasure and provider reconciliation outbox.
           // No new trade, transfer, payout or withdrawal is created.

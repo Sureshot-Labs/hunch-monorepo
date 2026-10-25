@@ -39,7 +39,29 @@ process.argv = [
       ]),
   ...(scenario === "dry-run" ? [] : ["--apply"]),
 ];
-globalThis.fetch = async () => {
+if (scenario === "secret-bundle")
+  Object.assign(process.env, {
+    HUNCH_SECRETS_MODE: "strict",
+    HUNCH_SECRET_BUNDLES: "aws-sm:fixture/api",
+    AWS_ACCESS_KEY_ID: "fixture",
+    AWS_SECRET_ACCESS_KEY: "fixture",
+    AWS_REGION: "eu-north-1",
+  });
+let secretsLoaded = false;
+globalThis.fetch = async (input) => {
+  if (scenario === "secret-bundle") {
+    assert.match(String(input), /secretsmanager/);
+    secretsLoaded = true;
+    return new Response(
+      JSON.stringify({
+        SecretString: JSON.stringify({
+          DATABASE_URL: "postgres://fixture@127.0.0.1:1/secret_bundle_wrong_db",
+          ACCOUNT_ERASURE_JOURNAL_BUCKET: "replay-private-journal",
+        }),
+      }),
+      { status: 200 },
+    );
+  }
   throw new Error("Network forbidden in replay fixture");
 };
 
@@ -176,6 +198,7 @@ try {
       assert.deepEqual(events, ["verify", "close"]);
   } else {
     await import(entry);
+    if (scenario === "secret-bundle") assert.equal(secretsLoaded, true);
     assert.equal(events.at(-1), "close");
     if (scenario === "dry-run") {
       assert.deepEqual(events, ["verify", "list", "get", "close"]);

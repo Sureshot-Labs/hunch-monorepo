@@ -322,7 +322,6 @@ export async function moderateAdminSocialTarget(
 ) {
   const reason = socialText(input.reason, limits.moderationReasonMaxGraphemes);
   const mutation = buildSocialModerationMutation(input.target, input.action);
-  if (input.reportId) await lockReport(db, input.reportId, input.target);
   if (input.action === "remove_avatar") {
     // Same user -> asset lock order as profile edits and account deletion.
     const owner = await db.query<{
@@ -349,6 +348,9 @@ export async function moderateAdminSocialTarget(
   }
   const result = await db.query(mutation.text, mutation.values);
   if (!result.rows[0]) throw new SocialError("social_target_unavailable", 404);
+  // Lifecycle locks targets before updating report FKs. Mutate/lock every
+  // target kind first; a missing/mismatched report rolls back this transaction.
+  if (input.reportId) await lockReport(db, input.reportId, input.target);
   if (input.reportId)
     await db.query(
       `update social_reports set status='resolved',resolved_at=coalesce(resolved_at,now()) where id=$1`,

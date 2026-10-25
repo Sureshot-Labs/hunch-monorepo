@@ -1,3 +1,5 @@
+import { SocialService } from "./services/social-service.js";
+import type { Pool } from "@hunch/infra";
 import assert from "node:assert/strict";
 import { PNG } from "pngjs";
 import {
@@ -300,3 +302,23 @@ await recordAccountErasure(
 console.log(
   "[account-safety] passed: age contract, text rules, avatar check, all S3 versions, exact keys, partial failures, CDN polling, private durable journal",
 );
+
+// Handle preview and save must apply the same publication policy.
+let handleLookups = 0;
+const handles = new SocialService({
+  query: async (sql: string) => {
+    if (sql.includes("from runtime_policies")) return { rows: [] };
+    assert.equal(sql.trim(), "select id from users where handle=$1");
+    handleLookups++;
+    return { rows: [] };
+  },
+} as unknown as Pool);
+await assert.rejects(handles.handleAvailability(null, "fucker"), {
+  code: "content_not_allowed",
+  statusCode: 422,
+});
+assert.equal(handleLookups, 0);
+assert.deepEqual(await handles.handleAvailability(null, "Allowed_Trader"), {
+  handle: "allowed_trader",
+  available: true,
+});

@@ -164,7 +164,8 @@ try {
     const query = async (sql: string, values: unknown[] = []) => {
       if (
         ["begin", "commit", "rollback"].includes(sql.trim().toLowerCase()) ||
-        sql.includes("insert into content_")
+        sql.includes("insert into content_") ||
+        sql.includes("delete from content_promotion_intents")
       )
         return { rows: [] };
       if (sql.includes("from content_assets where id = $1 for update"))

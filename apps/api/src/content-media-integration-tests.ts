@@ -1,6 +1,21 @@
+import { reconcileContentPromotionIntents } from "./services/content-promotion-intents.js";
 // @requires-db
 
 import assert from "node:assert/strict";
+import {
+  CloudFrontClient,
+  CreateInvalidationCommand,
+  GetInvalidationCommand,
+} from "@aws-sdk/client-cloudfront";
+const originalCloudFrontSend = CloudFrontClient.prototype.send;
+CloudFrontClient.prototype.send = (async (command: unknown) => {
+  assert.ok(
+    command instanceof CreateInvalidationCommand ||
+      command instanceof GetInvalidationCommand,
+  );
+  return { Invalidation: { Id: "test-invalidation", Status: "Completed" } };
+}) as typeof CloudFrontClient.prototype.send;
+process.env.CONTENT_ASSET_CLOUDFRONT_DISTRIBUTION_ID = "test-distribution";
 import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
@@ -793,6 +808,18 @@ try {
     ).rows[0];
     assert.equal(retryRow.status, "pending");
     assert.equal(retryRow.owner_user_id, targetId);
+    await reconcileContentPromotionIntents(testPool, 100);
+    assert.equal(
+      (
+        await testPool.query(
+          "select id from content_storage_deletion_jobs where storage_key=$1",
+          [retryRow.metadata.verificationTargetKey],
+        )
+      ).rows.length,
+      0,
+      "a transferred pending upload must remain safe to retry while promotion recovery runs",
+    );
+
     storageKeys.add(retryRow.metadata.verificationTargetKey);
     assert.equal(objects.has(retryRow.metadata.verificationTargetKey), true);
     assert.equal(
@@ -1090,7 +1117,7 @@ try {
   );
   assert.equal(objects.has(invalidIntent.asset.storageKey), false);
 
-  assert.equal(verificationStatements.size, 3);
+  assert.equal(verificationStatements.size, 4);
   const plans = await testPool.connect();
   try {
     await plans.query("begin");
@@ -1133,7 +1160,19 @@ try {
         };
         walk(plan.Plan);
         assert.ok(
-          nodes.some((node) => node["Index Name"] === "content_assets_pkey"),
+          nodes.some(
+            (node) =>
+              node["Relation Name"] === "content_assets" &&
+              node["Index Name"] &&
+              /\bid\s*=/u.test(String(node["Index Cond"])),
+          ),
+          JSON.stringify({ name, mode, sql, params, plan }),
+        );
+        assert.ok(
+          Number(plan.Plan["Shared Hit Blocks"] ?? 0) +
+            Number(plan.Plan["Shared Read Blocks"] ?? 0) <=
+            256,
+          "point verification must stay bounded independently of the chosen index",
         );
         assert.equal(
           nodes.some(
@@ -1202,6 +1241,7 @@ try {
     try {
       if (pool) await pool.end();
     } finally {
+      CloudFrontClient.prototype.send = originalCloudFrontSend;
       if (server.listening) {
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),

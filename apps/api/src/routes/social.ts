@@ -21,6 +21,7 @@ const errors = {
   403: schema.socialErrorSchema,
   404: schema.socialErrorSchema,
   409: schema.socialErrorSchema,
+  422: schema.socialErrorSchema,
   429: schema.socialErrorSchema,
   500: schema.socialErrorSchema,
   503: schema.socialErrorSchema,

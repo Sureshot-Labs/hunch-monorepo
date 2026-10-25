@@ -9,7 +9,11 @@ import {
   AGENT_WRITING_LIMITS,
   agentAuthorSettingsSchema,
 } from "./services/agent-theses-policy.js";
-import { validatePaperQuote } from "./services/agent-theses-publish.js";
+import type { DbQuery } from "./db.js";
+import {
+  evaluateAgentPaperEntry,
+  validatePaperQuote,
+} from "./services/agent-theses-publish.js";
 import {
   agentProvenance,
   agentModelReserveUsd,
@@ -1266,3 +1270,31 @@ await assert.rejects(
   }),
 );
 console.log("agent-theses unit contracts passed");
+
+let publicationQueries = 0;
+await assert.rejects(
+  evaluateAgentPaperEntry(
+    {
+      query: async () => {
+        publicationQueries++;
+        return { rows: [] };
+      },
+    } as unknown as DbQuery,
+    {
+      userId: policy.authors[0].userId,
+      body: "kill yourself",
+      instrument,
+      maxEntryPrice: "0.5",
+      provenance: { ...provenance, previousThesisId: null },
+      maxThesisGraphemes: 6000,
+      paperAmountUsd: "100",
+      maxQuoteAgeSeconds: 60,
+    },
+  ),
+  { code: "content_not_allowed", statusCode: 422 },
+);
+assert.equal(
+  publicationQueries,
+  1,
+  "Prohibited agent text is rejected before market/execution writes",
+);

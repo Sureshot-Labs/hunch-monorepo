@@ -3,6 +3,7 @@ import {
   StorageErasureInProgress,
 } from "./content-storage-erasure.js";
 import { randomUUID } from "node:crypto";
+import { reconcileContentPromotionIntents } from "./content-promotion-intents.js";
 
 import { tx, type Pool } from "@hunch/infra";
 
@@ -456,10 +457,13 @@ async function claimStorageDeletion(
   return tx(pool, async (db) => {
     await db.query(
       `
-        update content_storage_deletion_jobs
-        set status = 'pending', locked_at = null, locked_by = null
-        where status = 'processing'
-          and locked_at < now() - interval '2 minutes'
+        with expired as materialized (
+          select id from content_storage_deletion_jobs
+          where status='processing' and locked_at < now() - interval '2 minutes'
+          order by locked_at,id limit 100 for update skip locked
+        ) update content_storage_deletion_jobs job
+        set status = 'pending', attempts=greatest(attempts-1,0), locked_at = null, locked_by = null
+        from expired where job.id=expired.id
       `,
     );
     const { rows } = await db.query<StorageDeletionJobRow>(
@@ -509,9 +513,19 @@ export async function dispatchContentStorageDeletions(
   logger: WorkerLogger,
 ): Promise<number> {
   if (!isContentStorageConfigured()) return 0;
+  try {
+    await reconcileContentPromotionIntents(pool, limit);
+  } catch (error) {
+    // Recovery retains its durable due rows on rollback. A failed housekeeping
+    // pass must not starve deletion jobs already waiting in the queue.
+    logger.warn({ error }, "Content promotion recovery failed");
+  }
   let processed = 0;
   for (let index = 0; index < limit; index += 1) {
-    const job = await claimStorageDeletion(pool, workerId);
+    // A scheduler can time out without cancelling its old promise. Never reuse
+    // ownership across attempts, even on the same worker process.
+    const claimId = `${workerId}:${randomUUID()}`;
+    const job = await claimStorageDeletion(pool, claimId);
     if (!job) break;
     try {
       if (!job.cdn_invalidation_id)
@@ -529,11 +543,11 @@ export async function dispatchContentStorageDeletions(
             cdn_invalidation_id=$3, attempts=greatest(attempts-1,0),
             available_at=now()+interval '30 seconds', locked_at=null, locked_by=null
            where id=$1 and locked_by=$2`,
-          [job.id, workerId, invalidation.id],
+          [job.id, claimId, invalidation.id],
         );
         continue;
       }
-      await pool.query(
+      const finished = await pool.query(
         `
           update content_storage_deletion_jobs
           set
@@ -544,16 +558,16 @@ export async function dispatchContentStorageDeletions(
             last_error = null
           where id = $1 and locked_by = $2
         `,
-        [job.id, workerId],
+        [job.id, claimId],
       );
-      processed += 1;
+      processed += finished.rowCount ?? 0;
     } catch (error) {
       if (error instanceof StorageErasureInProgress) {
         await pool.query(
           `update content_storage_deletion_jobs set status='pending',
             attempts=greatest(attempts-1,0), available_at=now()+interval '1 second',
             locked_at=null, locked_by=null where id=$1 and locked_by=$2`,
-          [job.id, workerId],
+          [job.id, claimId],
         );
         continue;
       }
@@ -578,7 +592,7 @@ export async function dispatchContentStorageDeletions(
         `,
         [
           job.id,
-          workerId,
+          claimId,
           getContentServiceRuntime().workerMaxAttempts,
           String(delaySeconds),
           error instanceof Error

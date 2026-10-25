@@ -198,6 +198,18 @@
                   "aws:RequestedRegion": "eu-west-1"
                 }
               }
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["s3:GetObjectVersion"],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:s3:::${ContentBucketName}/content-staging/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:s3:::${ContentBucketName}/content/*"
+                }
+              ]
             }
           ]
         }

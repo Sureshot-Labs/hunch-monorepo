@@ -6,15 +6,34 @@ import {
 } from "@aws-sdk/client-s3";
 import { z } from "zod";
 
-export const erasureRecordSchema = z
+const legacyErasureRecordSchema = z
   .object({
     schemaVersion: z.literal(1),
     userId: z.string().uuid(),
     requestedAt: z.string().datetime(),
   })
   .strict();
+export const erasureRecordSchema = z.union([
+  legacyErasureRecordSchema,
+  z
+    .object({
+      schemaVersion: z.literal(2),
+      userId: z.string().uuid(),
+      requestedAt: z.string().datetime(),
+      mergeTransferId: z.string().uuid(),
+    })
+    .strict(),
+]);
 export type ErasureRecord = z.infer<typeof erasureRecordSchema>;
 export const ERASURE_JOURNAL_PREFIX = "account-erasure/v1/";
+export function erasureJournalKey(record: ErasureRecord): string {
+  return (
+    ERASURE_JOURNAL_PREFIX +
+    record.userId +
+    (record.schemaVersion === 2 ? `/merged/${record.mergeTransferId}` : "") +
+    ".json"
+  );
+}
 
 export function erasureJournalConfig(source: NodeJS.ProcessEnv = process.env) {
   const bucket = source.ACCOUNT_ERASURE_JOURNAL_BUCKET?.trim();
@@ -30,15 +49,17 @@ export async function recordAccountErasure(
   userId: string,
   client?: Pick<S3Client, "send">,
   source: NodeJS.ProcessEnv = process.env,
+  mergeTransferId?: string,
 ): Promise<void> {
   const { bucket, region } = erasureJournalConfig(source);
   const record = erasureRecordSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: mergeTransferId ? 2 : 1,
     userId,
     requestedAt: new Date().toISOString(),
+    ...(mergeTransferId ? { mergeTransferId } : {}),
   });
   const s3 = client ?? new S3Client({ region, maxAttempts: 2 });
-  const key = ERASURE_JOURNAL_PREFIX + userId + ".json";
+  const key = erasureJournalKey(record);
   const writeRecord = (condition: { IfNoneMatch: "*" } | { IfMatch: string }) =>
     s3.send(
       new PutObjectCommand({
@@ -70,7 +91,7 @@ export async function recordAccountErasure(
     const existing = erasureRecordSchema.parse(
       JSON.parse(await stored.Body.transformToString()),
     );
-    if (existing.userId !== userId)
+    if (erasureJournalKey(existing) !== key)
       throw new Error("Erasure journal owner mismatch");
     // DB erasure may have failed long ago. Acknowledging that old object alone
     // could let it expire before backups taken since the failed attempt.

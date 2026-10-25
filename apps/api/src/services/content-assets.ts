@@ -717,13 +717,31 @@ export async function completeContentAssetUpload(
   let verifiedVersionId: string | undefined;
   let verifiedETag: string | undefined;
   let avatarBytes: Buffer | undefined;
+  async function inspectStorage<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        (error as { $metadata?: { httpStatusCode?: number } })?.$metadata
+          ?.httpStatusCode === 404
+      )
+        throw error;
+      throw new ContentError(
+        "content_storage_unavailable",
+        "Photo storage is temporarily unavailable; retry this upload",
+        503,
+      );
+    }
+  }
   try {
-    const head = await client.send(
-      new HeadObjectCommand({
-        Bucket: getContentServiceRuntime().assetS3Bucket,
-        Key: existing.storage_key,
-        ChecksumMode: "ENABLED",
-      }),
+    const head = await inspectStorage(() =>
+      client.send(
+        new HeadObjectCommand({
+          Bucket: getContentServiceRuntime().assetS3Bucket,
+          Key: existing.storage_key,
+          ChecksumMode: "ENABLED",
+        }),
+      ),
     );
     verifiedVersionId = head.VersionId;
     verifiedETag = head.ETag;
@@ -752,17 +770,27 @@ export async function completeContentAssetUpload(
 
     let prefix: Buffer;
     if (requiresAvatarCheck) {
-      const object = await client.send(
-        new GetObjectCommand({
-          Bucket: getContentServiceRuntime().assetS3Bucket,
-          Key: existing.storage_key,
-          VersionId: verifiedVersionId,
-          IfMatch: verifiedETag,
-          Range: `bytes=0-${AVATAR_MAX_FILTER_BYTES}`,
-        }),
+      const object = await inspectStorage(() =>
+        client.send(
+          new GetObjectCommand({
+            Bucket: getContentServiceRuntime().assetS3Bucket,
+            Key: existing.storage_key,
+            VersionId: verifiedVersionId,
+            IfMatch: verifiedETag,
+            Range: `bytes=0-${AVATAR_MAX_FILTER_BYTES}`,
+          }),
+        ),
       );
-      if (!object.Body) throw new Error("Avatar body unavailable");
-      avatarBytes = Buffer.from(await object.Body.transformToByteArray());
+      const objectBody = object.Body;
+      if (!objectBody)
+        throw new ContentError(
+          "content_storage_unavailable",
+          "Photo storage did not return the image; retry this upload",
+          503,
+        );
+      avatarBytes = Buffer.from(
+        await inspectStorage(() => objectBody.transformToByteArray()),
+      );
       if (
         avatarBytes.length > AVATAR_MAX_FILTER_BYTES ||
         createHash("sha256").update(avatarBytes).digest("hex") !==
@@ -771,7 +799,9 @@ export async function completeContentAssetUpload(
         issues.push("avatar bytes do not match the upload intent");
       prefix = avatarBytes;
     } else {
-      prefix = await readObjectPrefix(client, existing.storage_key);
+      prefix = await inspectStorage(() =>
+        readObjectPrefix(client, existing.storage_key),
+      );
     }
     if (!bytesMatchMime(existing.mime_type.toLowerCase(), prefix)) {
       issues.push("uploaded bytes do not match the declared MIME type");
@@ -806,6 +836,17 @@ export async function completeContentAssetUpload(
       }
     }
   } catch (error) {
+    if (
+      error instanceof ContentError &&
+      error.code === "content_storage_unavailable"
+    ) {
+      await pool.query(
+        `update content_assets set status='pending' where id=$1 and status='verifying'
+          and storage_key=$2 and metadata->>'verificationTargetKey'=$3`,
+        [assetId, existing.storage_key, targetKey],
+      );
+      throw error;
+    }
     issues.push(
       `uploaded object could not be inspected: ${
         error instanceof Error ? error.message.slice(0, 1_000) : "unknown error"
@@ -867,6 +908,15 @@ export async function completeContentAssetUpload(
       throw error;
     }
   }
+  const promotionIntent = randomUUID();
+  // Persist before sending the remote write. Only an acknowledged request may
+  // remove its own intent; process death leaves a durable worker obligation.
+  await tx(pool, (db) =>
+    db.query(
+      `insert into content_promotion_intents(id,asset_id,storage_key) values($1,$2,$3)`,
+      [promotionIntent, assetId, targetKey],
+    ),
+  );
   try {
     await client.send(
       new CopyObjectCommand({
@@ -952,6 +1002,9 @@ export async function completeContentAssetUpload(
           409,
         );
       }
+      await db.query(`delete from content_promotion_intents where id=$1`, [
+        promotionIntent,
+      ]);
       await enqueueStorageDeletion(
         db,
         existing.storage_key,

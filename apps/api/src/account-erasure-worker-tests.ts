@@ -33,6 +33,7 @@ let originDeletes = 0;
 let invalidations = 0;
 let warnings = 0;
 const query = async (sql: string, values: unknown[] = []) => {
+  if (sql.includes("with expired as materialized")) return { rows: [] };
   if (sql.includes("select id, storage_key")) {
     return {
       rows:
@@ -64,7 +65,7 @@ const query = async (sql: string, values: unknown[] = []) => {
   } else if (sql.includes("last_error = $5")) {
     status = "failed";
   }
-  return { rows: [] };
+  return { rows: [], rowCount: 1 };
 };
 const database = {
   query,
