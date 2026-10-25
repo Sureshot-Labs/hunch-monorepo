@@ -10,6 +10,8 @@ import {
   resolveWalletIntelRefreshPolicy,
 } from "./runtime-policies.js";
 import { resolveLimitlessPositionContract } from "./limitless-protocol-config.js";
+import { requestMarketRefreshForTokenRefs } from "../lib/market-refresh.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 
 async function store() {
   const redis = await getDedicatedRedis("discovery", {
@@ -42,6 +44,25 @@ export const discoveryService = new DiscoveryService(
   new DiscoveryBuilder(
     new DiscoveryRepository(pool),
     resolveLimitlessPositionContract(),
+    Date.now,
+    async (tokenRefs, mode) => {
+      if (mode === "read") {
+        requestMarketRefreshForTokenRefs({ tokenRefs, logLabel: "discovery" });
+        return;
+      }
+      // Reuse the normal indexer queue and its caps; background discovery is not
+      // an urgent trade quote and must not crowd the visible-token hot set.
+      await Promise.all(
+        (["polymarket", "limitless", "kalshi"] as const).map((venue) =>
+          requestPriceRefreshForTokens({
+            venue: venue === "kalshi" ? "dflow" : venue,
+            tokenIds: tokenRefs
+              .filter((ref) => ref.venue === venue)
+              .map((ref) => ref.tokenId),
+          }),
+        ),
+      );
+    },
   ),
   store,
   () =>

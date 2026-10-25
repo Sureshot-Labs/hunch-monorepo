@@ -41,6 +41,10 @@ export type DiscoveryScope = {
   whaleUsd: number;
   whaleUsdSolana: number;
 };
+export type DiscoveryQuoteDemand = (
+  tokens: { tokenId: string; venue: string }[],
+  mode: "background" | "read",
+) => void | Promise<void>;
 export type QuickPoolEntry = {
   marketId: string;
   volumeUsd: string;
@@ -100,7 +104,49 @@ export class DiscoveryBuilder {
     readonly repo: DiscoveryRepository,
     readonly limitlessPositionContract: string,
     readonly clock: () => number = Date.now,
+    readonly quoteDemand: DiscoveryQuoteDemand = () => {},
   ) {}
+  async marketCards(
+    ids: string[],
+    scope: DiscoveryScope,
+    light = false,
+    mode: "background" | "read" = "background",
+  ): Promise<RawDiscoveryRow[]> {
+    const rows = await this.repo.marketCards(ids, light);
+    const tokens = new Map<string, { tokenId: string; venue: string }>();
+    for (const row of rows) {
+      const card = marketCard(
+        row,
+        this.clock(),
+        this.limitlessPositionContract,
+      );
+      const tokenId =
+        typeof row.token_id === "string" ? row.token_id.trim() : "";
+      if (!card || !scope.venues.includes(card.market.venue) || !tokenId)
+        continue;
+      // A stale candidate must be able to recover even when it never reaches a page.
+      // Do not keep the entire background pool hot or refresh already-fresh quotes.
+      if (mode === "background" && card.quote.status === "fresh") continue;
+      tokens.set(`${card.market.venue}:${tokenId}`, {
+        tokenId,
+        venue: card.market.venue,
+      });
+      if (tokens.size >= 200) break; // Two canonical sides per bounded 100-market batch.
+    }
+    if (tokens.size) {
+      try {
+        // Queue demand is best effort. Never wait for a quote or relax freshness.
+        void Promise.resolve(
+          this.quoteDemand([...tokens.values()], mode),
+        ).catch(() => {
+          console.warn("[discovery] quote refresh enqueue failed");
+        });
+      } catch {
+        console.warn("[discovery] quote refresh enqueue failed");
+      }
+    }
+    return rows;
+  }
   async start(
     section: DiscoverySection,
     scope: DiscoveryScope,
@@ -389,8 +435,9 @@ export class DiscoveryBuilder {
         progress.position + 100,
       );
       const pool = new Map(batch.map((p) => [p.marketId, p]));
-      const rows = await this.repo.marketCards(
+      const rows = await this.marketCards(
         batch.map((p) => p.marketId),
+        scope,
         true,
       );
       const ids = new Set(progress.eligibleIds);
@@ -421,7 +468,7 @@ export class DiscoveryBuilder {
       progress.position,
       progress.position + 100,
     );
-    const rows = await this.repo.marketCards(ids);
+    const rows = await this.marketCards(ids, scope);
     const latest = publicResearch(
       await this.repo.currentResearch(ids, new Date(now).toISOString()),
     );
