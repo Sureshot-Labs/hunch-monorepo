@@ -78,8 +78,8 @@ async function asset(owner: string, ready = true) {
   const id = randomUUID();
   assets.push(id);
   await pool.query(
-    `insert into content_assets(id,owner_user_id,storage_key,kind,original_filename,mime_type,status,public_url,byte_size,ready_at,checksum_sha256)
-    values($1::uuid,$2,(case when $3='pending' then 'content-staging/' else '' end)||$1::uuid::text,'image','onboarding.jpg','image/jpeg',$3,$4,100,case when $3='ready' then now() else null end,repeat('a',64))`,
+    `insert into content_assets(id,owner_user_id,storage_key,kind,original_filename,mime_type,status,public_url,byte_size,ready_at,checksum_sha256,metadata)
+    values($1::uuid,$2,(case when $3='pending' then 'content-staging/' else '' end)||$1::uuid::text,'image','onboarding.jpg','image/jpeg',$3,$4,100,case when $3='ready' then now() else null end,repeat('a',64),'{"avatarModerationConsentVersion":1}'::jsonb)`,
     [
       id,
       owner,

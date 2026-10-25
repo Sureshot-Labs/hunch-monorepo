@@ -1,3 +1,4 @@
+import { enqueueContentStorageDeletion } from "./content-asset-deletion.js";
 import type { DbQuery } from "../db.js";
 import type {
   AdminSocialAction,
@@ -52,6 +53,7 @@ type ReportRow = {
   resolved_at: string | null;
   target_preview: {
     text: string | null;
+    avatarUrl: string | null;
     authorUserId: string | null;
     moderationHidden: boolean;
     authorHidden: boolean;
@@ -127,16 +129,16 @@ export function buildAdminSocialReportsQuery(
     r.created_at::text,r.resolved_at::text,
     case when r.target_kind='user' and profile_row.id is not null then jsonb_build_object(
       'text',concat_ws(E'\\n',coalesce(nullif(profile_row.handle,''),profile_row.display_name),profile_row.bio),
-      'authorUserId',profile_row.id,'moderationHidden',false,'authorHidden',false,'proofInvalidated',false,'socialSuspended',profile_row.social_suspended_at is not null)
+      'avatarUrl',profile_row.avatar_url,'authorUserId',profile_row.id,'moderationHidden',false,'authorHidden',false,'proofInvalidated',false,'socialSuspended',profile_row.social_suspended_at is not null)
     when r.target_kind='thesis' and thesis_row.id is not null then jsonb_build_object(
-      'text',thesis_row.body,'authorUserId',thesis_row.author_id,'moderationHidden',thesis_row.moderation_hidden_at is not null,
+      'text',thesis_row.body,'avatarUrl',null,'authorUserId',thesis_row.author_id,'moderationHidden',thesis_row.moderation_hidden_at is not null,
       'authorHidden',thesis_row.author_hidden_at is not null,'proofInvalidated',thesis_row.proof_invalidated_at is not null,'socialSuspended',thesis_author.social_suspended_at is not null)
     when r.target_kind='comment' and comment_row.id is not null then jsonb_build_object(
-      'text',comment_row.body,'authorUserId',comment_row.author_id,'moderationHidden',comment_row.moderation_hidden_at is not null,
+      'text',comment_row.body,'avatarUrl',null,'authorUserId',comment_row.author_id,'moderationHidden',comment_row.moderation_hidden_at is not null,
       'authorHidden',comment_row.author_hidden_at is not null,'proofInvalidated',comment_thesis.proof_invalidated_at is not null,'socialSuspended',comment_author.social_suspended_at is not null)
     else null end as target_preview
     from report_page r
-    left join lateral (select u.id,u.handle,u.display_name,u.bio,u.social_suspended_at from users u
+    left join lateral (select u.id,u.handle,u.display_name,u.bio,u.avatar_url,u.social_suspended_at from users u
       where r.target_kind='user' and u.id=r.target_profile_id limit 1) profile_row on true
     left join lateral (select t.id,t.author_id,t.body,t.moderation_hidden_at,t.author_hidden_at,t.proof_invalidated_at from user_theses t
       where r.target_kind='thesis' and t.id=r.thesis_id limit 1) thesis_row on true
@@ -235,6 +237,11 @@ export function buildSocialModerationMutation(
   action: AdminSocialAction,
 ): Query {
   if (target.kind === "user") {
+    if (action === "remove_avatar")
+      return {
+        text: `update users set avatar_url=null,avatar_asset_id=null,profile_avatar_edited_at=now(),updated_at=now() where id=$1 returning id`,
+        values: [target.id],
+      };
     if (action !== "suspend" && action !== "unsuspend")
       throw new SocialError("social_action_target_mismatch");
     return {
@@ -308,15 +315,42 @@ export async function moderateAdminSocialTarget(
     action: AdminSocialAction;
     reason: string;
     reportId?: string;
+    expectedAvatarUrl?: string;
   },
   adminId: string,
   limits: AdminSocialLimits,
 ) {
   const reason = socialText(input.reason, limits.moderationReasonMaxGraphemes);
   const mutation = buildSocialModerationMutation(input.target, input.action);
-  if (input.reportId) await lockReport(db, input.reportId, input.target);
+  if (input.action === "remove_avatar") {
+    // Same user -> asset lock order as profile edits and account deletion.
+    const owner = await db.query<{
+      avatar_asset_id: string | null;
+      avatar_url: string | null;
+    }>(`select avatar_asset_id,avatar_url from users where id=$1 for update`, [
+      input.target.id,
+    ]);
+    if (
+      !input.expectedAvatarUrl ||
+      owner.rows[0]?.avatar_url !== input.expectedAvatarUrl
+    )
+      throw new SocialError("social_avatar_changed", 409);
+    const assetId = owner.rows[0]?.avatar_asset_id;
+    if (assetId) {
+      const assets = await db.query<{ storage_key: string }>(
+        `update content_assets set status='deleted',deleted_at=now(),public_url=null
+         where id=$1 and owner_user_id=$2 and status='ready' returning storage_key`,
+        [assetId, input.target.id],
+      );
+      for (const asset of assets.rows)
+        await enqueueContentStorageDeletion(db, asset.storage_key);
+    }
+  }
   const result = await db.query(mutation.text, mutation.values);
   if (!result.rows[0]) throw new SocialError("social_target_unavailable", 404);
+  // Lifecycle locks targets before updating report FKs. Mutate/lock every
+  // target kind first; a missing/mismatched report rolls back this transaction.
+  if (input.reportId) await lockReport(db, input.reportId, input.target);
   if (input.reportId)
     await db.query(
       `update social_reports set status='resolved',resolved_at=coalesce(resolved_at,now()) where id=$1`,

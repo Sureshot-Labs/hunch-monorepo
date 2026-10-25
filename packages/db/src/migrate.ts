@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { Pool, PoolClient } from "pg";
 
 import { parseMigrationTargetOptions } from "./migration-target.js";
+import { applyOnlineMigration, onlineMigrationPlan } from "./migration-plan.js";
 
 function sha256(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex");
@@ -73,6 +74,13 @@ async function runSingleMigration(
   }
 
   const noTx = sql.includes("/* no-transaction */");
+  const online = onlineMigrationPlan(filename, sql);
+
+  if (online) {
+    await applyOnlineMigration(client, filename, checksum, online);
+    console.log(`✅ applied ${filename} (online validation)`);
+    return;
+  }
 
   try {
     if (!noTx) {

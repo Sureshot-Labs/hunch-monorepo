@@ -1,8 +1,13 @@
+import { createHash } from "node:crypto";
+import {
+  checkAvatarContent,
+  AVATAR_MAX_FILTER_BYTES,
+} from "./social-content-filter.js";
+import { eraseObjectVersions } from "./content-storage-erasure.js";
 import { randomUUID } from "node:crypto";
 
 import {
   CopyObjectCommand,
-  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -23,6 +28,7 @@ import {
   type ContentAssetUpdateBody,
 } from "../schemas/content.js";
 import { ContentError } from "./content-errors.js";
+import { contentAssetPublicUrl } from "./content-asset-url.js";
 import {
   enqueueContentStorageDeletion as enqueueStorageDeletion,
   stagingDeletionAvailableAt as computeStagingDeletionAvailableAt,
@@ -295,13 +301,6 @@ function publicStorageKey(
   return `content/${checksumSha256.slice(0, 2)}/${assetId}-${checksumSha256.slice(0, 16)}${extensionForMime(mimeType)}`;
 }
 
-function publicUrl(key: string): string {
-  return `${getContentServiceRuntime().assetPublicBaseUrl}/${key
-    .split("/")
-    .map(encodeURIComponent)
-    .join("/")}`;
-}
-
 function assertUploadPolicy(
   body: ContentAssetCreateBody,
   maximumBytes = MAX_BYTES_BY_KIND[body.kind],
@@ -337,6 +336,23 @@ export async function createContentAssetUpload(
       "A user image upload requires its policy",
       400,
     );
+  }
+  if (actor.kind === "user") {
+    if (!body.avatarModerationConsent)
+      throw new ContentError(
+        "avatar_consent_required",
+        "Permission is required for the photo safety check",
+        422,
+      );
+    if (
+      !["image/jpeg", "image/png"].includes(body.mimeType.toLowerCase()) ||
+      body.expectedByteSize > AVATAR_MAX_FILTER_BYTES
+    )
+      throw new ContentError(
+        "avatar_unsupported",
+        "Choose a JPEG or PNG smaller than 5 MB",
+        422,
+      );
   }
   assertUploadPolicy(
     body,
@@ -403,7 +419,10 @@ export async function createContentAssetUpload(
         body.creditUrl ?? null,
         JSON.stringify({
           ...(actor.kind === "user"
-            ? { socialUploadPolicy: userPolicy }
+            ? {
+                socialUploadPolicy: userPolicy,
+                avatarModerationConsentVersion: 1,
+              }
             : (body.metadata ?? {})),
           uploadExpiresAt: expiresAt.toISOString(),
         }),
@@ -609,6 +628,7 @@ export async function completeContentAssetUpload(
   assetId: string,
   rawBody: ContentAssetCompleteBody,
   actorInput: ContentActorInput = null,
+  verifyAvatar: (bytes: Uint8Array) => Promise<void> = checkAvatarContent,
 ): Promise<ContentAsset> {
   const actor = normalizeContentActor(actorInput);
   const body = contentAssetCompleteBodySchema.parse(rawBody);
@@ -685,6 +705,7 @@ export async function completeContentAssetUpload(
   if (claim.ready) return assetFromRow(claim.existing);
 
   const existing = claim.existing;
+  const requiresAvatarCheck = existing.owner_user_id != null;
   const targetKey = claim.targetKey;
   const checksumSha256 = existing.checksum_sha256;
   if (!checksumSha256) {
@@ -693,14 +714,37 @@ export async function completeContentAssetUpload(
   const issues: string[] = [];
   let verifiedWidth: number | null = null;
   let verifiedHeight: number | null = null;
+  let verifiedVersionId: string | undefined;
+  let verifiedETag: string | undefined;
+  let avatarBytes: Buffer | undefined;
+  async function inspectStorage<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        (error as { $metadata?: { httpStatusCode?: number } })?.$metadata
+          ?.httpStatusCode === 404
+      )
+        throw error;
+      throw new ContentError(
+        "content_storage_unavailable",
+        "Photo storage is temporarily unavailable; retry this upload",
+        503,
+      );
+    }
+  }
   try {
-    const head = await client.send(
-      new HeadObjectCommand({
-        Bucket: getContentServiceRuntime().assetS3Bucket,
-        Key: existing.storage_key,
-        ChecksumMode: "ENABLED",
-      }),
+    const head = await inspectStorage(() =>
+      client.send(
+        new HeadObjectCommand({
+          Bucket: getContentServiceRuntime().assetS3Bucket,
+          Key: existing.storage_key,
+          ChecksumMode: "ENABLED",
+        }),
+      ),
     );
+    verifiedVersionId = head.VersionId;
+    verifiedETag = head.ETag;
     const storedSize = Number(head.ContentLength ?? -1);
     const storedType = head.ContentType?.toLowerCase() ?? "";
     if (
@@ -724,7 +768,41 @@ export async function completeContentAssetUpload(
       issues.push("uploaded checksum does not match the upload intent");
     }
 
-    const prefix = await readObjectPrefix(client, existing.storage_key);
+    let prefix: Buffer;
+    if (requiresAvatarCheck) {
+      const object = await inspectStorage(() =>
+        client.send(
+          new GetObjectCommand({
+            Bucket: getContentServiceRuntime().assetS3Bucket,
+            Key: existing.storage_key,
+            VersionId: verifiedVersionId,
+            IfMatch: verifiedETag,
+            Range: `bytes=0-${AVATAR_MAX_FILTER_BYTES}`,
+          }),
+        ),
+      );
+      const objectBody = object.Body;
+      if (!objectBody)
+        throw new ContentError(
+          "content_storage_unavailable",
+          "Photo storage did not return the image; retry this upload",
+          503,
+        );
+      avatarBytes = Buffer.from(
+        await inspectStorage(() => objectBody.transformToByteArray()),
+      );
+      if (
+        avatarBytes.length > AVATAR_MAX_FILTER_BYTES ||
+        createHash("sha256").update(avatarBytes).digest("hex") !==
+          checksumSha256
+      )
+        issues.push("avatar bytes do not match the upload intent");
+      prefix = avatarBytes;
+    } else {
+      prefix = await inspectStorage(() =>
+        readObjectPrefix(client, existing.storage_key),
+      );
+    }
     if (!bytesMatchMime(existing.mime_type.toLowerCase(), prefix)) {
       issues.push("uploaded bytes do not match the declared MIME type");
     }
@@ -758,6 +836,17 @@ export async function completeContentAssetUpload(
       }
     }
   } catch (error) {
+    if (
+      error instanceof ContentError &&
+      error.code === "content_storage_unavailable"
+    ) {
+      await pool.query(
+        `update content_assets set status='pending' where id=$1 and status='verifying'
+          and storage_key=$2 and metadata->>'verificationTargetKey'=$3`,
+        [assetId, existing.storage_key, targetKey],
+      );
+      throw error;
+    }
     issues.push(
       `uploaded object could not be inspected: ${
         error instanceof Error ? error.message.slice(0, 1_000) : "unknown error"
@@ -784,16 +873,69 @@ export async function completeContentAssetUpload(
       publicIssues,
     );
   }
+  if (requiresAvatarCheck) {
+    try {
+      if (
+        existing.metadata.avatarModerationConsentVersion !== 1 ||
+        !avatarBytes
+      )
+        throw new ContentError(
+          "avatar_consent_required",
+          "Permission is required for the photo safety check",
+          422,
+        );
+      await verifyAvatar(avatarBytes);
+    } catch (error) {
+      if (
+        error instanceof ContentError &&
+        error.code === "avatar_check_unavailable"
+      ) {
+        // Retry the same private upload; provider outages do not label a user as abusive.
+        await pool.query(
+          `update content_assets set status='pending' where id=$1 and status='verifying'
+            and storage_key=$2 and metadata->>'verificationTargetKey'=$3`,
+          [assetId, existing.storage_key, targetKey],
+        );
+      } else {
+        await failAssetVerification(
+          pool,
+          assetId,
+          existing.storage_key,
+          targetKey,
+          ["photo safety check rejected"],
+        );
+      }
+      throw error;
+    }
+  }
+  const promotionIntent = randomUUID();
+  // Persist before sending the remote write. Only an acknowledged request may
+  // remove its own intent; process death leaves a durable worker obligation.
+  await tx(pool, (db) =>
+    db.query(
+      `insert into content_promotion_intents(id,asset_id,storage_key) values($1,$2,$3)`,
+      [promotionIntent, assetId, targetKey],
+    ),
+  );
   try {
     await client.send(
       new CopyObjectCommand({
         Bucket: getContentServiceRuntime().assetS3Bucket,
         Key: targetKey,
-        CopySource: copySource(existing.storage_key),
+        CopySource:
+          copySource(existing.storage_key) +
+          (verifiedVersionId
+            ? `?versionId=${encodeURIComponent(verifiedVersionId)}`
+            : ""),
+        CopySourceIfMatch: verifiedETag,
         ChecksumAlgorithm: "SHA256",
         MetadataDirective: "REPLACE",
         ContentType: existing.mime_type,
-        CacheControl: "public, max-age=31536000, immutable",
+        // User media must revalidate in browsers after erasure. Keep a short
+        // shared-cache lifetime; the worker also invalidates CloudFront.
+        CacheControl: existing.owner_user_id
+          ? "public, max-age=0, s-maxage=300, must-revalidate"
+          : "public, max-age=31536000, immutable",
       }),
     );
     const promotedHead = await client.send(
@@ -844,7 +986,7 @@ export async function completeContentAssetUpload(
         [
           assetId,
           targetKey,
-          publicUrl(targetKey),
+          contentAssetPublicUrl(targetKey),
           body.byteSize,
           checksumSha256,
           verifiedWidth,
@@ -860,6 +1002,9 @@ export async function completeContentAssetUpload(
           409,
         );
       }
+      await db.query(`delete from content_promotion_intents where id=$1`, [
+        promotionIntent,
+      ]);
       await enqueueStorageDeletion(
         db,
         existing.storage_key,
@@ -1134,12 +1279,10 @@ export async function deleteContentAsset(
 export async function deleteStoredContentObject(
   storageKey: string,
 ): Promise<void> {
-  const client = requireStorage();
-  await client.send(
-    new DeleteObjectCommand({
-      Bucket: getContentServiceRuntime().assetS3Bucket,
-      Key: storageKey,
-    }),
+  await eraseObjectVersions(
+    requireStorage(),
+    getContentServiceRuntime().assetS3Bucket,
+    storageKey,
   );
 }
 

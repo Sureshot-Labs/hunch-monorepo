@@ -55,7 +55,7 @@ try {
   );
   await client.query("begin");
   await client.query(`
-    create temporary table users(id uuid primary key,handle text,display_name text,bio text,social_suspended_at timestamptz,updated_at timestamptz,is_active boolean default true);
+    create temporary table users(id uuid primary key,handle text,display_name text,bio text,avatar_url text,social_suspended_at timestamptz,updated_at timestamptz,is_active boolean default true);
     create temporary table user_theses(id uuid primary key,author_id uuid,body text,moderation_hidden_at timestamptz,author_hidden_at timestamptz,proof_invalidated_at timestamptz);
     create temporary table social_comments(id uuid primary key,author_id uuid,thesis_id uuid,body text,moderation_hidden_at timestamptz,author_hidden_at timestamptz);
     create temporary table social_reports(id uuid primary key,reporter_id uuid,target_profile_id uuid,thesis_id uuid,comment_id uuid,target_kind text,target_id uuid,reason text,status text,created_at timestamptz,resolved_at timestamptz);
@@ -66,7 +66,7 @@ try {
     create index on social_moderation_events(target_kind,target_id,created_at desc,id desc);
   `);
   await client.query(
-    `insert into users(id,handle,display_name,bio) values($1,'trader','Trader','Public biography')`,
+    `insert into users(id,handle,display_name,bio,avatar_url) values($1,'trader','Trader','Public biography','https://assets.example.test/avatar.jpg')`,
     [author],
   );
   await client.query(
@@ -108,6 +108,14 @@ try {
   assert.equal(second.items.length, 1);
   assert.equal(second.nextCursor, null);
   const all = [...first.items, ...second.items];
+  assert.equal(
+    all.find((item) => item.target.kind === "user")?.targetPreview?.avatarUrl,
+    "https://assets.example.test/avatar.jpg",
+  );
+  assert.equal(
+    all.find((item) => item.target.kind === "thesis")?.targetPreview?.avatarUrl,
+    null,
+  );
   assert.equal(new Set(all.map((item) => item.id)).size, 3);
   assert.equal(
     all.find((item) => item.target.kind === "user")?.targetPreview?.text,
@@ -313,18 +321,32 @@ try {
   );
 
   // Representative administrative history: large cold prefix and sparse exact target.
-  await client.query(`insert into social_reports(id,target_kind,target_id,reason,status,created_at)
-    select md5('social-report-'||sample_idx)::uuid,'user',md5('social-target-'||sample_idx)::uuid,'Historical report',case when sample_idx%2=0 then 'open' else 'resolved' end,
-    '2026-01-01'::timestamptz+sample_idx*interval '1 second' from generate_series(1,50000) sample_idx;
+  const scaleRows = Number(
+    process.env.HUNCH_SOCIAL_MODERATION_SCALE_ROWS ?? 50000,
+  );
+  assert.ok(
+    Number.isSafeInteger(scaleRows) &&
+      scaleRows >= 50000 &&
+      scaleRows <= 1000000,
+  );
+  console.log(
+    `[admin-social-integration-tests] scale rows per relation: ${scaleRows}`,
+  );
+  for (let start = 1; start <= scaleRows; start += 10000) {
+    const last = Math.min(scaleRows, start + 9999);
+    await client.query(`insert into social_reports(id,target_kind,target_id,target_profile_id,reason,status,created_at)
+    select md5('social-report-'||sample_idx)::uuid,'user',md5('social-target-'||sample_idx)::uuid,md5('social-target-'||sample_idx)::uuid,'Historical report',case when sample_idx%2=0 then 'open' else 'resolved' end,
+    '2026-01-01'::timestamptz+sample_idx*interval '1 second' from generate_series(${start},${last}) sample_idx;
     insert into social_moderation_events(id,target_kind,target_id,action,reason,created_at)
     select md5('social-event-'||sample_idx)::uuid,'user',md5('social-target-'||sample_idx)::uuid,'resolve_report','Historical audit',
-    '2026-01-01'::timestamptz+sample_idx*interval '1 second' from generate_series(1,50000) sample_idx;
-    insert into users(id,display_name) select md5('social-target-'||sample_idx)::uuid,'Historical author' from generate_series(1,50000) sample_idx;
-    insert into user_theses(id,author_id,body) select md5('social-thesis-'||sample_idx)::uuid,md5('social-target-'||sample_idx)::uuid,'Historical thesis' from generate_series(1,50000) sample_idx;
-    insert into social_comments(id,author_id,thesis_id,body) select md5('social-comment-'||sample_idx)::uuid,md5('social-target-'||sample_idx)::uuid,md5('social-thesis-'||sample_idx)::uuid,'Historical comment' from generate_series(1,50000) sample_idx;
-    analyze social_reports; analyze social_moderation_events; analyze users; analyze user_theses; analyze social_comments;
-    set local plan_cache_mode=force_generic_plan;
-  `);
+    '2026-01-01'::timestamptz+sample_idx*interval '1 second' from generate_series(${start},${last}) sample_idx;
+    insert into users(id,display_name) select md5('social-target-'||sample_idx)::uuid,'Historical author' from generate_series(${start},${last}) sample_idx;
+    insert into user_theses(id,author_id,body) select md5('social-thesis-'||sample_idx)::uuid,md5('social-target-'||sample_idx)::uuid,'Historical thesis' from generate_series(${start},${last}) sample_idx;
+    insert into social_comments(id,author_id,thesis_id,body) select md5('social-comment-'||sample_idx)::uuid,md5('social-target-'||sample_idx)::uuid,md5('social-thesis-'||sample_idx)::uuid,'Historical comment' from generate_series(${start},${last}) sample_idx;
+    `);
+  }
+  await client.query(`analyze social_reports; analyze social_moderation_events; analyze users; analyze user_theses; analyze social_comments;
+    set local plan_cache_mode=force_generic_plan;`);
   const queries = [
     buildAdminSocialReportsQuery({ status: "open" }, limits),
     buildAdminSocialReportsQuery(

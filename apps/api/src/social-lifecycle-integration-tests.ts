@@ -119,7 +119,7 @@ try {
     alter table users add constraint fixture_avatar_fk foreign key(avatar_asset_id) references content_assets(id) on delete set null;
     create temporary table content_asset_usages(asset_id uuid references content_assets(id));
     create temporary table content_audit_events(id uuid primary key default gen_random_uuid(),actor_user_id uuid references users(id) on delete set null,actor_label text);
-    create temporary table content_storage_deletion_jobs(storage_key text primary key,available_at timestamptz,status text default 'pending',locked_at timestamptz,locked_by text,completed_at timestamptz,attempts integer default 0,last_error text);
+    create temporary table content_storage_deletion_jobs(storage_key text primary key,available_at timestamptz,status text default 'pending',locked_at timestamptz,locked_by text,completed_at timestamptz,attempts integer default 0,last_error text,cdn_invalidation_id text,cdn_invalidation_reference uuid default gen_random_uuid());
     create temporary table user_onboarding_state(user_id uuid primary key references users(id) on delete cascade);
     create temporary table user_interests(user_id uuid references users(id) on delete cascade);
     create temporary table native_push_devices(id uuid primary key,user_id uuid references users(id) on delete cascade);

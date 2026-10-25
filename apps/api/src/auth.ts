@@ -56,6 +56,7 @@ export interface User {
   username?: string;
   displayName?: string;
   avatarUrl?: string;
+  adultConfirmedAt?: Date;
   handle?: string;
   bio?: string;
   avatarAssetId?: string;
@@ -83,6 +84,7 @@ type UserRow = {
   username: string | null;
   display_name: string | null;
   avatar_url: string | null;
+  adult_confirmed_at?: Date | null;
   handle?: string | null;
   bio?: string | null;
   avatar_asset_id?: string | null;
@@ -104,6 +106,7 @@ function mapUserRow(row: UserRow): User {
     username: row.username ?? undefined,
     displayName: row.display_name ?? undefined,
     avatarUrl: row.avatar_url ?? undefined,
+    adultConfirmedAt: row.adult_confirmed_at ?? undefined,
     handle: row.handle ?? undefined,
     bio: row.bio ?? undefined,
     avatarAssetId: row.avatar_asset_id ?? undefined,
@@ -1444,7 +1447,7 @@ export class AuthService {
 
     // Get the user data
     const userResult = await client.query<UserRow>(
-      "SELECT id, privy_user_id, email, username, display_name, avatar_url, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      "SELECT id, privy_user_id, email, username, display_name, avatar_url, adult_confirmed_at, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
       [userId],
     );
 
@@ -1586,7 +1589,7 @@ export class AuthService {
 
       // Get the user data
       const userResult = await client.query<UserRow>(
-        "SELECT id, privy_user_id, email, username, display_name, avatar_url, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+        "SELECT id, privy_user_id, email, username, display_name, avatar_url, adult_confirmed_at, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
         [userId],
       );
 
@@ -1606,7 +1609,7 @@ export class AuthService {
    */
   static async getUserById(userId: string): Promise<User | null> {
     const result = await pool.query<UserRow>(
-      "SELECT id, privy_user_id, email, username, display_name, avatar_url, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      "SELECT id, privy_user_id, email, username, display_name, avatar_url, adult_confirmed_at, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
       [userId],
     );
 
@@ -1620,9 +1623,18 @@ export class AuthService {
   static async deleteUser(
     userId: string,
     transactionClient?: PoolClient,
+    options: {
+      resolveMergedIdentity?: boolean;
+      beforeErasure?: (
+        db: PoolClient,
+        canonicalUserId: string,
+        privyUserId: string | null,
+      ) => Promise<void>;
+    } = {},
   ): Promise<UserDeletionResult> {
     const client = transactionClient ?? (await pool.connect());
     const ownsTransaction = transactionClient == null;
+    let releasedForMergedIdentity = false;
     try {
       if (ownsTransaction) await client.query("BEGIN");
       await lockTelegramFundingLinkLifecycle(client, userId);
@@ -1640,6 +1652,29 @@ export class AuthService {
       );
       const user = userResult.rows[0];
       if (!user) {
+        if (options.resolveMergedIdentity) {
+          const merged = await client.query<{ owner_user_id: string }>(
+            `select a.owner_user_id from account_merge_transfers t
+             join account_erasure_aliases a on a.transfer_id=t.id
+             where t.source_user_id=$1 and not t.keep_source
+             order by t.created_at desc,t.id desc limit 1`,
+            [userId],
+          );
+          const canonical = merged.rows[0]?.owner_user_id;
+          if (canonical && canonical !== userId) {
+            // End this lock scope before resolving another account. The next
+            // user lock is rechecked after any concurrent merge commits.
+            if (ownsTransaction) await client.query("ROLLBACK");
+            if (!ownsTransaction)
+              throw new Error(
+                "Merged identity requires an owned deletion transaction",
+              );
+            client.release();
+            releasedForMergedIdentity = true;
+            return AuthService.deleteUser(canonical, undefined, options);
+          }
+        }
+        await options.beforeErasure?.(client, userId, null);
         if (ownsTransaction) await client.query("COMMIT");
         return {
           disposition: "hard_deleted",
@@ -1648,6 +1683,8 @@ export class AuthService {
           protectedReasons: [],
         };
       }
+
+      await options.beforeErasure?.(client, userId, user.privy_user_id);
 
       const lifecycle = await fetchUserFinancialLifecycleSummary(client, [
         userId,
@@ -1758,6 +1795,8 @@ export class AuthService {
               username = null,
               display_name = null,
               avatar_url = null,
+              adult_confirmed_at = null,
+              adult_confirmation_version = null,
               is_active = false,
               is_verified = false,
               financial_deactivated_at = coalesce(
@@ -1785,7 +1824,7 @@ export class AuthService {
       if (ownsTransaction) await client.query("ROLLBACK");
       throw error;
     } finally {
-      if (ownsTransaction) client.release();
+      if (ownsTransaction && !releasedForMergedIdentity) client.release();
     }
   }
 

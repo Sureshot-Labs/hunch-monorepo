@@ -1,6 +1,22 @@
+import { reconcileContentPromotionIntents } from "./services/content-promotion-intents.js";
 // @requires-db
+// @isolated-process: this local S3 endpoint must not reuse another suite's cached client.
 
 import assert from "node:assert/strict";
+import {
+  CloudFrontClient,
+  CreateInvalidationCommand,
+  GetInvalidationCommand,
+} from "@aws-sdk/client-cloudfront";
+const originalCloudFrontSend = CloudFrontClient.prototype.send;
+CloudFrontClient.prototype.send = (async (command: unknown) => {
+  assert.ok(
+    command instanceof CreateInvalidationCommand ||
+      command instanceof GetInvalidationCommand,
+  );
+  return { Invalidation: { Id: "test-invalidation", Status: "Completed" } };
+}) as typeof CloudFrontClient.prototype.send;
+process.env.CONTENT_ASSET_CLOUDFRONT_DISTRIBUTION_ID = "test-distribution";
 import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
@@ -22,6 +38,7 @@ type StoredObject = {
 
 const bucket = "content-media-test";
 const objects = new Map<string, StoredObject>();
+let copyObjectCalls = 0;
 let beforeCopyObject: ((key: string) => Promise<void>) | null = null;
 
 function checksumHex(body: Buffer): string {
@@ -57,6 +74,7 @@ const server = createServer(async (request, response) => {
   try {
     const key = objectKey(request);
     if (request.method === "PUT" && request.headers["x-amz-copy-source"]) {
+      copyObjectCalls += 1;
       const sourcePath = decodeURIComponent(
         String(request.headers["x-amz-copy-source"]),
       ).replace(/^\/+/, "");
@@ -94,6 +112,19 @@ const server = createServer(async (request, response) => {
       response.statusCode = 200;
       response.setHeader("x-amz-checksum-sha256", checksumBase64(body));
       response.end();
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      new URL(request.url ?? "/", "http://localhost").searchParams.has(
+        "versions",
+      )
+    ) {
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/xml");
+      response.end(
+        '<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><IsTruncated>false</IsTruncated></ListVersionsResult>',
+      );
       return;
     }
     const stored = objects.get(key);
@@ -161,13 +192,24 @@ try {
     import("./services/content-worker.js"),
     import("./services/content.js"),
   ]);
-  const {
-    completeContentAssetUpload,
-    createContentAssetUpload,
-    deleteContentAsset,
-  } = assetsModule;
+  const { createContentAssetUpload, deleteContentAsset } = assetsModule;
   const { dispatchContentStorageDeletions } = workerModule;
   const { ContentError } = contentModule;
+  let avatarCheckFailure: InstanceType<typeof ContentError> | null = null;
+  let avatarChecks = 0;
+  const completeContentAssetUpload = (
+    ...args: Parameters<typeof assetsModule.completeContentAssetUpload>
+  ) =>
+    assetsModule.completeContentAssetUpload(
+      args[0],
+      args[1],
+      args[2],
+      args[3],
+      async () => {
+        avatarChecks += 1;
+        if (avatarCheckFailure) throw avatarCheckFailure;
+      },
+    );
 
   const testPool = await createContentTestPool(2);
   pool = testPool;
@@ -358,12 +400,72 @@ try {
   const strangerActor = userContentActor(strangerId);
   const avatarBody = {
     kind: "image" as const,
+    avatarModerationConsent: true as const,
     originalFilename: "avatar.png",
     mimeType: "image/png",
     expectedByteSize: png.length,
     checksumSha256: pngChecksum,
   };
   const snapshot = { maximumBytes: png.length, revision: "test-frozen-policy" };
+  await assert.rejects(
+    () =>
+      createContentAssetUpload(
+        testPool,
+        { ...avatarBody, avatarModerationConsent: undefined },
+        ownerActor,
+        snapshot,
+      ),
+    (error: unknown) =>
+      error instanceof ContentError && error.code === "avatar_consent_required",
+  );
+  for (const [code, expectedStatus] of [
+    ["content_not_allowed", "failed"],
+    ["avatar_check_unavailable", "pending"],
+  ] as const) {
+    const candidate = await createContentAssetUpload(
+      testPool,
+      avatarBody,
+      ownerActor,
+      snapshot,
+    );
+    assetIds.push(candidate.asset.id);
+    storageKeys.add(candidate.asset.storageKey);
+    await fetch(candidate.upload.url, {
+      method: "PUT",
+      headers: candidate.upload.headers,
+      body: png,
+    });
+    avatarCheckFailure = new ContentError(
+      code,
+      "Test photo check",
+      code === "content_not_allowed" ? 422 : 503,
+    );
+    const copiesBefore = copyObjectCalls;
+    await assert.rejects(
+      () =>
+        completeContentAssetUpload(
+          testPool,
+          candidate.asset.id,
+          { byteSize: png.length, checksumSha256: pngChecksum },
+          ownerActor,
+        ),
+      (error: unknown) => error instanceof ContentError && error.code === code,
+    );
+    assert.equal(
+      copyObjectCalls,
+      copiesBefore,
+      "Rejected/unavailable checks must never promote public bytes",
+    );
+    const state = await testPool.query(
+      `select status,public_url from content_assets where id=$1`,
+      [candidate.asset.id],
+    );
+    assert.equal(state.rows[0].status, expectedStatus);
+    assert.equal(state.rows[0].public_url, null);
+    avatarCheckFailure = null;
+  }
+  assert.ok(avatarChecks >= 2);
+
   await assert.rejects(
     () =>
       createContentAssetUpload(testPool, avatarBody, ownerActor, {
@@ -707,6 +809,18 @@ try {
     ).rows[0];
     assert.equal(retryRow.status, "pending");
     assert.equal(retryRow.owner_user_id, targetId);
+    await reconcileContentPromotionIntents(testPool, 100);
+    assert.equal(
+      (
+        await testPool.query(
+          "select id from content_storage_deletion_jobs where storage_key=$1",
+          [retryRow.metadata.verificationTargetKey],
+        )
+      ).rows.length,
+      0,
+      "a transferred pending upload must remain safe to retry while promotion recovery runs",
+    );
+
     storageKeys.add(retryRow.metadata.verificationTargetKey);
     assert.equal(objects.has(retryRow.metadata.verificationTargetKey), true);
     assert.equal(
@@ -1004,7 +1118,7 @@ try {
   );
   assert.equal(objects.has(invalidIntent.asset.storageKey), false);
 
-  assert.equal(verificationStatements.size, 3);
+  assert.equal(verificationStatements.size, 4);
   const plans = await testPool.connect();
   try {
     await plans.query("begin");
@@ -1047,7 +1161,19 @@ try {
         };
         walk(plan.Plan);
         assert.ok(
-          nodes.some((node) => node["Index Name"] === "content_assets_pkey"),
+          nodes.some(
+            (node) =>
+              node["Relation Name"] === "content_assets" &&
+              node["Index Name"] &&
+              /\bid\s*=/u.test(String(node["Index Cond"])),
+          ),
+          JSON.stringify({ name, mode, sql, params, plan }),
+        );
+        assert.ok(
+          Number(plan.Plan["Shared Hit Blocks"] ?? 0) +
+            Number(plan.Plan["Shared Read Blocks"] ?? 0) <=
+            256,
+          "point verification must stay bounded independently of the chosen index",
         );
         assert.equal(
           nodes.some(
@@ -1116,6 +1242,7 @@ try {
     try {
       if (pool) await pool.end();
     } finally {
+      CloudFrontClient.prototype.send = originalCloudFrontSend;
       if (server.listening) {
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),

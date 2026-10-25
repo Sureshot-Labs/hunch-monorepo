@@ -43,6 +43,7 @@ export const authUserSchema = z.object({
   username: z.string().optional(),
   displayName: z.string().optional(),
   avatarUrl: z.string().optional(),
+  adultConfirmedAt: z.string().datetime().optional(),
   handle: z.string().optional(),
   bio: z.string().optional(),
   avatarAssetId: z.string().uuid().optional(),
@@ -183,3 +184,10 @@ export const polymarketRelayerStatusResponseSchema = z.object({
   enabled: z.boolean(),
   reason: z.string().optional(),
 });
+
+export const adultConfirmationBodySchema = z
+  .object({
+    isAtLeast18: z.literal(true),
+    policyVersion: z.literal(1),
+  })
+  .strict();

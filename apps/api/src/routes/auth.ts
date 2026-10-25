@@ -1,3 +1,9 @@
+import { confirmAdultAccount } from "../services/account-age-confirmation.js";
+import { journalAccountErasureLineage } from "../services/account-erasure-lineage.js";
+import {
+  adultConfirmationBodySchema,
+  authUserSchema,
+} from "../schemas/auth.js";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
@@ -105,6 +111,7 @@ function buildAuthUserPayload(user: User) {
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
+    adultConfirmedAt: user.adultConfirmedAt?.toISOString(),
     handle: user.handle,
     bio: user.bio,
     avatarAssetId: user.avatarAssetId,
@@ -706,6 +713,32 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  z.post(
+    "/auth/me/age-confirmation",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        body: adultConfirmationBodySchema,
+        response: {
+          200: zod.object({ user: authUserSchema }),
+          401: authErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!request.user) return reply.code(401).send({ error: "Unauthorized" });
+      const confirmedAt = await confirmAdultAccount(pool, request.user.id);
+      if (!confirmedAt) return reply.code(401).send({ error: "Unauthorized" });
+      reply.header("Cache-Control", "private, no-store");
+      return {
+        user: buildAuthUserPayload({
+          ...request.user,
+          adultConfirmedAt: confirmedAt,
+        }),
+      };
+    },
+  );
+
   /**
    * DELETE /auth/me
    * Delete the current user account (local DB + best-effort Privy deletion).
@@ -720,12 +753,34 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const privyUserId = user.privyUserId;
-
+      let privyUserId = user.privyUserId;
+      let deletionUserId = user.id;
+      let journalFailed = false;
       let deletion;
       try {
-        deletion = await AuthService.deleteUser(user.id);
+        deletion = await AuthService.deleteUser(user.id, undefined, {
+          resolveMergedIdentity: true,
+          beforeErasure: async (db, canonicalUserId, canonicalPrivyUserId) => {
+            deletionUserId = canonicalUserId;
+            privyUserId = canonicalPrivyUserId ?? undefined;
+            try {
+              await journalAccountErasureLineage(db, canonicalUserId);
+            } catch (error) {
+              journalFailed = true;
+              throw error;
+            }
+          },
+        });
       } catch (error) {
+        if (journalFailed) {
+          app.log.error(
+            { userId: user.id },
+            "Account erasure journal could not be acknowledged",
+          );
+          return reply
+            .code(503)
+            .send({ error: "account_deletion_unavailable" });
+        }
         app.log.error({ error, userId: user.id }, "Failed to delete user");
         reply.code(500);
         return reply.send({
@@ -737,7 +792,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       if (privyUserId && deletion.privyDeletionAllowed) {
         const reconciliation = await reconcilePendingPrivyDeletions(pool, {
           limit: 1,
-          userId: user.id,
+          userId: deletionUserId,
         });
         privyDeleted = reconciliation.completed === 1;
         if (reconciliation.failed > 0) {
@@ -751,6 +806,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
+        storageDeletionPending: true,
         disposition: deletion.disposition,
         activeMovement: deletion.activeMovement,
         privyDeleted,

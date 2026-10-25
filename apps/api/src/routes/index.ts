@@ -48,6 +48,8 @@ import { walletsRoutes } from "./wallets.js";
 import { walletIntelRoutes } from "./wallet-intel.js";
 import { watchlistRoutes } from "./watchlist.js";
 import { env } from "../env.js";
+import { createDiscoveryRoutes } from "./discovery.js";
+import { discoveryService } from "../services/discovery-runtime.js";
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(metricsRoutes);
@@ -96,6 +98,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(notificationsRoutes);
   await app.register(nativeNotificationsRoutes);
   await app.register(feedRoutes);
+  await app.register(createDiscoveryRoutes(discoveryService));
   await app.register(specialRoutes);
   await app.register(marketMapRoutes);
   await app.register(holdersRoutes);
