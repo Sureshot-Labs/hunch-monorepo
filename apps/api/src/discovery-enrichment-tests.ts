@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
+import { resolvePolymarketMarketAssets } from "@hunch/shared";
 import {
   serializerCompiler,
   validatorCompiler,
@@ -25,6 +26,7 @@ import {
 import {
   discoveryTestComponents,
   discoveryTestItem,
+  discoveryTestRow,
   discoveryTestNow as now,
   discoveryTestScope,
   discoveryTestSnapshot,
@@ -490,4 +492,137 @@ assert.equal(
 );
 console.log(
   "[discovery-enrichment-tests] ok legacy collection compatibility and new-version recovery",
+);
+
+// The production drilldown must load instrument metadata, not only prices.
+// Exercise both generations and both selected sides with the real light projection.
+for (const version of ["v1", "v2"] as const) {
+  const conditionId = `0x01${"00".repeat(31)}`;
+  const assets = [
+    BigInt(conditionId).toString(),
+    (BigInt(conditionId) + 1n).toString(),
+  ];
+  const protocol = resolvePolymarketMarketAssets({
+    version,
+    conditionId,
+    clobTokenIds: assets,
+    positionIds: assets,
+    outcomes: ["Yes", "No"],
+    negRisk: false,
+  });
+  for (const side of ["YES", "NO"] as const) {
+    const marketId = `polymarket:traders-${version}-${side}`;
+    const row = discoveryTestRow(marketId, {
+      venue: "polymarket",
+      side,
+      token_id: assets[side === "YES" ? 0 : 1],
+      metadata: { polymarketProtocol: protocol },
+    });
+    const cohort = structuredClone(selections[0]);
+    assert.ok(cohort.reason.positioning);
+    assert.ok(cohort.participants);
+    if (side === "NO") {
+      cohort.reason.positioning.selected.side = "NO";
+      cohort.reason.positioning.opposite.side = "YES";
+      for (const member of cohort.participants)
+        member.side = member.side === "YES" ? "NO" : "YES";
+    }
+    const item = { ...discoveryTestItem(marketId, row), reason: cohort.reason };
+    const components = discoveryTestComponents([item]);
+    components.repo.rows.set(marketId, row);
+    const frozen = {
+      ...discoveryTestSnapshot([item]),
+      section: "smart-money" as const,
+      smartParticipants: { [item.id]: cohort.participants },
+    };
+    await components.store.acquire("smart-money", "poly");
+    await components.store.publish("smart-money", "poly", frozen);
+    await components.store.release("smart-money", "poly");
+    const polyService = new DiscoveryService(
+      components.builder,
+      async () => components.store,
+      async () => discoveryTestScope,
+      () => now,
+    );
+    const polyApp = Fastify();
+    polyApp.setSerializerCompiler(serializerCompiler);
+    polyApp.setValidatorCompiler(validatorCompiler);
+    await polyApp.register(createDiscoveryRoutes(polyService));
+    try {
+      const query = `snapshotId=${frozen.id}&side=${side}&limit=2`;
+      const route = `/discovery/smart-money/${encodeURIComponent(marketId)}/traders?${query}`;
+      const first = await polyApp.inject(route);
+      assert.equal(
+        first.statusCode,
+        200,
+        `${version}/${side} encoded market ID: ${first.body}`,
+      );
+      const last = await polyApp.inject(
+        `${route}&cursor=${encodeURIComponent(first.json().nextCursor)}`,
+      );
+      assert.equal(last.statusCode, 200);
+      assert.equal(last.json().nextCursor, null);
+      assert.deepEqual(
+        [...first.json().items, ...last.json().items],
+        frozen.smartParticipants[item.id],
+      );
+      assert.equal(
+        (
+          await polyApp.inject(
+            `/discovery/smart-money/${marketId}/traders?${query}`,
+          )
+        ).statusCode,
+        200,
+      );
+      assert.equal(
+        (await polyApp.inject(route.replace(`&side=${side}`, ""))).statusCode,
+        200,
+      );
+      row.metadata = {
+        polymarketProtocol: protocol,
+        umaResolutionStatus: "proposed",
+      };
+      assert.equal(
+        (await polyApp.inject(route)).statusCode,
+        404,
+        "proposed resolution remains blocked",
+      );
+      row.metadata = { polymarketProtocol: protocol };
+      if (version === "v1") {
+        row.metadata = {
+          polymarketProtocol: resolvePolymarketMarketAssets({
+            version: "v2",
+            conditionId,
+            positionIds: assets,
+            outcomes: ["Yes", "No"],
+            negRisk: false,
+          }),
+        };
+        assert.equal(
+          (await polyApp.inject(route)).statusCode,
+          404,
+          "same numeric asset in another generation remains blocked",
+        );
+        row.metadata = { polymarketProtocol: protocol };
+      }
+      row.token_id = "999";
+      assert.equal(
+        (await polyApp.inject(route)).statusCode,
+        404,
+        "changed asset remains blocked",
+      );
+      row.token_id = assets[side === "YES" ? 0 : 1];
+      assert.equal(
+        (await polyApp.inject(route)).statusCode,
+        200,
+        "restored identity recovers immediately",
+      );
+    } finally {
+      await polyService.stop();
+      await polyApp.close();
+    }
+  }
+}
+console.log(
+  "[discovery-enrichment-tests] ok Polymarket v1/v2 YES/NO, ID encodings, pagination and live identity safety",
 );

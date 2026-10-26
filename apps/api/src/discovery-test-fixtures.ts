@@ -140,10 +140,30 @@ export class DiscoveryFixtureRepository extends DiscoveryRepository {
       },
     });
   }
-  override async marketCards(ids: string[]) {
+  override async marketCards(ids: string[], light = false) {
     this.batches.push(ids);
     return ids.flatMap((id) =>
-      this.rows.has(id) ? [this.rows.get(id) as RawDiscoveryRow] : [],
+      this.rows.has(id)
+        ? [this.rows.get(id) as RawDiscoveryRow].map((row) => {
+            if (!light) return row;
+            const {
+              description: _description,
+              volume_24h_usd: _volume,
+              ...quote
+            } = row;
+            const metadata = row.metadata as
+              | Record<string, unknown>
+              | undefined;
+            // Match DISCOVERY_MARKET_QUOTES_SQL, not the full card projection.
+            return {
+              ...quote,
+              metadata: {
+                dflowNativeAcceptingOrders:
+                  metadata?.dflowNativeAcceptingOrders ?? null,
+              },
+            };
+          })
+        : [],
     );
   }
   override async currentResearch(ids: string[]) {
