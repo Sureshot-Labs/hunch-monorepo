@@ -249,6 +249,131 @@ try {
       }),
     ),
   });
+  const renameBody = (handle: unknown) => {
+    const body = saveBody();
+    return {
+      ...body,
+      profiles: body.profiles.map((p: { id: string }) =>
+        p.id === politics.userId ? { ...p, handle } : p,
+      ),
+    };
+  };
+  const saveOperation = app.swagger().paths?.[root]?.put;
+  assert.ok(saveOperation && "requestBody" in saveOperation);
+  assert.ok(JSON.stringify(saveOperation.requestBody).includes('"handle"'));
+  for (const permissions of ["intel:read", "intel:write", "users:write"]) {
+    const denied = await app.inject({
+      method: "PUT",
+      url: root,
+      headers: { "x-test-permissions": permissions },
+      payload: renameBody("machi"),
+    });
+    assert.equal(denied.statusCode, 403);
+  }
+  for (const handle of ["", "ab", "not-valid!", "x".repeat(21), null]) {
+    const rejected = await app.inject({
+      method: "PUT",
+      url: root,
+      headers,
+      payload: renameBody(handle),
+    });
+    assert.equal(rejected.statusCode, 400, rejected.body);
+    assert.equal((await getState()).revision, state.revision);
+  }
+  for (const handle of ["ORDINARY_USER", "weather_two"]) {
+    const payload = renameBody(handle);
+    // A collision must also roll back unrelated profile edits and the policy write.
+    payload.profiles[0] = {
+      ...payload.profiles[0],
+      displayName: "Must not persist",
+    };
+    const rejected = await app.inject({
+      method: "PUT",
+      url: root,
+      headers,
+      payload,
+    });
+    assert.equal(rejected.statusCode, 409, rejected.body);
+    assert.equal(rejected.json().error, "agent_handle_conflict");
+    assert.equal((await getState()).revision, state.revision);
+  }
+  const duplicateHandles = saveBody();
+  const duplicateSave = await app.inject({
+    method: "PUT",
+    url: root,
+    headers,
+    payload: {
+      ...duplicateHandles,
+      profiles: duplicateHandles.profiles.map((p: { id: string }) => ({
+        ...p,
+        handle: "same_name",
+      })),
+    },
+  });
+  assert.equal(duplicateSave.statusCode, 409, duplicateSave.body);
+  assert.equal((await getState()).revision, state.revision);
+  const originalAuthors = structuredClone(state.policy.authors);
+  const originalIds = state.profiles.map((p: { id: string }) => p.id);
+  const renamePayload = renameBody("  MaChi  ");
+  const renamed = await app.inject({
+    method: "PUT",
+    url: root,
+    headers,
+    payload: renamePayload,
+  });
+  assert.equal(renamed.statusCode, 200, renamed.body);
+  state = renamed.json();
+  assert.deepEqual(state.policy.authors, originalAuthors);
+  assert.deepEqual(
+    state.profiles.map((p: { id: string }) => p.id),
+    originalIds,
+  );
+  assert.equal(
+    state.profiles.find((p: { id: string }) => p.id === politics.userId).handle,
+    "machi",
+  );
+  assert.equal(state.policy.enabled, false);
+  const changedAt = (
+    await client.query("select handle_changed_at from users where id=$1", [
+      politics.userId,
+    ])
+  ).rows[0].handle_changed_at;
+  assert.ok(changedAt);
+  assert.equal(
+    (await client.query("select id from users where handle='weather_one'")).rows
+      .length,
+    0,
+  );
+  assert.equal(
+    (
+      await app.inject({
+        method: "PUT",
+        url: root,
+        headers,
+        payload: renamePayload,
+      })
+    ).statusCode,
+    409,
+  );
+  for (const payload of [renameBody("MACHI"), saveBody()]) {
+    payload.revision = state.revision;
+    const saved = await app.inject({
+      method: "PUT",
+      url: root,
+      headers,
+      payload,
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+    state = saved.json();
+    const persisted = (
+      await client.query(
+        "select handle,handle_changed_at from users where id=$1",
+        [politics.userId],
+      )
+    ).rows[0];
+    assert.equal(persisted.handle, "machi");
+    assert.deepEqual(persisted.handle_changed_at, changedAt);
+  }
   // Upgrade persisted v1 slots without new users or loss of configured identities/settings.
   await client.query("savepoint legacy_agents");
   const legacy = {

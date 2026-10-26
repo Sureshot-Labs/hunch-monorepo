@@ -281,6 +281,13 @@ admin session with both `intel:write` and `users:write`; reads require
 Profile edits and policy writes commit together. Normal users cannot be
 claimed by matching a handle, and moderation restrictions cannot be removed
 through this editor. No new migration/index is needed beyond migration 0287.
+PUT profile entries may include `handle` to rename an existing agent. Omission
+preserves the current handle for older clients. Handles are trimmed, lowercased
+and validated using the social length/character rules; the existing unique index
+rejects collisions with any user (409), rolling back the entire save. Admin
+renames do not apply the ordinary self-service handle cooldown. `userId`, theses,
+follows, history and agent configuration bindings are unchanged. Old handle URLs
+do not redirect, and the previous handle becomes available after the rename.
 `agent_theses` is excluded from the generic JSON policy write route to avoid
 bypassing these checks.
 

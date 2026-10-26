@@ -15,6 +15,7 @@ import {
   socialFingerprint,
   socialText,
   SocialError,
+  normalizeSocialHandle,
 } from "./social-primitives.js";
 
 export const agentAdminRevision = z
@@ -27,6 +28,7 @@ export const agentAdminSave = agentAdminRevision
       z
         .object({
           id: z.string().uuid(),
+          handle: z.string().min(1).max(100).optional(),
           displayName: z.string().min(1).max(1000),
           bio: z.string().max(2000),
           avatarAssetId: z.string().uuid().nullable().optional(),
@@ -168,6 +170,15 @@ async function saveAgentProfile(
   previous: z.infer<typeof profileSchema>,
   limits: z.infer<typeof agentAdminStateSchema>["profileLimits"],
 ) {
+  // Omitted by older clients. Renaming never changes the author's stable user ID.
+  const handle =
+    profile.handle === undefined
+      ? null
+      : normalizeSocialHandle(
+          profile.handle,
+          limits.handleMinLength,
+          limits.handleMaxLength,
+        );
   const avatarChanged =
     profile.avatarAssetId !== undefined &&
     (profile.avatarAssetId !== previous.avatarAssetId ||
@@ -187,6 +198,8 @@ async function saveAgentProfile(
   }
   await db.query(
     `update users set display_name=$2,bio=$3,
+       handle=coalesce($7::text,handle),
+       handle_changed_at=case when $7::text is not null and handle is distinct from $7 then now() else handle_changed_at end,
        avatar_asset_id=case when $4::boolean then $5::uuid else avatar_asset_id end,
        avatar_url=case when $4::boolean then $6 else avatar_url end,
        profile_avatar_edited_at=case when $4::boolean then now() else profile_avatar_edited_at end,
@@ -200,6 +213,7 @@ async function saveAgentProfile(
       avatarChanged,
       profile.avatarAssetId ?? null,
       avatarUrl,
+      handle,
     ],
   );
 }
