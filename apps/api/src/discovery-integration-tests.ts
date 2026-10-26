@@ -9,6 +9,7 @@ import {
   validatorCompiler,
 } from "fastify-type-provider-zod";
 import { createRedisClient } from "@hunch/infra";
+import { resolvePolymarketMarketAssets } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import {
   DiscoveryRepository,
@@ -27,6 +28,7 @@ import {
 import { DiscoveryBuilder } from "./services/discovery-builder.js";
 import { DiscoveryStore } from "./services/discovery-store.js";
 import { DiscoveryService } from "./services/discovery-service.js";
+import { marketCard } from "./services/discovery-domain.js";
 import { createDiscoveryRoutes } from "./routes/discovery.js";
 import {
   discoveryTestNow as now,
@@ -282,6 +284,124 @@ try {
   assert.equal(traderPage.statusCode, 200);
   assert.equal(traderPage.json().items.length, 2);
   assert.equal(traderPage.json().positioning.selected.ownerGroups, 4);
+  // Regression: real SQL must retain Polymarket protocol metadata for the
+  // live identity check. Reuse the exact marketId/snapshotId returned by GET.
+  const polyMarketId = "polymarket:traders-regression";
+  const conditionId = `0x01${"00".repeat(31)}`;
+  const assets = [
+    BigInt(conditionId).toString(),
+    (BigInt(conditionId) + 1n).toString(),
+  ];
+  const protocol = resolvePolymarketMarketAssets({
+    version: "v2",
+    conditionId,
+    positionIds: assets,
+    outcomes: ["Yes", "No"],
+    negRisk: false,
+  });
+  await pool.query(
+    `INSERT INTO unified_markets
+     SELECT $1,event_id,'polymarket','traders-regression',title,category,status,
+       resolved_outcome,resolved_outcome_pct,outcomes,expiration_time,close_time,
+       updated_at,liquidity,image,description,$2::jsonb
+     FROM unified_markets WHERE id='limitless:1'`,
+    [polyMarketId, JSON.stringify({ polymarketProtocol: protocol })],
+  );
+  await pool.query(
+    "INSERT INTO polymarket_markets VALUES ('traders-regression',true,true,false,false)",
+  );
+  await pool.query(
+    "INSERT INTO unified_market_tokens VALUES ($1,'YES',$2,$4),($1,'NO',$3,$4)",
+    [polyMarketId, ...assets, asOf],
+  );
+  await pool.query(
+    `INSERT INTO unified_token_top_latest
+     SELECT asset_row.token_id,quote_row.best_bid,quote_row.best_ask,quote_row.ts
+     FROM unnest($1::text[]) asset_row(token_id)
+     CROSS JOIN unified_token_top_latest quote_row WHERE quote_row.token_id='YES1'`,
+    [assets],
+  );
+  const fullRows = await repo.marketCards([polyMarketId], false);
+  const lightRows = await repo.marketCards([polyMarketId], true);
+  const fullNo = fullRows.find((row) => row.side === "NO");
+  const lightNo = lightRows.find((row) => row.side === "NO");
+  assert.ok(fullNo);
+  assert.ok(lightNo);
+  const fullCard = marketCard(fullNo, now, "0xctf");
+  assert.ok(fullCard?.selection.instrument);
+  assert.equal(marketCard(lightNo, now, "0xctf")?.selection.instrument, null);
+  const polyItem = {
+    ...structuredClone(smartSnapshot.items[0]),
+    ...fullCard,
+    id: "smart:poly-regression",
+  };
+  assert.equal(polyItem.reason.kind, "smart-money");
+  if (polyItem.reason.kind !== "smart-money" || !polyItem.reason.positioning)
+    throw Error("missing test positioning");
+  polyItem.reason.positioning.selected.side = "NO";
+  polyItem.reason.positioning.opposite.side = "YES";
+  const polyMembers = structuredClone(
+    smartSnapshot.smartParticipants?.[smartSnapshot.items[0].id],
+  );
+  assert.ok(polyMembers);
+  for (const member of polyMembers) member.side = "NO";
+  const polySnapshot = {
+    ...smartSnapshot,
+    id: randomUUID(),
+    items: [polyItem],
+    smartParticipants: { [polyItem.id]: polyMembers },
+  };
+  await store.acquire("smart-money", "poly-regression");
+  await store.publish("smart-money", "poly-regression", polySnapshot);
+  await store.release("smart-money", "poly-regression");
+  const parent = await app.inject("/discovery/smart-money?limit=20");
+  assert.equal(parent.statusCode, 200);
+  const parentItem = parent.json().items[0];
+  assert.equal(parentItem.market.marketId, polyMarketId);
+  const route = `/discovery/smart-money/${encodeURIComponent(parentItem.market.marketId)}/traders?snapshotId=${parent.json().snapshotId}&side=${parentItem.selection.side}&limit=2`;
+  const firstPolyPage = await app.inject(route);
+  assert.equal(firstPolyPage.statusCode, 200, firstPolyPage.body);
+  const lastPolyPage = await app.inject(
+    `${route}&cursor=${encodeURIComponent(firstPolyPage.json().nextCursor)}`,
+  );
+  assert.equal(lastPolyPage.statusCode, 200);
+  assert.equal(lastPolyPage.json().nextCursor, null);
+  assert.deepEqual(
+    [...firstPolyPage.json().items, ...lastPolyPage.json().items],
+    polyMembers,
+  );
+  assert.deepEqual(
+    firstPolyPage.json().positioning,
+    parentItem.reason.positioning,
+  );
+  assert.equal(
+    (
+      await app.inject(
+        route.replace(encodeURIComponent(polyMarketId), polyMarketId),
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (await app.inject(route.replace("&side=NO", ""))).statusCode,
+    200,
+  );
+  await pool.query(
+    'UPDATE unified_markets SET metadata=metadata||\'{"umaResolutionStatus":"proposed"}\'::jsonb WHERE id=$1',
+    [polyMarketId],
+  );
+  assert.equal((await app.inject(route)).statusCode, 404);
+  await pool.query(
+    "UPDATE unified_markets SET metadata=metadata-'umaResolutionStatus' WHERE id=$1",
+    [polyMarketId],
+  );
+  assert.equal((await app.inject(route)).statusCode, 200);
+  await store.acquire("smart-money", "restore");
+  await store.publish("smart-money", "restore", smartSnapshot);
+  await store.release("smart-money", "restore");
+  console.log(
+    "[discovery-integration-tests] ok real SQL/Redis Polymarket card-to-traders pagination and resolution safety",
+  );
   // Known siblings need not pass alpha qualification to veto a hedge or offset a sale.
   const sibling = randomUUID();
   await pool.query(
@@ -469,6 +589,12 @@ try {
       [discoveryTestScope.venues, "0", "", asOf],
     ],
     ["cards100", DISCOVERY_MARKET_CARDS_SQL, ["text[]"], [ids]],
+    [
+      "traders-live-card",
+      DISCOVERY_MARKET_CARDS_SQL,
+      ["text[]"],
+      [[polyMarketId]],
+    ],
     ["quotes100", DISCOVERY_MARKET_QUOTES_SQL, ["text[]"], [ids]],
     ["cards-empty", DISCOVERY_MARKET_CARDS_SQL, ["text[]"], [[]]],
     [

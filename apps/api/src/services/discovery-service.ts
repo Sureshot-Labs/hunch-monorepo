@@ -314,7 +314,9 @@ export class DiscoveryService {
       const liveRows = await this.builder.marketCards(
         [marketId],
         scope,
-        true,
+        // Identity/resolution validation needs protocol metadata omitted by
+        // the quote-only projection. This is still a single-market lookup.
+        false,
         "read",
       );
       const live = liveRows
