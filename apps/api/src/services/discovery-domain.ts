@@ -6,7 +6,9 @@ import type {
   DiscoveryResearch,
   DiscoverySection,
   DiscoveryTrader,
+  DiscoveryParticipant,
 } from "../schemas/discovery.js";
+import type { DiscoveryEstimateInputs } from "./discovery-estimate.js";
 import { buildSocialInstrument } from "./social-instrument.js";
 import { publicHunchAcceptingOrders } from "./hunch-market-availability.js";
 import { publicHunchPricePresentation } from "./hunch-price-presentation.js";
@@ -45,14 +47,17 @@ export type DiscoverySnapshot = {
   warnings: string[];
   lifecycleRevision: string;
   items: DiscoveryItem[];
+  estimateInputs?: Record<string, DiscoveryEstimateInputs>;
+  smartParticipants?: Record<string, DiscoveryParticipant[]>;
 };
 export class DiscoveryError extends Error {
   constructor(
     readonly code:
       | "discovery_unavailable"
       | "discovery_cursor_expired"
-      | "discovery_invalid_cursor",
-    readonly statusCode: 400 | 409 | 503,
+      | "discovery_invalid_cursor"
+      | "discovery_market_not_found",
+    readonly statusCode: 400 | 404 | 409 | 503,
   ) {
     super(code);
   }
@@ -485,6 +490,7 @@ export type SmartSelection = {
   venue: string;
   side: "YES" | "NO";
   reason: Extract<DiscoveryItem["reason"], { kind: "smart-money" }>;
+  participants?: DiscoveryParticipant[];
 };
 export function smartWalletFromRow(row: RawDiscoveryRow): SmartWallet | null {
   const pnl = decimal(row.metrics_pnl_30d),
@@ -526,7 +532,16 @@ export function aggregateSmartMoney(
     side: string;
   }) => [p.walletId, p.venue, p.marketId, p.side].join("|");
   const current = new Map(positions.map((p) => [key(p), p]));
-  const ownerHoldings = new Map<string, { shares: string; value: string }>();
+  const ownerHoldings = new Map<
+    string,
+    {
+      shares: string;
+      value: string;
+      wallets: Set<string>;
+      oldest: string;
+      latest: string;
+    }
+  >();
   for (const position of positions) {
     const wallet = identity.get(position.walletId);
     if (wallet && cmp(position.shares, "0") > 0) {
@@ -539,10 +554,22 @@ export function aggregateSmartMoney(
       const previous = ownerHoldings.get(ownerKey) ?? {
         shares: "0",
         value: "0",
+        wallets: new Set<string>(),
+        oldest: position.snapshotAt,
+        latest: position.snapshotAt,
       };
       ownerHoldings.set(ownerKey, {
         shares: add(previous.shares, position.shares),
         value: add(previous.value, position.valueUsd),
+        wallets: new Set([...previous.wallets, position.walletId]),
+        oldest:
+          previous.oldest < position.snapshotAt
+            ? previous.oldest
+            : position.snapshotAt,
+        latest:
+          previous.latest > position.snapshotAt
+            ? previous.latest
+            : position.snapshotAt,
       });
     }
   }
@@ -555,6 +582,7 @@ export function aggregateSmartMoney(
       value: string;
       at: string;
       wallet: SmartWallet;
+      participant: DiscoveryParticipant;
     }
   >();
   const ownerChanges = new Map<
@@ -641,7 +669,25 @@ export function aggregateSmartMoney(
         ),
         holding.shares,
       ) ?? "0";
-    if (cmp(value, "100") >= 0) owners.set(ownerKey, { ...change, value });
+    if (cmp(value, "100") >= 0)
+      owners.set(ownerKey, {
+        ...change,
+        value,
+        participant: {
+          groupId: createHash("sha256")
+            .update(ownerKey)
+            .digest("hex")
+            .slice(0, 32),
+          side: change.side,
+          walletCount: holding.wallets.size,
+          positionValueUsd: holding.value,
+          observedIncreaseValueUsd: value,
+          oldestSnapshotAt: holding.oldest,
+          latestSnapshotAt: holding.latest,
+          observedAt: change.at,
+          representative: change.wallet.trader,
+        },
+      });
   }
   const grouped = new Map<string, SmartSelection>();
   for (const owner of owners.values()) {
@@ -650,6 +696,7 @@ export function aggregateSmartMoney(
       marketId: owner.marketId,
       venue: owner.venue,
       side: owner.side,
+      participants: [],
       reason: {
         kind: "smart-money" as const,
         evidenceBasis: "observed_snapshot_increase" as const,
@@ -669,6 +716,7 @@ export function aggregateSmartMoney(
     );
     if (owner.at > group.reason.observedAt) group.reason.observedAt = owner.at;
     group.reason.traders.push(owner.wallet.trader);
+    (group.participants ??= []).push(owner.participant);
     grouped.set(groupKey, group);
   }
   for (const group of grouped.values()) {
@@ -679,11 +727,63 @@ export function aggregateSmartMoney(
     );
     group.reason.oppositeOwnerGroups = opposite?.reason.ownerGroups ?? 0;
     group.reason.opposingViews = group.reason.oppositeOwnerGroups > 0;
+    const selected = group.participants ?? [],
+      other = opposite?.participants ?? [];
+    const sideTotals = (
+      side: "YES" | "NO",
+      members: DiscoveryParticipant[],
+    ) => ({
+      side,
+      ownerGroups: members.length,
+      walletCount: members.reduce((sum, p) => sum + p.walletCount, 0),
+      positionValueUsd: members.reduce(
+        (sum, p) => add(sum, p.positionValueUsd),
+        "0",
+      ),
+      observedIncreaseValueUsd: members.reduce(
+        (sum, p) => add(sum, p.observedIncreaseValueUsd),
+        "0",
+      ),
+    });
+    const a = sideTotals(group.side, selected),
+      b = sideTotals(group.side === "YES" ? "NO" : "YES", other);
+    const all = [...selected, ...other];
+    group.reason.positioning = {
+      selected: a,
+      opposite: b,
+      selectedIncreaseShare: div(
+        a.observedIncreaseValueUsd,
+        add(a.observedIncreaseValueUsd, b.observedIncreaseValueUsd),
+      ),
+      windowHours: 24,
+      oldestSnapshotAt: all.map((p) => p.oldestSnapshotAt).sort()[0] ?? null,
+      latestSnapshotAt:
+        all
+          .map((p) => p.latestSnapshotAt)
+          .sort()
+          .at(-1) ?? null,
+      basis: "qualified_owner_groups_with_retained_snapshot_increase",
+    };
     group.reason.traders.sort(
       (a, b) =>
         -cmp(a.pnl30dUsd, b.pnl30dUsd) || a.walletId.localeCompare(b.walletId),
     );
     group.reason.traders = group.reason.traders.slice(0, 3);
   }
-  return [...grouped.values()].filter((g) => g.reason.ownerGroups >= 2);
+  return [...grouped.values()]
+    .filter((g) => g.reason.ownerGroups >= 2)
+    .map((g) => ({
+      ...g,
+      participants: [
+        ...(g.participants ?? []),
+        ...(grouped.get(
+          [g.venue, g.marketId, g.side === "YES" ? "NO" : "YES"].join("|"),
+        )?.participants ?? []),
+      ].sort(
+        (a, b) =>
+          Number(b.side === g.side) - Number(a.side === g.side) ||
+          -cmp(a.observedIncreaseValueUsd, b.observedIncreaseValueUsd) ||
+          a.groupId.localeCompare(b.groupId),
+      ),
+    }));
 }

@@ -5,6 +5,8 @@ import {
   type DiscoveryQuery,
   type DiscoveryResponse,
   type DiscoverySection,
+  type DiscoveryTradersQuery,
+  type DiscoveryTradersResponse,
 } from "../schemas/discovery.js";
 import { DiscoveryBuilder, type DiscoveryScope } from "./discovery-builder.js";
 import { DiscoveryStore } from "./discovery-store.js";
@@ -24,6 +26,10 @@ import {
   sameInstrument,
   type DiscoverySnapshot,
 } from "./discovery-domain.js";
+import {
+  applyDiscoveryEstimate,
+  enrichDiscoveryResearch,
+} from "./discovery-estimate.js";
 
 export class DiscoveryService {
   private running = new Map<DiscoverySection, Promise<void>>();
@@ -274,6 +280,91 @@ export class DiscoveryService {
       throw new DiscoveryError("discovery_unavailable", 503);
     }
   }
+  async readTraders(
+    marketId: string,
+    query: DiscoveryTradersQuery,
+  ): Promise<DiscoveryTradersResponse> {
+    const hash = discoveryFilterHash("smart-money", {
+      limit: query.limit,
+      withResearch: "false",
+      q: JSON.stringify(["traders", marketId, query.side ?? null]),
+    });
+    const cursor = decodeDiscoveryCursor(query.cursor, "smart-money", hash);
+    if (
+      cursor &&
+      (cursor.snapshotId !== query.snapshotId || cursor.member !== 0)
+    )
+      throw new DiscoveryError("discovery_invalid_cursor", 400);
+    try {
+      const store = await this.store(),
+        snapshot = await store.snapshot(query.snapshotId),
+        now = this.clock();
+      if (!snapshot || now - Date.parse(snapshot.generatedAt) >= 900000)
+        throw new DiscoveryError("discovery_cursor_expired", 409);
+      if (snapshot.version !== 1 || snapshot.section !== "smart-money")
+        throw new DiscoveryError("discovery_invalid_cursor", 400);
+      const scope = await this.scope();
+      const item = snapshot.items.find(
+        (i) =>
+          i.market.marketId === marketId &&
+          (!query.side || i.selection.side === query.side),
+      );
+      if (!item || !scope.venues.includes(item.market.venue))
+        throw new DiscoveryError("discovery_market_not_found", 404);
+      const liveRows = await this.builder.marketCards(
+        [marketId],
+        scope,
+        true,
+        "read",
+      );
+      const live = liveRows
+        .map((row) =>
+          marketCard(row, now, this.builder.limitlessPositionContract),
+        )
+        .find((card) => card?.selection.side === item.selection.side);
+      if (
+        !live ||
+        !sameInstrument(item.selection.instrument, live.selection.instrument)
+      )
+        throw new DiscoveryError("discovery_market_not_found", 404);
+      const members = snapshot.smartParticipants?.[item.id];
+      if (
+        item.reason.kind !== "smart-money" ||
+        !item.reason.positioning ||
+        !members
+      ) {
+        void this.refresh("smart-money");
+        throw new DiscoveryError("discovery_unavailable", 503);
+      }
+      const position = cursor?.position ?? 0;
+      if (position > members.length)
+        throw new DiscoveryError("discovery_invalid_cursor", 400);
+      const items = members.slice(position, position + query.limit),
+        next = position + items.length;
+      return {
+        snapshotId: snapshot.id,
+        marketId,
+        selectedSide: item.selection.side,
+        generatedAt: snapshot.generatedAt,
+        positioning: item.reason.positioning,
+        items,
+        nextCursor:
+          next < members.length
+            ? encodeDiscoveryCursor({
+                v: 1,
+                section: "smart-money",
+                hash,
+                snapshotId: snapshot.id,
+                position: next,
+                member: 0,
+              })
+            : null,
+      };
+    } catch (error) {
+      if (error instanceof DiscoveryError) throw error;
+      throw new DiscoveryError("discovery_unavailable", 503);
+    }
+  }
   private async hydrate(
     batch: DiscoveryItem[],
     query: DiscoveryQuery,
@@ -288,7 +379,13 @@ export class DiscoveryService {
       new Date(now).toISOString(),
     );
     const researchById = new Map(
-      researchRows.map((row) => [String(row.source_id), researchFromRow(row)]),
+      researchRows.map((row) => {
+        const research = researchFromRow(row);
+        return [
+          String(row.source_id),
+          research ? enrichDiscoveryResearch(research, row, now) : null,
+        ] as const;
+      }),
     );
     const cards = new Map(
       rows.map((row) => [
@@ -338,6 +435,11 @@ export class DiscoveryService {
             midpoint: null,
             asOf: card.quote.asOf,
           };
+        result = applyDiscoveryEstimate(
+          result,
+          snapshot.estimateInputs?.[research.noteId],
+          now,
+        );
       } else {
         if (
           !sameInstrument(

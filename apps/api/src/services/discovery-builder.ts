@@ -3,6 +3,7 @@ import type {
   DiscoveryItem,
   DiscoveryResearch,
   DiscoverySection,
+  DiscoveryParticipant,
 } from "../schemas/discovery.js";
 import {
   DiscoveryRepository,
@@ -34,6 +35,12 @@ import {
   type SmartSelection,
   type SmartWallet,
 } from "./discovery-domain.js";
+import {
+  applyDiscoveryEstimate,
+  enrichDiscoveryResearch,
+  estimateInputsFromRow,
+  type DiscoveryEstimateInputs,
+} from "./discovery-estimate.js";
 
 export type DiscoveryScope = {
   venues: string[];
@@ -79,6 +86,8 @@ export type DiscoveryBuildProgress = {
   changes: SmartChange[];
   smart: SmartSelection[];
   items: DiscoveryItem[];
+  estimateInputs?: Record<string, DiscoveryEstimateInputs>;
+  smartParticipants?: Record<string, DiscoveryParticipant[]>;
   projectionRefreshedAt: string | null;
   ownerLookups?: { key: string; address: string; chain: string }[];
 };
@@ -469,9 +478,27 @@ export class DiscoveryBuilder {
       progress.position + 100,
     );
     const rows = await this.marketCards(ids, scope);
-    const latest = publicResearch(
-      await this.repo.currentResearch(ids, new Date(now).toISOString()),
+    const latestRows = await this.repo.currentResearch(
+      ids,
+      new Date(now).toISOString(),
     );
+    const latest = publicResearch(latestRows);
+    for (const row of latestRows) {
+      const research = latest.get(String(row.source_id));
+      if (research)
+        latest.set(
+          String(row.source_id),
+          enrichDiscoveryResearch(research, row, now),
+        );
+    }
+    if (progress.section === "hidden-gems") {
+      progress.estimateInputs ??= {};
+      for (const row of await this.repo.estimateInputs(
+        [...latest.values()].map((r) => r.noteId),
+      ))
+        progress.estimateInputs[String(row.note_id)] =
+          estimateInputsFromRow(row);
+    }
     const smart = new Map(
       progress.smart.map((s) => [`${s.marketId}:${s.side}`, s]),
     );
@@ -502,13 +529,17 @@ export class DiscoveryBuilder {
         const selected = smart.get(
           `${card.market.marketId}:${card.selection.side}`,
         );
-        if (selected && card.copyAvailable)
+        if (selected && card.copyAvailable) {
+          progress.smartParticipants ??= {};
+          if (selected.participants)
+            progress.smartParticipants[id] = selected.participants;
           progress.items.push({
             ...card,
             id,
             research,
             reason: selected.reason,
           });
+        }
       } else {
         const selected = noteByMarket.get(card.market.marketId);
         if (
@@ -517,19 +548,25 @@ export class DiscoveryBuilder {
           research.side !== card.selection.side
         )
           continue;
-        progress.items.push({
-          ...card,
-          id,
-          research,
-          copyAvailable:
-            card.copyAvailable &&
-            sameInstrument(research.instrument, card.selection.instrument),
-          reason: {
-            kind: "hidden-gems",
-            strength: research.strength,
-            basis: "public_approved_research_not_proven_mispricing",
-          },
-        });
+        progress.items.push(
+          applyDiscoveryEstimate(
+            {
+              ...card,
+              id,
+              research,
+              copyAvailable:
+                card.copyAvailable &&
+                sameInstrument(research.instrument, card.selection.instrument),
+              reason: {
+                kind: "hidden-gems",
+                strength: research.strength,
+                basis: "public_approved_research_not_proven_mispricing",
+              },
+            },
+            progress.estimateInputs?.[research.noteId],
+            now,
+          ),
+        );
       }
     }
     progress.position += ids.length;
@@ -550,6 +587,8 @@ export class DiscoveryBuilder {
         projectionRefreshedAt: progress.projectionRefreshedAt,
         lifecycleRevision: progress.lifecycleRevision,
         items: progress.items,
+        estimateInputs: progress.estimateInputs,
+        smartParticipants: progress.smartParticipants,
         warnings:
           progress.section === "quick-wins"
             ? [
