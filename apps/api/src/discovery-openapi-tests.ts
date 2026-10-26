@@ -22,6 +22,9 @@ await app.register(
     read: async () => {
       throw Error("contract-only");
     },
+    readTraders: async () => {
+      throw Error("contract-only");
+    },
   }),
 );
 await app.ready();
@@ -64,6 +67,14 @@ try {
         `${key} OpenAPI must match executable Zod schema`,
       );
   }
+  const tradersKey = "/discovery/smart-money/{marketId}/traders";
+  const tradersOperation = generated.paths?.[tradersKey];
+  assert.ok(tradersOperation);
+  assert.match(JSON.stringify(tradersOperation), /observedIncreaseValueUsd/);
+  if (process.argv.includes("--write"))
+    committed.paths[tradersKey] = tradersOperation;
+  if (process.argv.includes("--compare"))
+    assert.deepEqual(committed.paths[tradersKey], tradersOperation);
   if (process.argv.includes("--write"))
     writeFileSync(path, `${JSON.stringify(committed, null, 2)}\n`);
   console.log(

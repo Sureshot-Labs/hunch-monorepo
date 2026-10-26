@@ -22,6 +22,7 @@ import {
   DISCOVERY_SMART_INPUTS_SQL,
   DISCOVERY_OWNER_FAMILY_SQL,
   DISCOVERY_OWNER_METADATA_SQL,
+  DISCOVERY_ESTIMATE_INPUTS_SQL,
 } from "./repos/discovery.js";
 import { DiscoveryBuilder } from "./services/discovery-builder.js";
 import { DiscoveryStore } from "./services/discovery-store.js";
@@ -114,6 +115,125 @@ try {
   ]);
   assert.deepEqual(fallback[0].changes, inputs[0].changes);
   assert.equal((fallback[0].positions as unknown[]).length, 4);
+  const noteId = "10000000-0000-4000-8000-000000000001";
+  const estimated = await repo.estimateInputs([noteId]);
+  assert.equal(estimated[0].position_shares, "500");
+  assert.equal(estimated[0].actual_win_rate, "0.6");
+  // A historical holding is not resurrected from an earlier batch or old asset.
+  await pool.query(
+    "update wallet_position_snapshots set metadata='{}' where wallet_id=$1",
+    [walletIds[0]],
+  );
+  assert.equal((await repo.estimateInputs([noteId]))[0].position_shares, null);
+  for (const metadata of [
+    { tokenId: "YES1" },
+    { tokenId: "YES1", positionContract: "0xold" },
+  ]) {
+    await pool.query(
+      "update wallet_position_snapshots set metadata=$2::jsonb where wallet_id=$1",
+      [walletIds[0], JSON.stringify(metadata)],
+    );
+    assert.equal(
+      (await repo.estimateInputs([noteId]))[0].position_shares,
+      null,
+      "Limitless requires the actual current position contract, not just a token id",
+    );
+  }
+  await pool.query(
+    "update wallet_position_snapshots set metadata=jsonb_build_object('tokenId','YES1','positionContract','0xctf') where wallet_id=$1",
+    [walletIds[0]],
+  );
+  await pool.query(
+    "insert into wallet_position_snapshots values ($1,'limitless','other:1','YES',1,1,'2026-10-25T12:01Z','{}')",
+    [walletIds[0]],
+  );
+  assert.equal((await repo.estimateInputs([noteId]))[0].position_shares, null);
+  await pool.query(
+    "delete from wallet_position_snapshots where wallet_id=$1 and market_id='other:1'",
+    [walletIds[0]],
+  );
+  await pool.query(
+    "update ai_notes set model_meta=jsonb_build_object('primary_holder_credentials',jsonb_build_object('primaryHolder',jsonb_build_object('walletId',$1::text))) where id=$2",
+    [walletIds[1], noteId],
+  );
+  assert.equal(
+    (await repo.estimateInputs([noteId]))[0].wallet_id,
+    null,
+    "explicit representative is never silently replaced by a better wallet",
+  );
+  await pool.query("update ai_notes set model_meta='{}' where id=$1", [noteId]);
+  const polyNote = randomUUID();
+  await pool.query(
+    'insert into ai_notes select $1,\'polymarket:probe\',source_kind,producer_type,note_type,status,title,description,created_at,lineage,metrics||\'{"socialInstrumentV1":{"tokenId":"new-asset","generation":"137:0xcurrent:v2"}}\'::jsonb,model_meta from ai_notes where id=$2',
+    [polyNote, noteId],
+  );
+  await pool.query(
+    "insert into ai_note_targets values ($1,'wallet',$2,10,'{\"side\":\"YES\"}')",
+    [polyNote, walletIds[0]],
+  );
+  await pool.query(
+    "insert into polymarket_asset_bindings values (137,'0xcurrent','new-asset','polymarket:probe','v2',0)",
+  );
+  await pool.query(
+    "insert into wallet_position_snapshots values ($1,'polymarket','polymarket:probe','YES',500,250,$2,'{\"tokenId\":\"old-asset\"}')",
+    [walletIds[0], asOf],
+  );
+  assert.equal(
+    (await repo.estimateInputs([polyNote]))[0].position_shares,
+    null,
+  );
+  await pool.query(
+    "update wallet_position_snapshots set metadata='{\"tokenId\":\"new-asset\"}' where market_id='polymarket:probe'",
+  );
+  assert.equal(
+    (await repo.estimateInputs([polyNote]))[0].position_shares,
+    "500",
+    "unambiguous indexed contract recovers a legacy token-only snapshot",
+  );
+  await pool.query(
+    'update wallet_position_snapshots set metadata=\'{"tokenId":"new-asset","positionContract":"0xold"}\' where market_id=\'polymarket:probe\'',
+  );
+  assert.equal(
+    (await repo.estimateInputs([polyNote]))[0].position_shares,
+    null,
+    "an explicit mismatching legacy contract cannot be overridden by a binding",
+  );
+  await pool.query(
+    "update wallet_position_snapshots set metadata='{\"tokenId\":\"new-asset\"}' where market_id='polymarket:probe'",
+  );
+  await pool.query(
+    "insert into polymarket_asset_bindings values (137,'0xold','new-asset','polymarket:probe','v1',0)",
+  );
+  assert.equal(
+    (await repo.estimateInputs([polyNote]))[0].position_shares,
+    null,
+    "ambiguous contract cannot confirm current generation",
+  );
+  await pool.query(
+    'update wallet_position_snapshots set metadata=\'{"tokenId":"new-asset","positionContract":"0xcurrent"}\' where market_id=\'polymarket:probe\'',
+  );
+  assert.equal(
+    (await repo.estimateInputs([polyNote]))[0].position_shares,
+    "500",
+    "explicit matching flat contract is authoritative despite an older binding",
+  );
+  await pool.query(
+    'update wallet_position_snapshots set metadata=\'{"assets":[{"tokenId":"new-asset","positionContract":"0xcurrent","shares":500}]}\' where market_id=\'polymarket:probe\'',
+  );
+  assert.equal(
+    (await repo.estimateInputs([polyNote]))[0].position_shares,
+    "500",
+    "explicit current asset recovers despite an older same-id binding",
+  );
+  await pool.query(
+    'update wallet_position_snapshots set metadata=\'{"assets":[{"tokenId":"new-asset","positionContract":"0xold","shares":500}]}\' where market_id=\'polymarket:probe\'',
+  );
+  assert.equal(
+    (await repo.estimateInputs([polyNote]))[0].position_shares,
+    null,
+  );
+  await pool.query("delete from ai_note_targets where note_id=$1", [polyNote]);
+  await pool.query("delete from ai_notes where id=$1", [polyNote]);
   // PostgreSQL deliberately permits writes to temporary tables in READ ONLY transactions.
   await assert.rejects(
     () =>
@@ -151,6 +271,17 @@ try {
     assert.equal(money.items[0].reason.ownerGroups, 4);
   await service.refresh("hidden-gems");
   assert.equal((await store.current("hidden-gems"))?.items.length, 1);
+  const liveGem = (await app.inject("/discovery/hidden-gems")).json().items[0];
+  assert.equal(liveGem.estimate.status, "available");
+  assert.equal(liveGem.estimate.calibrated, false);
+  const smartSnapshot = await store.current("smart-money");
+  assert.ok(smartSnapshot);
+  const traderPage = await app.inject(
+    `/discovery/smart-money/limitless:1/traders?snapshotId=${smartSnapshot.id}&limit=2`,
+  );
+  assert.equal(traderPage.statusCode, 200);
+  assert.equal(traderPage.json().items.length, 2);
+  assert.equal(traderPage.json().positioning.selected.ownerGroups, 4);
   // Known siblings need not pass alpha qualification to veto a hedge or offset a sale.
   const sibling = randomUUID();
   await pool.query(
@@ -238,7 +369,93 @@ try {
   await pool.query(
     "analyze wallet_position_snapshots; analyze unified_market_tokens; analyze unified_markets; analyze ai_notes; analyze wallet_activity_events;",
   );
+  // 50 distinct public notes, with existing indexed subjects and one million old position rows.
+  await pool.query("update ai_notes set status='active'");
+  const enrichmentIds = [noteId];
+  for (let i = 1; i < 50; i++) {
+    const id = randomUUID();
+    enrichmentIds.push(id);
+    await pool.query(
+      "insert into ai_notes select $1,source_id,source_kind,producer_type,note_type,status,title,description,created_at,lineage,metrics,model_meta from ai_notes where id=$2",
+      [id, noteId],
+    );
+    await pool.query(
+      "insert into ai_note_targets values ($1,'wallet',$2,10,'{\"side\":\"YES\"}')",
+      [id, walletIds[i % walletIds.length]],
+    );
+    const marketId = `limitless:${i + 1}`,
+      token = `YES${i + 1}`;
+    await pool.query(
+      "update ai_notes set source_id=$2, metrics=jsonb_set(metrics,'{socialInstrumentV1}',jsonb_build_object('marketId',$2::text,'venue','limitless','tokenId',$3::text,'outcome','YES','generation','8453:0xctf:'||$3::text,'expiry','2026-10-25T13:00:00.000Z')) where id=$1",
+      [id, marketId, token],
+    );
+    await pool.query(
+      "insert into wallet_position_snapshots values ($1,'limitless',$2,'YES',500,450,$3,jsonb_build_object('tokenId',$4::text,'positionContract','0xctf'))",
+      [walletIds[i % walletIds.length], marketId, asOf, token],
+    );
+  }
+  await pool.query(
+    "analyze ai_note_targets; analyze ai_notes; analyze wallet_intel_selector_snapshot",
+  );
+  let gemProgress = await builder.start(
+    "hidden-gems",
+    discoveryTestScope,
+    null,
+  );
+  for (let step = 0; step < 10; step++) {
+    const built = await builder.step(gemProgress, discoveryTestScope);
+    gemProgress = built.progress;
+    if (built.snapshot) {
+      await store.acquire("hidden-gems", "perf");
+      await store.publish("hidden-gems", "perf", built.snapshot);
+      await store.release("hidden-gems", "perf");
+      break;
+    }
+  }
+  for (const limit of [20, 50]) {
+    const times: number[] = [];
+    for (let wave = 0; wave < 4; wave++)
+      await Promise.all(
+        Array.from({ length: 8 }, async () => {
+          const start = performance.now(),
+            response = await app.inject(
+              `/discovery/hidden-gems?limit=${limit}`,
+            );
+          assert.equal(response.statusCode, 200);
+          assert.equal(response.json().items.length, limit);
+          assert.ok(
+            response
+              .json()
+              .items.every(
+                (i: { estimate: { status: string } }) =>
+                  i.estimate.status === "available",
+              ),
+          );
+          times.push(performance.now() - start);
+        }),
+      );
+    times.sort((a, b) => a - b);
+    const p95 = times[Math.ceil(times.length * 0.95) - 1];
+    assert.ok(p95 < (limit === 20 ? 300 : 700));
+    console.log(
+      JSON.stringify({
+        section: "hidden-gems",
+        limit,
+        concurrency: 8,
+        samples: times.length,
+        p95Ms: p95,
+      }),
+    );
+  }
   const probes: [string, string, string[], unknown[]][] = [
+    [
+      "estimate20",
+      DISCOVERY_ESTIMATE_INPUTS_SQL,
+      ["uuid[]"],
+      [enrichmentIds.slice(0, 20)],
+    ],
+    ["estimate50", DISCOVERY_ESTIMATE_INPUTS_SQL, ["uuid[]"], [enrichmentIds]],
+    ["estimate-empty", DISCOVERY_ESTIMATE_INPUTS_SQL, ["uuid[]"], [[]]],
     [
       "pool",
       DISCOVERY_QUICK_POOL_SQL,
@@ -306,11 +523,38 @@ try {
           `explain(analyze,buffers,timing off,format json) execute ${name}(${params.map(literal).join(",")})`,
         );
         const plan = result.rows[0]["QUERY PLAN"][0];
+        const nodes: Record<string, unknown>[] = [];
+        const walk = (node: Record<string, unknown>) => {
+          nodes.push(node);
+          for (const child of (node.Plans ?? []) as Record<string, unknown>[])
+            walk(child);
+        };
+        walk(plan.Plan);
+        if (label.startsWith("estimate"))
+          assert.ok(
+            !nodes.some(
+              (n) =>
+                n["Node Type"] === "Seq Scan" &&
+                n["Relation Name"] === "wallet_position_snapshots",
+            ),
+            "no full position history scan",
+          );
         plans.push({
           label,
           generic,
           executionMs: plan["Execution Time"],
           planningMs: plan["Planning Time"],
+          sharedHits: plan.Plan["Shared Hit Blocks"],
+          localHits: plan.Plan["Local Hit Blocks"],
+          rowsScanned: nodes.reduce(
+            (sum, n) =>
+              sum +
+              Number(n["Actual Rows"] ?? 0) * Number(n["Actual Loops"] ?? 0),
+            0,
+          ),
+          indexes: [
+            ...new Set(nodes.map((n) => n["Index Name"]).filter(Boolean)),
+          ],
         });
         await client.query(`deallocate ${name}`);
       } finally {

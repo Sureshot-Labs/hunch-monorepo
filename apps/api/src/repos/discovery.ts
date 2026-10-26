@@ -171,6 +171,66 @@ export async function discoveryReadOnly<T>(
     client.release();
   }
 }
+// Background-only, bounded note batches. Read the latest complete wallet batch, not
+// the last time the particular market appeared (which would resurrect closed positions).
+export const DISCOVERY_ESTIMATE_INPUTS_SQL = `SELECT n.id AS note_id,
+ representative.target_id AS wallet_id, representative.holder_side,
+ stats.metrics_resolved_actual_win_rate_30d::text AS actual_win_rate,
+ stats.metrics_resolved_expected_win_rate_30d::text AS expected_win_rate,
+ stats.metrics_resolved_edge_sample_count_30d AS sample_size, stats.metrics_as_of,
+ latest_batch.snapshot_at AS position_as_of, holding.shares::text AS position_shares,
+ CASE WHEN n.lineage->>'side'='YES' THEN n.metrics#>>'{sides,YES,sharpUsd}' ELSE n.metrics#>>'{sides,NO,sharpUsd}' END AS selected_support_usd,
+ CASE WHEN n.lineage->>'side'='YES' THEN n.metrics#>>'{sides,NO,sharpUsd}' ELSE n.metrics#>>'{sides,YES,sharpUsd}' END AS opposite_support_usd
+ FROM unnest($1::uuid[]) requested(note_id)
+ JOIN ai_notes n ON n.id=requested.note_id
+ LEFT JOIN LATERAL (
+   SELECT t.target_id, t.target_meta->>'side' AS holder_side
+   FROM ai_note_targets t WHERE t.note_id=n.id AND t.target_kind='wallet'
+   AND t.target_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+   AND (nullif(n.model_meta#>>'{primary_holder_credentials,primaryHolder,walletId}','') IS NULL
+     OR t.target_id=n.model_meta#>>'{primary_holder_credentials,primaryHolder,walletId}')
+   ORDER BY t.target_rank,t.target_id LIMIT 1
+ ) representative ON true
+ LEFT JOIN wallet_intel_selector_snapshot stats ON stats.wallet_id=representative.target_id::uuid
+ LEFT JOIN LATERAL (
+   SELECT ws.snapshot_at FROM wallet_position_snapshots ws
+   WHERE ws.wallet_id=representative.target_id::uuid AND ws.venue=split_part(n.source_id,':',1)
+   ORDER BY ws.snapshot_at DESC LIMIT 1
+ ) latest_batch ON true
+ LEFT JOIN LATERAL (
+   SELECT sum(ws.shares) AS shares FROM wallet_position_snapshots ws
+   WHERE ws.wallet_id=representative.target_id::uuid AND ws.venue=split_part(n.source_id,':',1)
+   AND ws.snapshot_at=latest_batch.snapshot_at AND ws.market_id=n.source_id
+   AND ws.outcome_side=n.lineage->>'side'
+   AND (
+     EXISTS (
+       SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ws.metadata->'assets')='array' THEN ws.metadata->'assets' ELSE '[]'::jsonb END) asset_entry
+       WHERE asset_entry->>'tokenId'=n.metrics#>>'{socialInstrumentV1,tokenId}'
+       AND (split_part(n.source_id,':',1)='kalshi' OR lower(asset_entry->>'positionContract')=split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',2))
+       AND CASE WHEN asset_entry->>'shares' ~ '^[0-9]+(\\.[0-9]+)?$' THEN (asset_entry->>'shares')::numeric>0 ELSE false END
+     ) OR (
+       NOT (coalesce(ws.metadata,'{}'::jsonb) ? 'assets')
+       AND ws.metadata->>'tokenId'=n.metrics#>>'{socialInstrumentV1,tokenId}'
+       AND (split_part(n.source_id,':',1)='kalshi'
+         OR lower(ws.metadata->>'positionContract')=split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',2)
+         OR (split_part(n.source_id,':',1)='polymarket' AND ws.metadata->>'positionContract' IS NULL))
+       AND (split_part(n.source_id,':',1)<>'polymarket' OR ws.metadata->>'positionContract' IS NOT NULL OR (
+         EXISTS (SELECT 1 FROM polymarket_asset_bindings binding_row
+           WHERE binding_row.asset_id=ws.metadata->>'tokenId' AND binding_row.chain_id=137
+           AND binding_row.market_id=n.source_id
+           AND binding_row.outcome_index=CASE n.lineage->>'side' WHEN 'YES' THEN 0 ELSE 1 END
+           AND binding_row.position_contract=split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',2)
+           AND binding_row.protocol_version=split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',3))
+         AND NOT EXISTS (SELECT 1 FROM polymarket_asset_bindings conflicting_binding
+           WHERE conflicting_binding.asset_id=ws.metadata->>'tokenId' AND conflicting_binding.chain_id=137
+           AND (conflicting_binding.position_contract<>split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',2)
+             OR conflicting_binding.protocol_version<>split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',3)))
+       ))
+     )
+   )
+ ) holding ON true
+ WHERE ${DISCOVERY_PUBLIC_NOTES_SQL} AND n.status='active' AND n.note_type='signal'`;
+
 export class DiscoveryRepository {
   constructor(readonly pool: Pick<Pool, "connect">) {}
   query(
@@ -198,6 +258,12 @@ export class DiscoveryRepository {
     if (ids.length > 100) throw Error("discovery_batch_too_large");
     return ids.length
       ? this.query(DISCOVERY_RESEARCH_CURRENT_SQL, [ids, now], 1500)
+      : Promise.resolve([]);
+  }
+  estimateInputs(noteIds: string[]) {
+    if (noteIds.length > 100) throw Error("discovery_batch_too_large");
+    return noteIds.length
+      ? this.query(DISCOVERY_ESTIMATE_INPUTS_SQL, [noteIds])
       : Promise.resolve([]);
   }
 }

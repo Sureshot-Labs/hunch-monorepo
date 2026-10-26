@@ -36,3 +36,12 @@ INSERT INTO wallet_activity_events SELECT id,'limitless','limitless:1','YES',100
 INSERT INTO wallet_activity_events SELECT id,'limitless','limitless:1','YES',10000,'BUY','2026-10-25T11:30Z','trade','trade' FROM wallets;
 INSERT INTO wallet_position_exposure SELECT id,1,jsonb_build_array(jsonb_build_object('venue','limitless','marketId','limitless:1','outcomeSide','YES','shares',500,'sizeUsd',450,'snapshotAt','2026-10-25T12:00:00Z')),'2026-10-25T12:00Z' FROM wallets WHERE address LIKE '%1';
 INSERT INTO ai_notes VALUES ('10000000-0000-4000-8000-000000000001','limitless:1','market','holder_research','signal','active','Research','Public thesis','2026-10-25T11:00Z','{"side":"YES"}','{"publicationDecisionV1":{"status":"PUBLISH","authority":"holder_research_quality_gate"},"hunchStrengthV1":{"grade":"strong"}}','{}');
+
+CREATE TEMP TABLE ai_note_targets(note_id uuid,target_kind text,target_id text,target_rank integer,target_meta jsonb,PRIMARY KEY(note_id,target_kind,target_id));
+CREATE TEMP TABLE polymarket_asset_bindings(chain_id integer,position_contract text,asset_id text,market_id text,protocol_version text,outcome_index integer,PRIMARY KEY(chain_id,position_contract,asset_id));
+CREATE INDEX discovery_test_asset_id ON polymarket_asset_bindings(asset_id);
+ALTER TABLE wallet_intel_selector_snapshot ADD COLUMN metrics_resolved_actual_win_rate_30d numeric DEFAULT 0.6;
+ALTER TABLE wallet_intel_selector_snapshot ADD COLUMN metrics_resolved_expected_win_rate_30d numeric DEFAULT 0.5;
+UPDATE wallet_position_snapshots SET metadata=jsonb_build_object('tokenId','YES1','positionContract','0xctf');
+UPDATE ai_notes SET metrics=metrics||'{"socialInstrumentV1":{"marketId":"limitless:1","venue":"limitless","tokenId":"YES1","outcome":"YES","generation":"8453:0xctf:YES1","expiry":"2026-10-25T13:00:00.000Z"},"sides":{"YES":{"sharpUsd":1000},"NO":{"sharpUsd":0}}}'::jsonb;
+INSERT INTO ai_note_targets VALUES ('10000000-0000-4000-8000-000000000001','wallet','00000000-0000-4000-8000-000000000001',10,'{"side":"YES"}');

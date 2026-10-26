@@ -132,6 +132,7 @@ export class DiscoveryMemoryRedis implements DiscoveryRedis {
 export class DiscoveryFixtureRepository extends DiscoveryRepository {
   batches: string[][] = [];
   research: RawDiscoveryRow[] = [];
+  estimateRows: RawDiscoveryRow[] = [];
   constructor(readonly rows: Map<string, RawDiscoveryRow>) {
     super({
       connect: async () => {
@@ -147,6 +148,11 @@ export class DiscoveryFixtureRepository extends DiscoveryRepository {
   }
   override async currentResearch(ids: string[]) {
     return this.research.filter((row) => ids.includes(String(row.source_id)));
+  }
+  override async estimateInputs(noteIds: string[]) {
+    return this.estimateRows.filter((row) =>
+      noteIds.includes(String(row.note_id)),
+    );
   }
 }
 export function discoveryTestComponents(
