@@ -1,3 +1,7 @@
+import {
+  DEFAULT_JEV_MODEL,
+  jevRequestModel,
+} from "../lib/jev-model-identity.js";
 export type MapSearchFocusQuestion = {
   marketId: string;
   question: string;
@@ -8,7 +12,7 @@ export type MapSearchFocusOptions = {
   questions: string[];
 };
 
-export const MAP_SEARCH_FOCUS_MODEL = "typesafe/jev-1.13-20260917";
+export const MAP_SEARCH_FOCUS_MODEL = DEFAULT_JEV_MODEL;
 export const MAP_SEARCH_FOCUS_RESERVE_USD = 0.02;
 const FOCUS_CALL_RESERVE_USD = MAP_SEARCH_FOCUS_RESERVE_USD / 2;
 const FOCUS_TIMEOUT_MS = 5_000;
@@ -208,7 +212,7 @@ export async function chooseMapSearchFocus(input: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "typesafe/jev-1.13",
+            model: jevRequestModel(MAP_SEARCH_FOCUS_MODEL),
             state: {
               exactContract: {
                 marketId: input.options.marketId,

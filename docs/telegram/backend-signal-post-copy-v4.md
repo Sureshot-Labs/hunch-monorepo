@@ -1,4 +1,83 @@
-# Backend Task: Roll Out Signal Post V11
+# Backend Task: Signal Post Copy
+
+## Current change: activity-first Intel (V12, 2026-10-28)
+
+`signal_bot_copy_v12` uses `intel_activity_v1` for eligible initial and
+research-update posts. Lead with the verified public trader name (or factual
+group), observed holding/activity, complete selected outcome and position value.
+Do not invent a Telegram handle: existing Telegram identity normalization still
+removes the leading `@` from venue names to avoid accidental Telegram mentions.
+
+The LLM V1/V2 public-copy prompts share the same editorial rules. The body explains
+why the observation matters; the V2 adapter no longer prepends a side/price lead
+or truncates that explanation. Rich formatting, position tables, source links and
+existing separate interface actions remain renderer-owned. No CTA belongs in the
+generated headline, summary or caveats.
+
+- Snapshot = holding, not confirmed purchase, continuous holding or profit-taking.
+- Share comparisons can establish observed changes; USD repricing alone cannot.
+- Position USD is marked value, not the amount spent. Telegram dollar-only deltas
+  are explicitly described as changes in observed **position value**.
+- A `selected_side_cluster` delta covers all tracked holders, not just the sharp
+  subset. It must not inherit the sharp count or representative trader name.
+- Historical PnL may include open marks; it is not realized profit or a guarantee.
+- Named outcomes, negative market names and YES/NO identity remain canonical.
+- Do not generate persistence/intent hooks such as “refuses to flip”, “hasn't
+  taken profit”, or “has built a position” from a current holding alone.
+
+The old evidence classification still runs before formatting: `initial_watch_v7`
+continues to suppress weak public initials. Update eligibility, prices, budgets,
+trading controls and delivery deduplication are unchanged. Statistical follow-up
+uses "observed net inflow/outflow", not "bought/sold": its unchanged source combines
+trade and snapshot observations. Its original-signal price is not described as a
+trader's entry, and price/flow correlation is not presented as motive or causation.
+The legacy `estimatedOpenPnlUsd` follow-up field is displayed as **illustrative
+mark change vs signal**, not holder PnL: its calculation uses the original signal
+price, not actual holder cost bases. Observed reductions are not called cash-outs
+or evidence of realized profit. Metric storage and calculations are unchanged.
+Resolution families and legacy standalone renderer callers retain their contracts;
+the V11 description below is historical, not the current
+initial/research editorial policy. Old persisted post bodies are not rewritten.
+
+Validation: focused Node/Bun contract, identity, scope and public-admission tests;
+full workspace checks before handoff. A bounded final-stage paid experiment on
+2026-10-28 used eight calls to `openai/gpt-6-sol` (four fixtures, V1 and V2), costing
+$0.1216739 with no unresolved cost reservation. Six publish outputs named the
+actor and position size without claiming a new purchase. A passed-deadline case
+returned context/skip rather than a forced signal. Two fixtures were reconstructed
+from public posts and two were synthetic regressions: this checks editorial
+behavior, not historical input replay, factual news verification or an end-to-end
+production run. No research search, publication or production mutation occurred.
+
+### Jev compatibility and rollout scope
+
+The same release pins holder preselection, optional holder background, map-search
+focus and map semantic review to `typesafe/jev-1.14-20261014`, requested through
+the Decisions API family `typesafe/jev-1.14`. The strict response-revision checks,
+confidence thresholds, budgets, timeouts and fallback behavior are unchanged.
+The pure API identity helper remains compatible with explicitly saved 1.13 agent
+policies; it does not silently upgrade a user-configured pin.
+
+Production read-only inspection on 2026-10-28 confirmed the agent-theses policy
+already uses 1.14. Six additional local synthetic Decisions calls cost $0.000150612,
+all returned the expected revision and typed answer shapes. The forward/reverse
+search-focus votes agreed. Semantic relocation returned a low-confidence first
+vote, so the existing 0.8 gate correctly made **no move**. Holder preselection and
+background selection returned usable choices. These are compatibility smoke
+checks, not evidence of improved decision accuracy or a full live workflow.
+Combined paid validation cost: $0.121824512 of the authorized $5, no unknown cost.
+
+Market-matching intentionally stays on 1.13 for a separately agreed transition.
+Its model pin forms part of the approval revision: changing it would temporarily
+hide the 591 market and 638 event links observed in production until bounded
+revalidation completes. The user explicitly excluded that transition from this
+release. Historical calibration records are not relabeled, and no matching
+policy, queue, latch or existing approval is modified.
+
+Provider references: [OpenRouter Jev 1.14](https://openrouter.ai/typesafe/jev-1.14)
+and [TypeSafe versioned models](https://docs.typesafe.ai/models).
+
+## Historical V11 baseline
 
 Status: V11 editorial-headline, trader-context, and evidence-aware holding copy implemented locally; live device QA remains
 Priority: P0 before the next public-channel copy rollout

@@ -508,7 +508,7 @@ const UUID_RE =
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v11";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v12";
 export const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -6991,7 +6991,7 @@ function formatSignalBotFollowthroughFlowMetric(value: number): {
 } {
   if (value < 0) {
     return {
-      label: "Net selling",
+      label: "Observed net outflow",
       value: formatCompactUsd(Math.abs(value)),
     };
   }
@@ -7002,7 +7002,7 @@ function formatSignalBotFollowthroughFlowMetric(value: number): {
     };
   }
   return {
-    label: "Net buying",
+    label: "Observed net inflow",
     value: formatSignedCompactUsd(value),
   };
 }
@@ -7066,7 +7066,7 @@ function formatSignalBotFollowthroughRead(input: {
               .join(" and ")
               .replace(/^./, (character) => character.toUpperCase())}. `
           : "";
-    return `${behavior}The trade has largely played out, and some early holders are no longer waiting for the final cent.`;
+    return `${behavior}The quote is near its payout ceiling. Observed reductions do not establish realized profit or why holders reduced exposure.`;
   }
   if (priceMoveCents != null && priceMoveCents > 0) {
     if (
@@ -7075,7 +7075,7 @@ function formatSignalBotFollowthroughRead(input: {
       input.stats.exitedWallets === 0 &&
       input.stats.trimmedWallets <= input.stats.joinedOrAddedWallets
     ) {
-      return `Fresh buying kept coming in as ${marketLabel} rose, suggesting conviction remains after the rally.`;
+      return `Observed net inflow was positive as ${marketLabel} rose. Trade and snapshot observations do not establish the traders’ motives.`;
     }
     if (input.dominantConfluence) {
       const outcome =
@@ -7130,7 +7130,7 @@ function formatSignalBotFollowthroughRead(input: {
               "large wallets have",
             )} already exited`
           : "";
-      return `The buying was not enough to offset the selling pressure. ${currentPrice}${exits}.`;
+      return `Observed net inflow coincided with a lower quote; it does not establish what caused the move. ${currentPrice}${exits}.`;
     }
     return `${marketLabel} is down ${move} since the original signal as wallets reduce their positions.`;
   }
@@ -7139,8 +7139,8 @@ function formatSignalBotFollowthroughRead(input: {
       input.stats.netSignalSideFlowUsd > 0
         ? input.stats.exitedWallets > 0 ||
           input.stats.trimmedWallets > input.stats.joinedOrAddedWallets
-          ? "Net buying is positive, but tracked wallet participation is mixed."
-          : "Tracked wallets added net buying support."
+          ? "Observed net inflow is positive, but tracked wallet participation is mixed."
+          : "Tracked wallets show positive observed net flow."
         : input.stats.netSignalSideFlowUsd < 0
           ? "Tracked wallet support cooled."
           : "Tracked wallet flow has not materially changed.";
@@ -7231,11 +7231,11 @@ function formatSignalBotFollowthroughLead(input: {
   ) {
     const profit =
       stats.estimatedOpenPnlUsd != null && stats.estimatedOpenPnlUsd > 0
-        ? ` and tracked positions now show an estimated ${formatCompactUsd(
+        ? `, with an illustrative ${formatCompactUsd(
             stats.estimatedOpenPnlUsd,
-          )} in open profit`
+          )} mark change using the signal price, not traders’ cost bases`
         : "";
-    return `Tracked wallets entered when ${input.sideLabel} was ${formatCents(
+    return `The original signal priced ${input.sideLabel} at ${formatCents(
       stats.entryPrice,
     )}; it now trades at ${formatCents(stats.markPrice)}${profit}.`;
   }
@@ -7245,7 +7245,7 @@ function formatSignalBotFollowthroughLead(input: {
     stats.netSignalSideFlowUsd > 0
   ) {
     const buying = formatCompactUsd(stats.netSignalSideFlowUsd);
-    return `Large wallets put another ${buying} behind ${input.sideLabel}, but the market continued moving the other way.`;
+    return `Tracked wallets show ${buying} in observed net inflow on ${input.sideLabel}, while its quote fell.`;
   }
   if (
     stats.priceMoveCents != null &&
@@ -7259,9 +7259,9 @@ function formatSignalBotFollowthroughLead(input: {
         stats.entryPrice,
       )} to ${formatCents(
         stats.markPrice,
-      )} since the original call, but large wallets continue building their position instead of taking profit.`;
+      )} since the original call, alongside positive observed net flow. This does not establish whether traders took profits between snapshots.`;
     }
-    return "The market has moved since the original call, but large wallets continue building their position instead of taking profit.";
+    return "The market has moved since the original call, alongside positive observed net flow; profit-taking is unknown.";
   }
   if (
     stats.exitedWallets > 0 ||
@@ -7308,7 +7308,7 @@ function formatSignalBotFollowthroughStatLines(input: {
   const pnlLine =
     input.stats.estimatedOpenPnlUsd != null &&
     Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
-      ? `Est. PnL since call: ${formatSignedCompactUsd(
+      ? `Illustrative mark change vs signal: ${formatSignedCompactUsd(
           input.stats.estimatedOpenPnlUsd,
         )}`
       : null;
@@ -7428,7 +7428,7 @@ function formatSignalBotFollowthroughRichTable(input: {
     Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
   ) {
     rows.push({
-      label: "Est. open PnL",
+      label: "Illustrative mark change vs signal",
       value: telegramRichBold(
         formatSignedCompactUsd(input.stats.estimatedOpenPnlUsd),
       ),
@@ -7481,7 +7481,7 @@ function formatSignalBotFollowthroughStatBlock(input: {
     Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
   ) {
     lines.push(
-      `${escapeTelegramMarkdownV2("Est. PnL since call")}  ${formatTelegramBold(
+      `${escapeTelegramMarkdownV2("Illustrative mark change vs signal")}  ${formatTelegramBold(
         formatSignedCompactUsd(input.stats.estimatedOpenPnlUsd),
       )}`,
     );
@@ -8993,9 +8993,48 @@ function buildSignalBotInitialNotificationCopy(input: {
     input.note.holderActorMode === "sharp_cluster"
       ? input.note.holderClusterOpenPnlUsd
       : input.note.holderOpenPnlUsd;
+  const positionLabel =
+    sideCopy?.copyKind === "named_outcome" &&
+    !subject.text
+      .toLocaleLowerCase("en-US")
+      .includes(sideCopy.sideLabel.toLocaleLowerCase("en-US"))
+      ? (matchupOutcomeSubject(
+          sideCopy.sideLabel,
+          input.note.eventTitle,
+          input.note.marketTitle,
+        ) ?? sideCopy.sideLabel)
+      : subject.text;
+  // Only strip the affirmative wrapper when constructing an explicit negative
+  // proposition. Never strip NO from a negative market title or named outcome.
+  const activityPosition =
+    positionDirection === "against"
+      ? `betting against ${editorialSubject.replace(/^YES on\s+/i, "")}`
+      : `backing ${positionLabel.replace(/^YES on\s+/i, "")}`;
   return {
     editorialProbability,
     headline: buildSignalNotificationHeadline({
+      intelActivity: {
+        actorName:
+          normalizeSignalBotPublicHolderLabel(
+            input.note.holderIdentityDisplayName,
+          ) ??
+          normalizeSignalBotPublicHolderLabel(input.note.holderDisplayName),
+        actorMode: input.note.holderActorMode,
+        actorCount: input.note.holderClusterSharpHolders ?? 0,
+        positionValueUsd:
+          input.note.holderActorMode === "sharp_cluster"
+            ? input.note.holderClusterSharpUsd
+            : input.note.holderActorMode === "single_holder"
+              ? input.note.holderPositionUsd
+              : null,
+        positionLabel: activityPosition,
+        change:
+          researchDelta?.kind === "position_change" &&
+          (researchDelta.scope === "selected_side_cluster" ||
+            researchDelta.walletId === input.note.holderWalletId)
+            ? researchDelta
+            : null,
+      },
       actorOpenPnlUsd,
       actorPnlEvidenceId: headlineTrackRecord?.id ?? null,
       actorPnlHorizonDays,
@@ -9011,17 +9050,7 @@ function buildSignalBotInitialNotificationCopy(input: {
           : input.note.holderPositionUsd,
       kind: input.messageKind,
       positionDirection,
-      positionLabel:
-        sideCopy?.copyKind === "named_outcome" &&
-        !subject.text
-          .toLocaleLowerCase("en-US")
-          .includes(sideCopy.sideLabel.toLocaleLowerCase("en-US"))
-          ? (matchupOutcomeSubject(
-              sideCopy.sideLabel,
-              input.note.eventTitle,
-              input.note.marketTitle,
-            ) ?? sideCopy.sideLabel)
-          : subject.text,
+      positionLabel,
       researchDelta,
       strongWallets: input.note.holderClusterSharpHolders,
       subject,

@@ -2204,6 +2204,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         policy: p,
       });
       assert.equal(adapted.direction, candidate.direction);
+      assert.equal(adapted.summary, output.copy?.why_now);
       assert.equal(adapted.bucket, candidate.bucket);
       assert.equal(adapted.status, "CONTEXT");
       assert.ok(
@@ -6464,7 +6465,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         prompt,
         /Smart, strong, skilled or proven requires supporting credential quality/i,
       );
-      assert.match(prompt, /one concrete outcome thesis or tension/i);
+      assert.match(prompt, /WHO is doing WHAT/i);
       assert.match(prompt, /(?:2|two) short narrative sentences/i);
       assert.match(prompt, /Vary sentence shape/i);
       assert.match(
@@ -6480,7 +6481,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(prompt, /Good story example|Good compact summary/i);
       assert.doesNotMatch(prompt, /pick articles/i);
       assert.doesNotMatch(prompt, /\bpreviews\b/i);
-      assert.doesNotMatch(prompt, /@/);
+      assert.match(prompt, /Never invent a handle or prepend @/);
       assert.doesNotMatch(
         prompt,
         /Prefer simple phrases like 'informed wallets'/i,
@@ -6666,7 +6667,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(serialized, /0xowner/);
       assert.doesNotMatch(serialized, /walletUsdLikeBalance/);
       assert.doesNotMatch(serialized, /identityProfileUrl/);
-      assert.doesNotMatch(serialized, /positionShares/);
+      assert.match(
+        serialized,
+        /"observedActivity":\{"kind":"holding_snapshot"/,
+      );
+      assert.match(serialized, /marked_position_value_not_trade_notional/);
 
       const finalPrompt = buildHolderResearchUserPrompt({
         candidateJson: promptJson,
@@ -7201,7 +7206,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.deepEqual(
         parseHolderBackgroundJevProbabilities(
           {
-            model: "typesafe/jev-1.13-20260917",
+            model: "typesafe/jev-1.14-20261014",
             answers: {
               d0: {
                 type: "choice",
@@ -7217,7 +7222,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(
         parseHolderBackgroundJevProbabilities(
           {
-            model: "typesafe/jev-1.13-20260917",
+            model: "typesafe/jev-1.14-20261014",
             answers: {},
           },
           1,
@@ -8616,7 +8621,30 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.deepEqual(result.selectedKeys, [candidate.key]);
       assert.equal(result.votes[0]?.chargedCostUsd, 0.0003);
       assert.equal(calls.length, 1);
+      assert.equal(JSON.parse(calls[0]).model, "typesafe/jev-1.14");
       assert.doesNotMatch(calls[0] ?? "", /walletId|publish_horizon_too_long/);
+      const obsoleteModel = await chooseHolderResearchJevCandidates({
+        candidates: shortlist,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              model: "typesafe/jev-1.13-20260917",
+              usage: { cost: 0.0003 },
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice: "A",
+                  confidence: 0.82,
+                  probabilities: { A: 0.8, none: 0.2 },
+                },
+              },
+            }),
+          ),
+      });
+      assert.deepEqual(obsoleteModel.selectedKeys, []);
+      assert.equal(obsoleteModel.votes[0]?.chargedCostUsd, 0.0003);
       let groupCalls = 0;
       const laterGroup = await chooseHolderResearchJevCandidates({
         candidates: Array.from({ length: 12 }, (_, index) => ({

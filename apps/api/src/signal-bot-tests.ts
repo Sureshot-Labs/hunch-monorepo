@@ -13077,9 +13077,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         message.text,
-        /^💰 \*\$12\\\.3K backs YES on “Will test resolve Yes”/,
+        /^🔎 \*A trader holds \$12\\\.3K backing Will test resolve Yes/,
       );
-      assert.match(
+      assert.doesNotMatch(
         message.text.split("\n")[0] ?? "",
         /One tracked wallet holds this position at 31¢/,
       );
@@ -13227,7 +13227,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^💰 \*\$23\\\.3K on Spain over Argentina\\\.\* One tracked wallet holds this position at 59¢\\\.$/,
+        /^🔎 \*A trader holds \$23\\\.3K backing Spain over Argentina\\\.\*$/,
       );
       assert.match(message.text, /trades near 59¢/i);
       assert.match(message.text, /holding the Spain side/i);
@@ -13335,7 +13335,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^⚽ \*A trader up \$542K is backing Spain over Argentina\\\.\*$/,
+        /^🔎 \*A trader holds \$20\\\.5K backing Spain over Argentina\\\.\*$/,
       );
       assert.match(message.text, /▸ PnL.*542K.*30d/);
       assert.match(message.text, /▸ Recent results.*18\\\.4 pts vs market/);
@@ -13345,14 +13345,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       if (table?.type === "table") {
         assert.deepEqual(
           table.cells.map((row) => row[0]?.text),
-          [
-            "Market",
-            "Position",
-            "Spain price",
-            "Open PnL",
-            "Wallet 30d PnL",
-            "Wallet 30d volume",
-          ],
+          ["Market", "Position", "Spain price", "Open PnL", "Wallet 30d PnL"],
         );
         assert.match(JSON.stringify(table.cells[4]?.[1]?.text), /542K/);
         assert.doesNotMatch(JSON.stringify(table), /Recent results|18\.4/i);
@@ -13381,7 +13374,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /Morocco.*holds this position at 3¢/,
+        /A trader holds \$12\\\.3K backing Morocco to win the World Cup/,
       );
       assert.match(message.text, /▸ PnL.*1.*3M.*30d/);
       assert.doesNotMatch(message.text, /Still holding while the market/);
@@ -13863,7 +13856,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^💰 \*\$12\\\.3K on Beta Team over Alpha Team in Game 1\\\.\* One tracked wallet holds this position at 69¢\\\.$/,
+        /^🔎 \*A trader holds \$12\\\.3K backing Beta Team over Alpha Team in Game 1\\\.\*$/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /Alpha Team 31¢ \/ Beta Team 69¢/);
@@ -13925,7 +13918,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           bestAsk: 0.18,
           bestBid: 0.17,
           description:
-            "The market now gives Bitcoin hitting 70k about 18%, and gmtrader is still holding NO after the drop.",
+            "Bitcoin hitting $70K is quoted near 18%. The selected NO quote and gmtrader’s open PnL use different entry times; the latest snapshot alone does not prove continuous holding.",
           direction: "down",
           eventTitle: "What price will Bitcoin hit in July?",
           holderCredentialBullets: [],
@@ -14017,7 +14010,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📈 \*Bitcoin is now just 18% to hit \$70K in July\\\.\* A trader up \$118K still hasn't taken profit\\\.$/,
+        /^🔎 \*gmtrader holds \$7\\\.5K betting against BTC hitting \$70K in July\\\.\*$/,
       );
       assert.ok(
         message.text.includes(
@@ -14028,11 +14021,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(message.publishable, true);
       assert.doesNotMatch(message.text, /different starting prices/i);
       assert.doesNotMatch(message.text, /Beat resolved prices|Wallet edge/);
-      assert.match(message.text, /market has moved in the trader's favor/i);
+      assert.match(message.text, /different entry times/i);
       assert.match(message.text, /gmtrader/i);
-      assert.match(message.text, /still holding \$7\\\.5K on NO/i);
-      assert.match(message.text, /\\\+\$829 in open profit/i);
-      assert.match(message.text, /\$118K over the last 30 days/i);
+      assert.match(message.text, /Wallet open PnL \\\+\$829/i);
+      assert.match(JSON.stringify(message.richMessage), /Wallet 30d PnL/);
+      assert.doesNotMatch(message.text, /hasn't taken profit|refuses to flip/i);
       assert.doesNotMatch(message.text, /New research|repeat read/i);
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
       const positionTable = message.richMessage.blocks.find(
@@ -14106,7 +14099,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📉 \*Bitcoin is moving closer to \$67\\\.5K\\\.\* This trader still refuses to flip\\\.$/,
+        /^🔎 \*A trader holds \$5\\\.8K betting against BTC hitting \$67\\\.5K in July\\\.\*$/,
       );
       assert.match(
         message.text,
@@ -14123,7 +14116,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "research update applies manager FOMO framing to a profitable ceasefire hold",
+    name: "research update reports a ceasefire holding without FOMO or profit-taking claims",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -14131,7 +14124,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         messageKind: "research_update",
         note: note({
           description:
-            "YES trades near 94¢ after a one-day jump, turning a crowded favorite into a conviction-through-the-move read.",
+            "Since the original call, YES has risen from 87¢ to 94¢. The price move is not evidence of a new purchase or continuous holding.",
           direction: "up",
           eventTitle: "Israel x Iran ceasefire continues through...?",
           holderCredentialBullets: ["Up $247.7K over the last 30 days"],
@@ -14182,16 +14175,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📈 \*The Israel–Iran ceasefire is now 94% to last through July 31\\\.\* A trader up \$248K still hasn't taken profit\\\.$/,
+        /^🔎 \*A trader holds \$8\\\.6K backing Israel–Iran ceasefire lasting through July 31\\\.\*$/,
       );
       assert.match(
         message.text,
         /Since the original call, YES has risen from 87¢ to 94¢/,
       );
-      assert.match(message.text, /👤 __\[the trader\]\(/);
-      assert.match(message.text, /continues to hold \$8\\\.6K on YES/);
-      assert.match(message.text, /\\\+\$3\\\.2K in open profit/);
-      assert.match(message.text, /\$247\\\.7K over the last 30 days/);
+      assert.match(message.text, /Wallet position.*\$8\\\.6K/);
+      assert.match(message.text, /Wallet open PnL \\\+\$3\\\.2K/);
+      assert.match(JSON.stringify(message.richMessage), /Wallet 30d PnL/);
       assert.doesNotMatch(
         message.text,
         /moved with the call|crowded favorite|conviction-through-the-move/i,
@@ -14295,12 +14287,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /has trimmed but is still holding YES/,
+        /holds \$8\\\.6K backing Israel–Iran ceasefire/,
       );
-      assert.match(
-        message.text,
-        /has trimmed the position but still holds \$8\\\.6K on YES/,
-      );
+      assert.match(message.text, /Wallet position.*\$8\\\.6K/);
       assert.doesNotMatch(
         message.text,
         /hasn't taken profit|Rather than locking in gains/,
@@ -14359,7 +14348,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^⚠️ \*2 fewer strong wallets\\\. 5 remain\\\.\* Strong\\-wallet support for Spain to win the World Cup has thinned\\\.$/,
+        /^🔎 \*5 tracked wallets hold \$2\\\.8M backing Spain to win the World Cup\\\.\*$/,
       );
       assert.match(
         message.text,
@@ -14450,7 +14439,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*A trader up \$35K is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.\*$/,
+        /^🔎 \*A trader holds \$16K backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.\*$/,
       );
       assert.match(message.text, /\[Under 4\\\.5 total goals\]\(/);
       assert.match(
@@ -14520,7 +14509,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^💰 \*\\\+\$49\\\.4K added\\\.\* One trader increased their Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
+        /^🔎 \*hot2trot’s observed position value backing Under 2\\\.5 total goals in Spain vs\\\. Argentina rose to \$78\\\.4K\\\.\*$/,
       );
       assert.ok(
         message.text.includes(
@@ -14530,7 +14519,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(
         message.text,
-        /More Markets|total goals 2\.5 total goals|hot2trot|strong recent sports results| at 59¢/i,
+        /More Markets|total goals 2\.5 total goals|strong recent sports results| at 59¢/i,
       );
     },
   },
@@ -14635,7 +14624,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^💰 \*\\\+\$8K added\\\.\*/,
+        /^🔎 \*A trader’s observed position value backing Will test resolve Yes rose to \$20K\\\.\*/,
       );
       assert.equal(
         message.keyboard?.inline_keyboard[0]?.[0]?.text,
@@ -14687,7 +14676,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 1);
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$14K combined in 30 days\\\.\* Two wallets are backing Will test resolve Yes\?\\\.$/,
+        /^🔎 \*2 tracked wallets hold \$45K backing Will test resolve Yes\\\.\*$/,
       );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.match(message.text, />\*Why it matters\*\n>/);
@@ -14799,7 +14788,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^🔥 \*Messi has only an 8% chance of winning the Golden Boot\\\.\* Two profitable wallets are betting against Messi\\\.$/,
+        /^🔎 \*2 tracked wallets hold \$38K betting against Lionel Messi to win the Golden Boot at the World Cup\\\.\*$/,
       );
       assert.match(message.text, /▸ Recent results.*17\\\.1 pts vs market/);
       assert.match(message.text, /▸ PnL.*122K.*30d/);
@@ -14908,7 +14897,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(complete.publishable, true);
       assert.match(
         complete.text.split("\n")[0] ?? "",
-        /Argentina winning the World Cup/,
+        /betting against Argentina to win the World Cup/,
       );
       assert.doesNotMatch(
         complete.text.split("\n")[0] ?? "",
@@ -14948,7 +14937,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         message.text,
-        /^💰 \*\$12\\\.3K backs YES on “Will same market resolve Yes”\\\.\* One tracked wallet holds this position at 31¢/,
+        /^🔎 \*A trader holds \$12\\\.3K backing Will same market resolve Yes\\\./,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(
@@ -16011,7 +16000,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.priceGuardDeferred, 0);
       assert.equal(result.priceGuardStaleExpired, 1);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /backs/);
+      assert.match(telegram.messages[0]?.text ?? "", /holds.*backing/);
       assert.doesNotMatch(
         telegram.messages[0]?.text ?? "",
         /Later valid signal/,
@@ -16051,7 +16040,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.publishNotesSeen, 1);
       assert.equal(result.nonDirectionalNotes, 0);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /backs/);
+      assert.match(telegram.messages[0]?.text ?? "", /holds.*backing/);
     },
   },
   {
@@ -16139,7 +16128,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.nonDirectionalNotes, 1);
       assert.equal(result.publishNotesSeen, 1);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /backs/);
+      assert.match(telegram.messages[0]?.text ?? "", /holds.*backing/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
     },
@@ -16449,14 +16438,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v11");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v12");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.templateKey,
-        "research_price_move_v7",
+        "intel_activity_v1",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.subjectVersion,
@@ -16679,7 +16668,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(telegram.messages[0]?.text ?? "", />\*Since the call\*/);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        />\*Since the call\*\n>\u2800\n>Net buying/,
+        />\*Since the call\*\n>\u2800\n>Observed net inflow/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
@@ -16687,7 +16676,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Fresh buying kept coming in/,
+        /Observed net inflow was positive/,
       );
       assert.match(telegram.messages[0]?.text ?? "", /\*Read\*:/);
       assert.match(
@@ -17523,10 +17512,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rich = JSON.stringify(richMessages[0]?.rich_message);
       assert.equal(result.sent, 1);
       assert.match(rich, /Some wallets have reduced exposure/);
-      assert.doesNotMatch(
-        rich,
-        /continue building their position instead of taking profit/,
-      );
+      assert.doesNotMatch(rich, /alongside positive observed net flow/);
     },
   },
   {
@@ -17680,7 +17666,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text,
-        /^⚠️ \*\\\+\$283K bought\\\. 2 wallets cut\\\.\* Under 2\\\.5 total goals in Spain vs\\\. Argentina is still stuck at 59¢ while wallet support stays split/,
+        /^⚠️ \*\\\+\$283K observed net inflow\\\. 2 wallets cut\\\.\* Under 2\\\.5 total goals in Spain vs\\\. Argentina is still stuck at 59¢ while wallet support stays split/,
       );
       assert.match(
         text,
@@ -17794,18 +17780,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text.split("\n")[0] ?? "",
-        /^⚠️ \*22 early wallets are cashing out\\\.\* Mbappe reached 99¢ to win the Golden Boot\\\.$/,
+        /^⚠️ \*22 early wallets show reduced exposure\\\.\* Mbappe reached 99¢ to win the Golden Boot\\\.$/,
       );
       assert.match(
         text,
         />Wallets {2}\*17\* added · \*17\* trimmed · \*5\* exited · \*45\* holding/,
       );
-      assert.match(text, />Est\\\. PnL since call {2}/);
-      assert.match(text, /The trade has largely played out/);
-      assert.match(text, /no longer waiting for the final cent/);
+      assert.match(text, />Illustrative mark change vs signal {2}/);
+      assert.match(text, /The quote is near its payout ceiling/);
+      assert.match(text, /do not establish realized profit/);
       assert.doesNotMatch(
         text,
-        /wallet follow-through is mixed|Est\\\. open PnL|net flow remains strongly positive/,
+        /wallet follow-through is mixed|Est\\\. open PnL|net flow remains strongly positive|cashing out|The trade has largely played out/,
       );
     },
   },
@@ -17904,19 +17890,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /^📈 \*\\\+\$19\\\.8K bought\\\. −2¢ anyway\\\.\*/);
+      assert.match(
+        text,
+        /^📈 \*\\\+\$19\\\.8K observed net inflow\\\. −2¢ anyway\\\.\*/,
+      );
       assert.ok(text.includes(">Spain \\(\\-1\\.5\\) price"));
       assert.match(
         JSON.stringify(richMessages[0]?.rich_message),
-        /Large wallets put another/,
+        /Tracked wallets show/,
       );
       assert.match(
         JSON.stringify(richMessages[0]?.rich_message),
-        /behind Spain \(-1\.5\), but the market continued moving the other way\./,
+        /observed net inflow on Spain \(-1\.5\), while its quote fell\./,
       );
       assert.ok(
         text.includes(
-          "The buying was not enough to offset the selling pressure\\. Spain \\(\\-1\\.5\\) is now trading at 19¢, down 2¢ since the original signal, while one large wallet has already exited\\.",
+          "Observed net inflow coincided with a lower quote; it does not establish what caused the move\\. Spain \\(\\-1\\.5\\) is now trading at 19¢, down 2¢ since the original signal, while one large wallet has already exited\\.",
         ),
       );
       assert.doesNotMatch(text, /19¢cked|at 19¢cked/);
@@ -17959,7 +17948,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
       assert.doesNotMatch(text, /📍/);
-      assert.match(text, />Net buying {2}/);
+      assert.match(text, />Observed net inflow {2}/);
       assert.match(text, />YES price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       assert.doesNotMatch(text, /net tracked YES flow/);
     },
@@ -18003,7 +17992,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, />Net buying/);
+      assert.match(text, />Observed net inflow/);
       assert.match(text, />NYG price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -18068,7 +18057,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(text, /📍/);
       assert.match(text, />\*Since the call\*/);
-      assert.match(text, />Net buying/);
+      assert.match(text, />Observed net inflow/);
       assert.match(text, />Wallets {2}\*1\* added · \*1\* holding/);
       assert.match(
         text,
@@ -18427,7 +18416,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /^⚠️ \*1 exit\\\. \$3K sold\\\.\*/);
+      assert.match(text, /^⚠️ \*1 exit\\\. \$3K observed net outflow\\\.\*/);
       assert.match(text, />Wallets {2}\*1\* exited/);
       assert.match(text, /tracked wallets are exiting/);
       assert.match(text, /\*Read\*:/);

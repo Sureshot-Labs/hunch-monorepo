@@ -1,3 +1,7 @@
+import {
+  DEFAULT_JEV_MODEL,
+  jevRequestModel,
+} from "../lib/jev-model-identity.js";
 export type SemanticPoint = {
   eventId: string;
   title: string;
@@ -129,7 +133,7 @@ export function buildRelocationCandidates<T extends SemanticPoint>(
     .slice(0, limit);
 }
 
-export const SEMANTIC_REVIEW_MODEL = "typesafe/jev-1.13-20260917";
+export const SEMANTIC_REVIEW_MODEL = DEFAULT_JEV_MODEL;
 export const DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS = 2_000;
 export const SEMANTIC_REVIEW_PROMPT = "map-relocation-v2";
 export const relocationInstructions =
@@ -384,7 +388,7 @@ export async function reviewSemanticGroups<T extends SemanticPoint>(
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "typesafe/jev-1.13",
+            model: jevRequestModel(SEMANTIC_REVIEW_MODEL),
             state,
             questions: {
               decision: {

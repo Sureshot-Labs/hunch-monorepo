@@ -84,6 +84,7 @@ for (const bad of [
   null,
   {},
   { ...payload(), model: "another-model" },
+  { ...payload(), model: "typesafe/jev-1.13-20260917" },
   payload("unknown"),
   payload("B", NaN),
   payload("B", 1.1),
@@ -110,7 +111,7 @@ const summary = await reviewSemanticGroups(reviewed, {
   fetchImpl: async (_url, options) => {
     const request = JSON.parse(String(options?.body));
     calls++;
-    assert.equal(request.model, "typesafe/jev-1.13");
+    assert.equal(request.model, "typesafe/jev-1.14");
     assert.ok(options?.signal);
     if (calls === 1) assert.ok(request.state.B.includes("Micron earnings"));
     else assert.ok(request.state.A.includes("Micron earnings"));

@@ -119,6 +119,7 @@ test("two reversed Jev votes must agree on the same question", async () => {
     ...baseDecision,
     fetchImpl: async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as {
+        model: string;
         state: {
           A: string;
           B: string;
@@ -127,6 +128,7 @@ test("two reversed Jev votes must agree on the same question", async () => {
           priorDatedEvidence: string[];
         };
       };
+      assert.equal(body.model, "typesafe/jev-1.14");
       assert.equal(
         body.state.exactContract.tradingCloseTime,
         baseDecision.closeTime,
@@ -178,6 +180,21 @@ test("uncertain and provider errors fall back, with unknown cost reserved", asyn
   });
   assert.equal(failure.reason, "provider_error");
   assert.equal(failure.chargedCostUsd, 0.02);
+});
+
+test("focus rejects an old pinned Jev revision without selecting a question", async () => {
+  const result = await chooseMapSearchFocus({
+    ...baseDecision,
+    fetchImpl: async () => {
+      const payload = await jevReply("A").json();
+      return new Response(
+        JSON.stringify({ ...payload, model: "typesafe/jev-1.13-20260917" }),
+      );
+    },
+  });
+  assert.equal(result.selectedQuestion, null);
+  assert.equal(result.reason, "provider_error");
+  assert.equal(result.chargedCostUsd, 0.00008);
 });
 
 test("optional focus questions never invalidate a valid search result", () => {

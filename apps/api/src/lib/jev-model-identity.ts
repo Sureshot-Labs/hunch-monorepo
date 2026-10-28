@@ -1,5 +1,6 @@
 // Decisions accepts family IDs but returns concrete revisions. Keep mappings
 // explicit: a pinned policy must not silently accept another model/revision.
+export const DEFAULT_JEV_MODEL = "typesafe/jev-1.14-20261014";
 const JEV_REVISIONS: Record<string, string> = {
   "typesafe/jev-1.13": "typesafe/jev-1.13-20260917",
   "typesafe/jev-1.14": "typesafe/jev-1.14-20261014",
