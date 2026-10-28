@@ -308,7 +308,8 @@ const tests: Array<{ name: string; run: () => void }> = [
         subject: subject({ marketTitle: "Will it happen?" }),
       });
       assert.equal(result.storyKind, "cooling");
-      assert.match(result.text, /^⚠️ \$3K sold\./);
+      assert.match(result.text, /^⚠️ \$3K observed net outflow\./);
+      assert.doesNotMatch(result.text, /\bsold\b/);
       assert.equal(result.primaryMetric, "-$3K");
     },
   },
@@ -324,10 +325,10 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(result.storyKind, "divergence");
       assert.equal(result.emoji, "📈");
-      assert.equal(result.hook, "+$2.5K bought. −3¢ anyway.");
+      assert.equal(result.hook, "+$2.5K observed net inflow. −3¢ anyway.");
       assert.match(
         result.continuation ?? "",
-        /moved against large-wallet buying/,
+        /moved against observed wallet inflow/,
       );
     },
   },
@@ -343,7 +344,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         result.text,
-        "📈 +$352K bought. −10¢ anyway. NO on a 25 bps increase moved against large-wallet buying.",
+        "📈 +$352K observed net inflow. −10¢ anyway. NO on a 25 bps increase moved against observed wallet inflow.",
       );
     },
   },
@@ -632,7 +633,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         cashout.text,
-        "⚠️ 22 early wallets are cashing out. Mbappe reached 99¢ to win the Golden Boot.",
+        "⚠️ 22 early wallets show reduced exposure. Mbappe reached 99¢ to win the Golden Boot.",
       );
       assert.equal(cashout.templateKey, "late_stage_early_wallet_cashout_v10");
 
@@ -711,7 +712,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "⚠️ +$67.7K bought. 8 wallets cut. Tracked wallets remain split on NO on BTC hitting $57.5K in July.",
+        "⚠️ +$67.7K observed net inflow. 8 wallets cut. Tracked wallets remain split on NO on BTC hitting $57.5K in July.",
       );
     },
   },
@@ -1332,7 +1333,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "📈 +$345 bought. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against large-wallet buying.",
+        "📈 +$345 observed net inflow. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against observed wallet inflow.",
       );
       assert.doesNotMatch(result.text, /builds behind|backs/);
     },
@@ -1373,7 +1374,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         trimmedWallets: 2,
       });
       assert.equal(result.storyKind, "confluence");
-      assert.equal(result.hook, "+$45K bought. +7¢.");
+      assert.equal(result.hook, "+$45K observed net inflow. +7¢.");
       assert.match(result.continuation ?? "", /moving with tracked wallets/);
     },
   },
@@ -1434,7 +1435,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(result.storyKind, "divergence");
       assert.match(result.text, /December 31, 2028/);
-      assert.match(result.hook, /\+\$12K bought\. −3¢ anyway\./);
+      assert.match(result.hook, /\+\$12K observed net inflow\. −3¢ anyway\./);
       assert.equal(result.lintExceeded, true);
     },
   },

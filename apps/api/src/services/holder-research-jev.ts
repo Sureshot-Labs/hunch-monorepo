@@ -1,4 +1,8 @@
 import {
+  DEFAULT_JEV_MODEL,
+  jevRequestModel,
+} from "../lib/jev-model-identity.js";
+import {
   buildHolderResearchCandidateActionability,
   buildHolderResearchDecisionFeaturesV2,
   isUnchangedHolderResearchPublication,
@@ -6,7 +10,7 @@ import {
 } from "./holder-research.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 
-export const HOLDER_RESEARCH_JEV_MODEL = "typesafe/jev-1.13-20260917";
+export const HOLDER_RESEARCH_JEV_MODEL = DEFAULT_JEV_MODEL;
 export const HOLDER_RESEARCH_JEV_CALL_RESERVE_USD = 0.01;
 const JEV_TIMEOUT_MS = 5_000;
 
@@ -224,7 +228,7 @@ export async function chooseHolderResearchJevCandidates(input: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "typesafe/jev-1.13",
+            model: jevRequestModel(HOLDER_RESEARCH_JEV_MODEL),
             state: Object.fromEntries(
               group.map((candidate, index) => {
                 const features = buildHolderResearchDecisionFeaturesV2(

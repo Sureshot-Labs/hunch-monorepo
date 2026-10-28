@@ -160,6 +160,9 @@ export function buildSignalBotStructuredNarrative(input: {
   side: "NO" | "YES" | null;
   sideLabel: string | null;
 }): string[] | null {
+  // Current Intel copy supplies the explanation. Do not replace it with legacy
+  // templates inferring motives, persistence or realized profits from snapshots.
+  if (input.headlineTemplateKey === "intel_activity_v1") return null;
   if (
     input.messageKind === "research_update" &&
     input.researchDelta?.kind === "new_external_fact"

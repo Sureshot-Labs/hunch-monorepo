@@ -1,3 +1,7 @@
+import {
+  DEFAULT_JEV_MODEL,
+  jevRequestModel,
+} from "../lib/jev-model-identity.js";
 import { randomUUID } from "node:crypto";
 import {
   acquireEmbeddingGenerationPin,
@@ -15,7 +19,7 @@ import {
   type HolderResearchCandidate,
 } from "./holder-research.js";
 
-const JEV_MODEL = "typesafe/jev-1.13-20260917";
+const JEV_MODEL = DEFAULT_JEV_MODEL;
 export const HOLDER_BACKGROUND_RESERVE_USD = 0.01;
 const RECENT_EVIDENCE_KEY = "ai:map_search:v1:recent_evidence";
 const MAX_RECENT_EVIDENCE = 2_000;
@@ -251,7 +255,7 @@ async function voteOnBackground(input: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "typesafe/jev-1.13",
+          model: jevRequestModel(JEV_MODEL),
           state: {
             currentDate: new Date().toISOString(),
             contract: input.candidate.market.eventTitle,

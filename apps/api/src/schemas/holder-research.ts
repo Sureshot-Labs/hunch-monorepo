@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { INTEL_ACTIVITY_COPY_RULES } from "../services/intel-activity-copy.js";
 import { holderPublicationComparisonSchema } from "./holder-publication-comparison.js";
 
 export const holderResearchBucketSchema = z.enum([
@@ -726,11 +727,11 @@ const HOLDER_RESEARCH_FINAL_ASSESSMENT_RULES = [
 ] as const;
 
 const HOLDER_RESEARCH_PUBLIC_COPY_RULES = [
-  "Write for a prediction-market trader scanning a Telegram-style feed: one concrete outcome thesis or tension, then the decisive evidence and why it matters. Make inferred scenarios explicitly uncertain with natural language such as could, may or one plausible read; do not attribute unobserved beliefs to the trader. Be specific, not hype-driven.",
-  "Headline: normally no more than 12 words, natural and truthful, naming the market object and thesis/tension. A complete market proposition may require more words. Do not repeat the headline in the first summary sentence; add evidence, context or the important limitation. Vary sentence shape rather than reuse a template.",
+  ...INTEL_ACTIVITY_COPY_RULES,
+  "Do not repeat the headline in the first summary sentence; add evidence, context or the important limitation. Vary sentence shape rather than reuse a template. Make inferred scenarios explicitly uncertain and do not attribute unobserved beliefs to the trader.",
   "Prefer supplied plain-English outcome wording over raw YES/NO. V1 uses candidate.mkt.sideCopy.plainPosition and sideCopy.winCondition, with labels/sideCopies as fallbacks; V2 uses presentation and decisionFeatures.market.sideLabel. Preserve exact thresholds, scope and deadlines. Write Under 2.5 total goals, not bare Under or NO on O/U 2.5; for team NO, use betting against France, not NO France or synthetic France not to win.",
   "Whenever a price is mentioned, name its priced side explicitly and distinguish current market quote from holder average entry. Never label the opposite-side price as the selected side. Use supplied probability units correctly; price movement is not confirmation that the event occurred.",
-  "The Telegram renderer owns emoji, the final notification hook, rich formatting, position rows, proof rows and section labels. Return plain semantic prose, never Markdown, emoji, bullets or a second formatted card. Do not mechanically repeat the deterministic snapshot; one to three decisive facts may be repeated when essential to the story.",
+  "The renderer owns rich formatting, position rows, proof rows and interface actions. Do not mechanically repeat the deterministic snapshot; one to three decisive facts may be repeated when essential to the story.",
   "Use only supplied verified credentials and preserve a supplied display name verbatim if mentioned; do not invent a biography or profit claim. For a single holder, use the display name or a trader/this trader, not a wallet. For a cluster, wallets is natural. Smart, strong, skilled or proven requires supporting credential quality, never weak or contradicted credentials.",
   "Use holds or backs by default. Persistence, behavior change, early positioning and continued full size require their own observation evidence. Write credentials in ordinary language such as beat market prices; do not expose wallet identifiers/addresses, raw metric names, z-scores, sample notation, source lists or internal candidate/bucket/review language.",
   "Avoid repeating product labels such as sharp, cluster, signal and holder read in headline/summary. Avoid analyst jargon such as informed, capable, directional confirmation, fresh catalyst, public context, incremental, may explain part, adds support, pro-deal and pro-favorite. Never use fade/fades/faded/fading in public copy.",
@@ -890,7 +891,7 @@ export function buildHolderResearchUserPrompt(input: {
       signal_type: "catalyst | risk | update",
       direction: "up | down | mixed",
       headline:
-        "normally <=12 words; a complete truthful outcome thesis or tension",
+        "normally 8-16 words, at most 140 characters; verified actor + observed activity + exact market/outcome + meaningful size, not a market forecast",
       summary:
         "two short narrative sentences; normally 25-45 words, at most 320 characters",
       rationale: "one short internal sentence explaining the decision quality",
@@ -926,7 +927,7 @@ export function buildHolderResearchSystemPromptV2(): string {
     "evidence_assessment evaluates the final selected-side thesis: strong or adequate means grounded directional support survives the comparison; mixed means the directional conclusion remains unresolved; contradicted means verified exact-contract facts falsify the thesis; insufficient means too little support. Mixed inputs or external supports_opposite_side do not force a mixed or contradicted assessment.",
     "Choose publish only with strong or adequate final evidence and a useful directional thesis. A final assessment of mixed, contradicted or insufficient cannot be publish. An external research label alone is not a publication decision.",
     ...HOLDER_RESEARCH_PUBLIC_COPY_RULES,
-    "why_now: one or two concise sentences, always at most 260 characters, explaining the concrete outcome thesis and its present relevance. Name a verified update when available; do not require or invent a new event. The product renders the exact market side, executable price and credential table separately.",
+    "why_now: one or two concise sentences, always at most 260 characters, explaining why the observed activity matters without repeating the headline. Name a verified update when available; do not require or invent one. The product renders the exact market side, executable price and credential table separately.",
     "If verdict is context or skip, copy must be null. Rationale is one short internal sentence, not a probability forecast.",
     "For verdict=context, public_context may contain a standalone useful observation about the exact contract with supported evidence and material uncertainty. Use null when it would merely explain a rejection. For publish or skip use null. Cite only supplied evidence IDs and external URLs actually returned by research.",
   ].join("\n");
@@ -956,9 +957,9 @@ export function buildHolderResearchUserPromptV2(input: {
         "null, or {sourceUrl, matchesExactContract, factSupported, factMaterialToThesis} for a genuinely new dated fact since the previous note",
       copy: {
         headline:
-          "normally <=12 words; a complete truthful outcome thesis or tension without wallet identifiers",
+          "normally 8-16 words, at most 140 characters; verified public display name or factual group + observed activity + exact market/outcome + meaningful size; no raw wallet IDs or addresses",
         why_now:
-          "one or two concise sentences; at most 260 characters; the thesis and its present relevance, including a verified change only when supported",
+          "one or two concise sentences; at most 260 characters; why the observed activity matters, not a repetition of the headline; no CTA",
         caveats: "0-2 material limitations",
       },
       public_context:

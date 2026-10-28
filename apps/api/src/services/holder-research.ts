@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { intelHoldingObservation } from "./intel-activity-copy.js";
 import {
   assessHolderSideChange,
   compareHolderPositionQuantities,
@@ -1218,6 +1219,12 @@ function compactPromptHolder(
     vol30d: holder.volume30dUsd,
     mm: holder.mmSuspected,
     positionSnapshotAt: holder.positionSnapshotAt,
+    observedActivity: intelHoldingObservation({
+      displayName: holderPromptDisplayName(holder),
+      positionUsd: holder.positionUsd,
+      positionShares: holder.positionShares,
+      observedAt: holder.positionSnapshotAt,
+    }),
     firstObservedActivityAt: holder.firstObservedActivityAt ?? null,
     latestSupportingActivityAt: holder.latestSupportingActivityAt ?? null,
     activityContext: holderResearchPromptActivityContext(holder),
@@ -5764,6 +5771,12 @@ function compactPromptHolderV2(
       : displayName;
   return {
     displayName: safeDisplayName,
+    observedActivity: intelHoldingObservation({
+      displayName: safeDisplayName,
+      positionUsd: holder.positionUsd,
+      positionShares: holder.positionShares,
+      observedAt: holder.positionSnapshotAt,
+    }),
     side: holder.side,
     positionUsd: holder.positionUsd,
     entryPrice: holder.avgEntryPrice,
@@ -6598,12 +6611,6 @@ function candidateOutputActionSide(
   return candidate.side ?? holderSide;
 }
 
-function formatHolderResearchEntryPrice(price: number | null): string | null {
-  if (price == null || !Number.isFinite(price)) return null;
-  const cents = Math.round(price * 1_000) / 10;
-  return `${Number.isInteger(cents) ? cents.toFixed(0) : cents.toFixed(1)}¢`;
-}
-
 export function adaptHolderResearchFinalOutputV2(input: {
   candidate: HolderResearchCandidate;
   output: HolderResearchFinalOutputV2;
@@ -6685,12 +6692,10 @@ export function adaptHolderResearchFinalOutputV2(input: {
   const sideCopy = candidate.side
     ? buildHolderResearchMarketSideCopy(candidate.market, candidate.side)
     : null;
-  const price = formatHolderResearchEntryPrice(features.market.entryPrice);
-  const deterministicLead = sideCopy
-    ? `${sideCopy.plainPosition}${price ? ` at ${price}` : ""}.`
-    : `${candidate.market.marketTitle}.`;
   const whyNow = input.output.copy?.why_now ?? input.output.rationale;
-  const summary = `${deterministicLead} ${whyNow}`.trim().slice(0, 320);
+  // The headline owns actor/activity; structured card fields own side and price.
+  // why_now is schema-bounded to 260 characters: do not prepend or truncate it.
+  const summary = whyNow.trim();
   const publicContextRisk =
     externalResearch.verdict === "supports_holder_side"
       ? "confirms_holder"

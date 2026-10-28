@@ -1,5 +1,9 @@
 # Hunch Holder-Driven Market Research Agent Prompt
 
+**Implementation update:** the [activity-first public-copy rules](#activity-first-public-copy--october-2026-update)
+below supersede the older headline/copy discussion. The code’s V1/V2 prompts are
+the executable source of truth; research selection and publication gates are unchanged.
+
 Use this prompt when an agent should search Hunch for interesting markets based on tracked holder positioning, recent wallet activity, and wallet quality metrics. This is a read-only research workflow. Do not place trades, request secrets, sign transactions, or perform account actions.
 
 ## Goal
@@ -120,3 +124,28 @@ While researching, explicitly note:
 - whether PnL reliability was obvious;
 - whether more filters or sorts would have improved the workflow.
 
+# Activity-first public copy — October 2026 update
+
+The implementation in `apps/api/src/schemas/holder-research.ts` now imports shared
+`INTEL_ACTIVITY_COPY_RULES` for both final V1 and V2 prompts. Assessment and
+publication gates are unchanged: editorial copy describes **who holds or changed
+what**, rather than leading with a speculative event forecast.
+
+Each compact holder has an `observedActivity` record with a safe display name,
+marked position value, shares and observation time. It is explicitly a holding
+snapshot, not a confirmed purchase. Exact-side history comparisons remain the
+source for share-change claims; amounts from different cohorts, shares, current
+value and trade notional must not be conflated. Approximate PnL is not realized
+profit. A negative overall record cannot be relabeled profitable using a small
+thematic subset.
+
+Headline: actor + observation + exact outcome + meaningful size; normally 8–16
+words within the existing 140-character schema. Explanation: the decisive
+verified reason it matters and a material limitation, without repeating the
+headline or inventing motives. CTA/navigation is exclusively interface-owned.
+The V2 `why_now` is returned directly, without a forced side/price prefix.
+
+See `telegram/backend-signal-post-copy-v4.md` for the V12 renderer integration and
+bounded paid evaluation. The older prompt discussion below is historical where
+it conflicts with these public-copy rules. This is not a change to ingestion,
+research selection, model budgets, execution or publication eligibility.

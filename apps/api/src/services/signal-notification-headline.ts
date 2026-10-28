@@ -2,6 +2,10 @@ import {
   cleanPublicMarketText,
   type MarketSideCopy,
 } from "./market-side-copy.js";
+import {
+  buildIntelActivityHeadline,
+  type IntelActivityHeadlineInput,
+} from "./intel-activity-copy.js";
 import type { TelegramMarketPresentationV1 } from "./telegram-market-presentation.js";
 import {
   DEFAULT_SIGNAL_POST_COPY_POLICY,
@@ -1050,6 +1054,8 @@ function priceMoveVerb(cents: number): string {
 }
 
 export function buildSignalNotificationHeadline(input: {
+  /** Current Intel posts use factual activity copy; legacy/statistical callers retain their contract. */
+  intelActivity?: IntelActivityHeadlineInput;
   actorOpenPnlUsd?: number | null;
   actorPnlEvidenceId?: string | null;
   actorPnlHorizonDays?: number | null;
@@ -1480,8 +1486,8 @@ export function buildSignalNotificationHeadline(input: {
     primaryMetric = formatCents(currentPrice);
     supportingMetric = String(earlyWalletsCut);
     hook = `${earlyWalletsCut} early ${
-      earlyWalletsCut === 1 ? "wallet is" : "wallets are"
-    } cashing out.`;
+      earlyWalletsCut === 1 ? "wallet shows" : "wallets show"
+    } reduced exposure.`;
     continuation = formatEditorialMilestoneHook(
       input.editorialSubject,
       currentPrice,
@@ -1494,10 +1500,12 @@ export function buildSignalNotificationHeadline(input: {
     hook =
       exitedWallets > 0
         ? `${exitedWallets} ${exitedWallets === 1 ? "exit" : "exits"}.${
-            netFlow < 0 ? ` ${formatCompactUsd(Math.abs(netFlow))} sold.` : ""
+            netFlow < 0
+              ? ` ${formatCompactUsd(Math.abs(netFlow))} observed net outflow.`
+              : ""
           }`
         : netFlow < 0
-          ? `${formatCompactUsd(Math.abs(netFlow))} sold.`
+          ? `${formatCompactUsd(Math.abs(netFlow))} observed net outflow.`
           : "Wallet support is weakening.";
     continuation = `Tracked support for ${input.subject.text} is weakening.`;
   } else if (adversePrice && netFlow > 0) {
@@ -1506,12 +1514,12 @@ export function buildSignalNotificationHeadline(input: {
     emoji = "📈";
     primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = formatSignedMove(priceMove ?? 0);
-    hook = `+${formatCompactUsd(netFlow)} bought. ${formatSignedMove(
+    hook = `+${formatCompactUsd(netFlow)} observed net inflow. ${formatSignedMove(
       priceMove ?? 0,
     )} anyway.`;
     continuation = `${naturalizeRateMoveSubject(
       input.subject.text,
-    )} moved against large-wallet buying.`;
+    )} moved against observed wallet inflow.`;
   } else if (
     strongPositiveMove &&
     netFlow > 0 &&
@@ -1558,7 +1566,7 @@ export function buildSignalNotificationHeadline(input: {
     primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = null;
     const reducedWallets = Math.max(trimmedWallets, exitedWallets);
-    hook = `+${formatCompactUsd(netFlow)} bought.${
+    hook = `+${formatCompactUsd(netFlow)} observed net inflow.${
       reducedWallets > 0
         ? ` ${reducedWallets} ${
             reducedWallets === 1 ? "wallet cut" : "wallets cut"
@@ -1581,7 +1589,7 @@ export function buildSignalNotificationHeadline(input: {
     emoji = "🔥";
     primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = formatSignedMove(priceMove ?? 0);
-    hook = `+${formatCompactUsd(netFlow)} bought. ${formatSignedMove(
+    hook = `+${formatCompactUsd(netFlow)} observed net inflow. ${formatSignedMove(
       priceMove ?? 0,
     )}.`;
     continuation = `${input.subject.text} is moving with tracked wallets.`;
@@ -1591,7 +1599,7 @@ export function buildSignalNotificationHeadline(input: {
     emoji = "💰";
     primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = currentPrice == null ? null : formatCents(currentPrice);
-    hook = `+${formatCompactUsd(netFlow)} bought.`;
+    hook = `+${formatCompactUsd(netFlow)} observed net inflow.`;
     continuation = `Tracked money is building behind ${input.subject.text}${
       currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
     }.`;
@@ -1619,20 +1627,20 @@ export function buildSignalNotificationHeadline(input: {
         storyKind = "divergence";
         templateKey = "mixed_wallet_breadth_positive_flow_v7";
         emoji = "⚠️";
-        hook = `+${formatCompactUsd(netFlow)} bought.`;
+        hook = `+${formatCompactUsd(netFlow)} observed net inflow.`;
         continuation = `Tracked wallets remain split on ${input.subject.text}.`;
       } else {
         storyKind = "flow";
         templateKey = "early_net_flow_v7";
         emoji = "👀";
-        hook = `+${formatCompactUsd(netFlow)} bought.`;
+        hook = `+${formatCompactUsd(netFlow)} observed net inflow.`;
         continuation = `Tracked money is building behind ${input.subject.text}.`;
       }
     } else {
       storyKind = "flow";
       templateKey = "net_outflow_v7";
       emoji = "⚠️";
-      hook = `${formatCompactUsd(Math.abs(netFlow))} sold.`;
+      hook = `${formatCompactUsd(Math.abs(netFlow))} observed net outflow.`;
       continuation = `Tracked support for ${input.subject.text} is weakening.`;
     }
   } else if (joinedWallets > 0) {
@@ -1656,6 +1664,22 @@ export function buildSignalNotificationHeadline(input: {
     continuation = input.subject.text;
   }
 
+  // Retain the legacy evidence classification used by public-channel admission.
+  // Copy changes must not turn an initial_watch into a publishable signal.
+  if (
+    input.intelActivity &&
+    templateKey !== "initial_watch_v7" &&
+    (input.kind === "initial" || input.kind === "research_update")
+  ) {
+    hook = buildIntelActivityHeadline(input.intelActivity);
+    continuation = null;
+    evidenceKindsUsed.length = 0;
+    primaryEvidenceId = null;
+    primaryMetric = null;
+    supportingMetric = null;
+    emoji = "🔎";
+    templateKey = "intel_activity_v1";
+  }
   const text = `${emoji} ${hook}${continuation ? ` ${continuation}` : ""}`;
   const length = visibleLength(text);
   return {
