@@ -77,5 +77,6 @@ export async function findMaxPolymarketMarketBuyUsdForFunds(
     executableFundsRaw: input.executableFundsRaw,
     slippageBps: input.slippageBps,
     requireOrderbookDepth: true,
+    strictSlippage: true,
   });
 }

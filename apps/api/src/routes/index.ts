@@ -50,6 +50,11 @@ import { watchlistRoutes } from "./watchlist.js";
 import { env } from "../env.js";
 import { createDiscoveryRoutes } from "./discovery.js";
 import { discoveryService } from "../services/discovery-runtime.js";
+import { createRecommendedSpendRoutes } from "./recommended-spend.js";
+import { recommendedSpendService } from "../services/recommended-spend-runtime.js";
+import { createAuthMiddleware } from "../auth.js";
+import { checkRateLimit } from "../lib/rate-limit.js";
+import { resolveSecurityClientIp } from "../lib/request-ip.js";
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(metricsRoutes);
@@ -103,6 +108,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(marketMapRoutes);
   await app.register(holdersRoutes);
   await app.register(marketRoutes);
+  await app.register(
+    createRecommendedSpendRoutes(
+      recommendedSpendService,
+      createAuthMiddleware({ touchSession: false }),
+      (request, personal) =>
+        checkRateLimit(
+          `recommended-spend:${personal ? request.user?.id : resolveSecurityClientIp(request)}`,
+          personal ? 60 : 100,
+          60_000,
+        ),
+    ),
+  );
   await app.register(eventRoutes);
   await app.register(executionsRoutes);
   await app.register(ordersRoutes);

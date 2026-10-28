@@ -13,6 +13,10 @@ import {
   type PolymarketFeePolicySnapshot,
 } from "./polymarket-builder-fees.js";
 import { polymarketClient, PolymarketHttpError } from "./polymarket-client.js";
+import { loadPolymarketBook } from "./polymarket-book.js";
+import type { TradingBookSnapshot } from "./trading-book-cache.js";
+import { createTradingBookCache } from "./trading-book-cache.js";
+import { exactBuyNotionalStep } from "./recommended-spend-math.js";
 import {
   resolvePolymarketAssetContext,
   PolymarketAssetContextError,
@@ -41,6 +45,7 @@ export type PolymarketOrderbookSummary = {
 };
 
 export type PolymarketQuoteContext = {
+  bookSnapshot?: TradingBookSnapshot;
   orderbook: PolymarketOrderbookSummary;
   marketInfo: PolymarketMarketInfoRow | null;
   feePolicySnapshot: PolymarketFeePolicySnapshot;
@@ -48,6 +53,12 @@ export type PolymarketQuoteContext = {
   platformFeeCurveUnavailable?: boolean;
   assetContext?: PolymarketAssetContext | null;
 };
+
+function quoteContextIsFresh(context: PolymarketQuoteContext): boolean {
+  if (!context.bookSnapshot) return true; // caller-built legacy/test contexts
+  const expiry = Date.parse(context.bookSnapshot.expiresAt);
+  return Number.isFinite(expiry) && expiry > Date.now();
+}
 
 export type PolymarketQuoteResult = {
   ok: true;
@@ -168,6 +179,7 @@ export class PolymarketQuoteError extends Error {
     readonly publicMessage: string,
     readonly reason:
       | "invalid_orderbook"
+      | "stale_orderbook"
       | "missing_top_of_book"
       | "market_not_accepting_orders"
       | "market_orderbook_unavailable"
@@ -641,6 +653,7 @@ export function calculatePolymarketSignedBuyRequiredSpendRaw(input: {
   postOnly?: boolean;
   takerAmountRaw: bigint;
 }): bigint | null {
+  if (!quoteContextIsFresh(input.context)) return null;
   if (input.makerAmountRaw <= 0n || input.takerAmountRaw <= 0n) return null;
   if (
     input.postOnly === true &&
@@ -797,12 +810,15 @@ export function parsePolymarketPlatformFeeCurve(
   };
 }
 
+const platformFeeCache = createTradingBookCache();
 async function fetchPolymarketPlatformFeeCurve(
   conditionId: string | null | undefined,
 ): Promise<PlatformFeeCurve> {
   if (!conditionId) return null;
-  const payload = await polymarketClient.getClobMarketInfo(conditionId);
-  return parsePolymarketPlatformFeeCurve(payload);
+  const snapshot = await platformFeeCache.load(conditionId, () =>
+    polymarketClient.getClobMarketInfo(conditionId),
+  );
+  return parsePolymarketPlatformFeeCurve(snapshot.payload);
 }
 
 export async function loadPolymarketQuoteContext(
@@ -818,7 +834,7 @@ export async function loadPolymarketQuoteContext(
   },
 ): Promise<PolymarketQuoteContext> {
   const [orderbookResult, marketInfo, feePolicySnapshot] = await Promise.all([
-    polymarketClient.getOrderBook(inputs.tokenId).then(
+    loadPolymarketBook(inputs.tokenId).then(
       (value) => ({ ok: true as const, value }),
       (error: unknown) => ({ ok: false as const, error }),
     ),
@@ -828,7 +844,7 @@ export async function loadPolymarketQuoteContext(
 
   if (!orderbookResult.ok)
     throw polymarketOrderbookFailure(orderbookResult.error, marketInfo);
-  const orderbook = extractOrderbookSummary(orderbookResult.value);
+  const orderbook = extractOrderbookSummary(orderbookResult.value.payload);
   if (!orderbook) {
     throw new PolymarketQuoteError(
       502,
@@ -866,7 +882,8 @@ export async function loadPolymarketQuoteContext(
     }
   }
 
-  return {
+  const context: PolymarketQuoteContext = {
+    bookSnapshot: orderbookResult.value,
     orderbook,
     marketInfo,
     feePolicySnapshot,
@@ -874,6 +891,13 @@ export async function loadPolymarketQuoteContext(
     platformFeeCurveUnavailable,
     assetContext,
   };
+  if (!quoteContextIsFresh(context))
+    throw new PolymarketQuoteError(
+      502,
+      "Polymarket orderbook expired; request a fresh quote",
+      "stale_orderbook",
+    );
+  return context;
 }
 
 export function calculatePolymarketQuote(inputs: {
@@ -891,6 +915,12 @@ export function calculatePolymarketQuote(inputs: {
   strictSlippage?: boolean;
   context: PolymarketQuoteContext;
 }): PolymarketQuoteResult {
+  if (!quoteContextIsFresh(inputs.context))
+    throw new PolymarketQuoteError(
+      502,
+      "Polymarket orderbook expired; request a fresh quote",
+      "stale_orderbook",
+    );
   const { orderbook, marketInfo, feePolicySnapshot, platformFeeCurve } =
     inputs.context;
   if (
@@ -1351,7 +1381,12 @@ function searchMaxPolymarketMarketBuyUsd(inputs: {
   strictSlippage?: boolean;
   requireOrderbookDepth?: boolean;
 }): PolymarketMaxSpendDetailedResult {
-  const upperCents = inputs.executableFundsRaw / MARKET_USD_MICRO_STEP;
+  const bestAsk = findBestAsk(inputs.context.orderbook.asks);
+  const amountStep =
+    inputs.strictSlippage && (inputs.slippageBps ?? 0) === 0 && bestAsk != null
+      ? exactBuyNotionalStep(String(bestAsk))
+      : MARKET_USD_MICRO_STEP;
+  const upperCents = inputs.executableFundsRaw / amountStep;
   if (upperCents <= 0n) return { ok: false, reason: "below_min_order" };
 
   const quoteAtCents = (cents: bigint): PolymarketQuoteResult | null => {
@@ -1362,7 +1397,7 @@ function searchMaxPolymarketMarketBuyUsd(inputs: {
         side: "BUY",
         orderType: "FOK",
         amountType: "usd",
-        amountUsdRawInput: cents * MARKET_USD_MICRO_STEP,
+        amountUsdRawInput: cents * amountStep,
         slippageBps: inputs.slippageBps,
         strictSlippage: inputs.strictSlippage,
         context: inputs.context,
@@ -1433,7 +1468,7 @@ function searchMaxPolymarketMarketBuyUsd(inputs: {
   return {
     ok: true,
     quote: bestQuote,
-    maxAmountUsdRaw: (bestCents * MARKET_USD_MICRO_STEP).toString(),
+    maxAmountUsdRaw: (bestCents * amountStep).toString(),
   };
 }
 

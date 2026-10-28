@@ -1837,6 +1837,11 @@ export class WalletPreparationRuntimeService {
         marketRef: marketContext.evidence.safeMarketRef,
         marketExchangeAddress: marketContext.exchangeAddress,
         marketAdapterRequired: Boolean(marketContext.adapterAddress),
+        directCollateralAllowanceRaw:
+          (effectiveMarketClass === "clob_neg_risk"
+            ? snapshot?.allowanceNegRisk
+            : snapshot?.allowanceClob
+          )?.toString() ?? null,
       },
     };
     const inspectionInput: PreparationInspectionInput = {
