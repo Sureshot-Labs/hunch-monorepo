@@ -2760,6 +2760,7 @@ export class AuthService {
    */
   static async validateSession(
     sessionToken: string,
+    options: { touch?: boolean } = {},
   ): Promise<AuthSession | null> {
     const dbFeatures = await getSessionDbFeatures();
     const sessionTokenHash = hashSessionToken(sessionToken);
@@ -2807,10 +2808,12 @@ export class AuthService {
     }
 
     // Update last accessed time
-    await pool.query(
-      "UPDATE user_sessions SET last_accessed_at = now() WHERE id = $1",
-      [result.rows[0].id],
-    );
+    if (options.touch !== false) {
+      await pool.query(
+        "UPDATE user_sessions SET last_accessed_at = now() WHERE id = $1",
+        [result.rows[0].id],
+      );
+    }
 
     const row = result.rows[0];
 
@@ -2869,6 +2872,8 @@ export class AuthService {
 
 // Authentication middleware for Fastify
 type AuthMiddlewareOptions = {
+  /** Read-only advisory endpoints still validate auth/CSRF, without a session write. */
+  touchSession?: boolean;
   optional?: boolean;
   requireWallet?: boolean;
 };
@@ -2957,7 +2962,9 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     }
 
     // Validate session
-    const session = await AuthService.validateSession(token);
+    const session = await AuthService.validateSession(token, {
+      touch: options.touchSession,
+    });
     if (!session) {
       if (allowAnonymous) {
         request.log.debug("Ignoring expired session for optional auth route");
