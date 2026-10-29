@@ -1977,6 +1977,78 @@ function decodeStartAppPayload(startParam: string): string {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "activity headlines preserve dated child contracts and sanitize placeholders in final prose",
+    run: () => {
+      for (const example of [
+        {
+          label: "AST",
+          event: "CS2: Astralis vs Fnatic (BO3) - October 29, 2026",
+          child: "Map 1 Winner",
+          outcomes: ["AST", "FNC"],
+          required: ["AST", "Map 1", "October 29, 2026"],
+        },
+        {
+          label: "Draw",
+          event: "Arsenal vs Chelsea - October 29, 2026",
+          child: "First Half Winner",
+          outcomes: ["Draw", "Arsenal"],
+          required: ["Draw", "First Half", "October 29, 2026"],
+        },
+        {
+          label: "Spain",
+          event: "Spain vs Argentina - October 29, 2026",
+          child: "Map 1 Winner",
+          outcomes: ["Spain", "Argentina"],
+          required: ["Spain in", "Map 1", "October 29, 2026"],
+        },
+        {
+          label: "Spain",
+          event: "Spain (Women) vs Argentina (Women) - Thursday",
+          child: "Match Winner",
+          outcomes: ["Spain", "Argentina"],
+          required: ["Women", "Thursday"],
+        },
+      ]) {
+        for (const persistedIdentity of [true, false]) {
+          const message = buildSignalBotMessage({
+            appBaseUrl: "https://app.hunch.trade",
+            buyAmountUsd: 10,
+            note: note({
+              marketTitle: example.child,
+              eventTitle: example.event,
+              outcomes: example.outcomes,
+              holderIdentityDisplayName: "Trading wallet (auto)",
+              holderDisplayName: "Trading wallet (auto)",
+              description:
+                "Trading wallet (auto) holds the selected side. Opposing holders have material exposure too.",
+              telegramMarketIdentityV1: persistedIdentity
+                ? {
+                    ...testSignalIdentity("YES"),
+                    eventTitle: example.event,
+                    subject: example.event,
+                    marketGroupItemTitle: example.child,
+                    marketQuestion: example.child,
+                    selectedSideLabel: example.label,
+                    predicate: `${example.label} wins ${example.child}`,
+                  }
+                : null,
+            }),
+          });
+          const rendered = message.text.replace(
+            /\\([_*[\]()~`>#+\-=|{}.!])/g,
+            "$1",
+          );
+          const title = rendered.split("\n")[0];
+          for (const required of example.required)
+            assert.ok(title.includes(required), title);
+          assert.match(title, /A trader holds/);
+          assert.doesNotMatch(rendered, /Trading wallet|\(auto\)/i);
+          assert.doesNotMatch(title, /View market|View trader/);
+        }
+      }
+    },
+  },
+  {
     name: "expired entry navigation does not revive trades or displace newer lifecycle messages",
     run: async () => {
       for (const action of ["buy", "sell", "redeem", "confirm"] as const) {
@@ -13348,6 +13420,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ["Market", "Position", "Spain price", "Open PnL", "Wallet 30d PnL"],
         );
         assert.match(JSON.stringify(table.cells[4]?.[1]?.text), /542K/);
+        assert.match(
+          JSON.stringify(table.cells[4]?.[1]?.text),
+          /approximate; may include open positions/,
+        );
         assert.doesNotMatch(JSON.stringify(table), /Recent results|18\.4/i);
       }
     },
@@ -14509,7 +14585,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^🔎 \*hot2trot’s observed position value backing Under 2\\\.5 total goals in Spain vs\\\. Argentina rose to \$78\\\.4K\\\.\*$/,
+        /^🔎 \*hot2trot’s position backing Under 2\\\.5 total goals in Spain vs\\\. Argentina is now worth \$78\\\.4K \\\(up \$[^)]+\\\)\\\.\*$/,
       );
       assert.ok(
         message.text.includes(
@@ -14624,7 +14700,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^🔎 \*A trader’s observed position value backing Will test resolve Yes rose to \$20K\\\.\*/,
+        /^🔎 \*A trader’s position backing Will test resolve Yes is now worth \$20K \\\(up \$[^)]+\\\)\\\.\*/,
       );
       assert.equal(
         message.keyboard?.inline_keyboard[0]?.[0]?.text,
@@ -16438,14 +16514,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v12");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v13");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.templateKey,
-        "intel_activity_v1",
+        "intel_activity_v2",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.subjectVersion,
@@ -17892,7 +17968,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text,
-        /^📈 \*\\\+\$19\\\.8K observed net inflow\\\. −2¢ anyway\\\.\*/,
+        /^📈 \*Tracked wallets: \\\+\$19\\\.8K observed net inflow on .*; price −2¢\\\.\*/,
       );
       assert.ok(text.includes(">Spain \\(\\-1\\.5\\) price"));
       assert.match(

@@ -4,6 +4,7 @@ import {
 } from "./market-side-copy.js";
 import {
   buildIntelActivityHeadline,
+  INTEL_ACTIVITY_COPY_VERSION,
   type IntelActivityHeadlineInput,
 } from "./intel-activity-copy.js";
 import type { TelegramMarketPresentationV1 } from "./telegram-market-presentation.js";
@@ -1510,16 +1511,12 @@ export function buildSignalNotificationHeadline(input: {
     continuation = `Tracked support for ${input.subject.text} is weakening.`;
   } else if (adversePrice && netFlow > 0) {
     storyKind = "divergence";
-    templateKey = "divergence_inflow_price_down_v7";
+    templateKey = "divergence_inflow_price_down_v8";
     emoji = "📈";
     primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = formatSignedMove(priceMove ?? 0);
-    hook = `+${formatCompactUsd(netFlow)} observed net inflow. ${formatSignedMove(
-      priceMove ?? 0,
-    )} anyway.`;
-    continuation = `${naturalizeRateMoveSubject(
-      input.subject.text,
-    )} moved against observed wallet inflow.`;
+    hook = `Tracked wallets: +${formatCompactUsd(netFlow)} observed net inflow on ${naturalizeRateMoveSubject(input.subject.text)}; price ${formatSignedMove(priceMove ?? 0)}.`;
+    continuation = null;
   } else if (
     strongPositiveMove &&
     netFlow > 0 &&
@@ -1678,7 +1675,7 @@ export function buildSignalNotificationHeadline(input: {
     primaryMetric = null;
     supportingMetric = null;
     emoji = "🔎";
-    templateKey = "intel_activity_v1";
+    templateKey = INTEL_ACTIVITY_COPY_VERSION;
   }
   const text = `${emoji} ${hook}${continuation ? ` ${continuation}` : ""}`;
   const length = visibleLength(text);

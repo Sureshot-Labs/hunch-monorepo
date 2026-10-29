@@ -1,5 +1,6 @@
 import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
 import { enabledConsumer } from "./matched-markets.js";
+import { intelPublicActorName } from "./intel-activity-copy.js";
 import { buildSignalBotStatsReport } from "./signal-bot-stats-report.js";
 export { buildSignalBotStatsReport } from "./signal-bot-stats-report.js";
 import { loadMatchedSignalCandidates } from "./signal-matching.js";
@@ -508,7 +509,7 @@ const UUID_RE =
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v12";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v13";
 export const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -972,7 +973,7 @@ function normalizeSignalBotHolderLinkLabel(
 function normalizeSignalBotPublicHolderLabel(
   value: string | null | undefined,
 ): string | null {
-  const label = normalizeSignalBotHolderLinkLabel(value);
+  const label = intelPublicActorName(normalizeSignalBotHolderLinkLabel(value));
   if (!label) return null;
   return label.replace(/^@+/, "").trim() || label;
 }
@@ -1074,11 +1075,11 @@ function sanitizeSignalBotPublicHolderMentions(
   let output = value;
   for (const raw of [note.holderIdentityDisplayName, note.holderDisplayName]) {
     const rawLabel = normalizeSignalBotHolderLinkLabel(raw);
-    const publicLabel = normalizeSignalBotPublicHolderLabel(raw);
-    if (!rawLabel || !publicLabel || rawLabel === publicLabel) continue;
+    const publicLabel = normalizeSignalBotPublicHolderLabel(raw) ?? "A trader";
+    if (!rawLabel || rawLabel === publicLabel) continue;
     const pattern = new RegExp(
       `(^|[^0-9A-Za-z_])${escapeRegExpLiteral(rawLabel)}(?=$|[^0-9A-Za-z_])`,
-      "g",
+      "gi",
     );
     output = output.replace(pattern, `$1${publicLabel}`);
   }
@@ -1354,10 +1355,11 @@ export function buildSignalBotMessage(input: {
           ? [
               {
                 label: `Wallet ${researchTrackRecord.horizonDays ?? 30}d PnL`,
-                value: formatSignalBotPreciseCompactUsd(
-                  researchTrackRecord.measurement.value,
-                  true,
-                ),
+                value:
+                  formatSignalBotPreciseCompactUsd(
+                    researchTrackRecord.measurement.value,
+                    true,
+                  ) + " (approximate; may include open positions)",
               },
             ]
           : []),
@@ -8786,41 +8788,78 @@ function matchupOutcomeSubject(
   marketTitle?: string | null,
 ): string | null {
   if (!context?.trim()) return null;
+  // Only compact known match/map contracts. Dates, numeric thresholds and
+  // unfamiliar child predicates must survive in the canonical full subject.
+  const childTitle = marketTitle?.trim() ?? "";
+  const simpleChild =
+    !childTitle ||
+    childTitle === context.trim() ||
+    childTitle === selectedLabel ||
+    /^(?:match winner|(?:game|map|round|set)\s+\d+(?:\s+winner)?)\??$/i.test(
+      childTitle,
+    );
+  if (!simpleChild || /\d/.test(context.replace(/\(BO\d+\)/gi, "")))
+    return null;
   const matchup = context.split(/\s+(?:vs\.?|v\.?)\s+/i);
   if (matchup.length === 2) {
     const normalizeParticipant = (value: string) =>
       value
-        .replace(/^.*:\s*/, "")
-        .replace(/\s+\([^)]*\).*$/, "")
-        .replace(/\s+[—-]\s+.*$/, "")
+        .replace(/^(?:Esports|LoL|CS2|Dota 2|Valorant):\s*/i, "")
+        .replace(/\s+\(BO\d+\)$/i, "")
         .trim();
     const [leftRaw, rightRaw] = matchup;
     const left = normalizeParticipant(leftRaw ?? "");
     const right = normalizeParticipant(rightRaw ?? "");
+    // Do not reinterpret qualifiers as part of a participant, or silently
+    // discard them: Women, Thursday, tournament stage, etc. belong to identity.
+    if (/[():—]|\s-\s/.test(left) || /[():—]|\s-\s/.test(right)) return null;
     const labelKey = selectedLabel.toLocaleLowerCase("en-US");
     const leftKey = left.toLocaleLowerCase("en-US");
     const rightKey = right.toLocaleLowerCase("en-US");
     const matchupLabel =
-      leftKey === labelKey || leftKey.endsWith(` ${labelKey}`)
+      leftKey === labelKey
         ? right
           ? `${selectedLabel} over ${right}`
           : selectedLabel
-        : rightKey === labelKey || rightKey.startsWith(`${labelKey} `)
+        : rightKey === labelKey
           ? left
             ? `${selectedLabel} over ${left}`
             : selectedLabel
           : null;
-    if (matchupLabel) {
+    // Unknown abbreviations cannot safely establish the winning participant.
+    // The caller retains its complete canonical subject in that case.
+    const compactMatchup = matchupLabel;
+    if (compactMatchup) {
       const child = marketTitle
         ?.trim()
         .replace(/\s+winner[?]?$/i, "")
         .trim();
       return child && /^(?:game|map|round|set)\b/i.test(child)
-        ? `${matchupLabel} in ${child}`
-        : matchupLabel;
+        ? `${compactMatchup} in ${child}`
+        : compactMatchup;
     }
   }
   return null;
+}
+
+function fullMatchupOutcomeSubject(
+  selectedLabel: string,
+  event: string | null | undefined,
+  groupItemTitle: string | null | undefined,
+): string | null {
+  if (!event || !/\s+(?:vs\.?|v\.?)\s+/i.test(event)) return null;
+  const totalScope = groupItemTitle?.match(/^O\/U\s+(.+)$/i)?.[1];
+  const totalAlreadyNamed =
+    totalScope != null &&
+    selectedLabel.replace(/^(?:Over|Under)\s+/i, "") === totalScope;
+  const child =
+    groupItemTitle &&
+    groupItemTitle !== event &&
+    groupItemTitle !== selectedLabel &&
+    !totalAlreadyNamed
+      ? ` — ${groupItemTitle}`
+      : "";
+  return `${selectedLabel} in ${event}${child}`;
 }
 
 function persistedNamedOutcomeSubject(
@@ -8847,6 +8886,13 @@ function persistedNamedOutcomeSubject(
     groupItemTitle,
   );
   if (matchup) return matchup;
+  // Substring inclusion (e.g. AST in Astralis) does not identify the outcome.
+  const fullMatchup = fullMatchupOutcomeSubject(
+    selectedLabel,
+    eventTitle ?? subject,
+    groupItemTitle,
+  );
+  if (fullMatchup) return fullMatchup;
   const subjectKey = subject.toLocaleLowerCase("en-US");
   const labelKey = selectedLabel.toLocaleLowerCase("en-US");
   if (subjectKey === labelKey && predicate !== subject) {
@@ -8994,15 +9040,18 @@ function buildSignalBotInitialNotificationCopy(input: {
       ? input.note.holderClusterOpenPnlUsd
       : input.note.holderOpenPnlUsd;
   const positionLabel =
-    sideCopy?.copyKind === "named_outcome" &&
-    !subject.text
-      .toLocaleLowerCase("en-US")
-      .includes(sideCopy.sideLabel.toLocaleLowerCase("en-US"))
+    sideCopy?.copyKind === "named_outcome"
       ? (matchupOutcomeSubject(
           sideCopy.sideLabel,
           input.note.eventTitle,
           input.note.marketTitle,
-        ) ?? sideCopy.sideLabel)
+        ) ??
+        fullMatchupOutcomeSubject(
+          sideCopy.sideLabel,
+          input.note.eventTitle,
+          input.note.marketTitle,
+        ) ??
+        subject.text)
       : subject.text;
   // Only strip the affirmative wrapper when constructing an explicit negative
   // proposition. Never strip NO from a negative market title or named outcome.
@@ -9596,7 +9645,8 @@ function formatSignalBotInitialPositionRichTable(input: {
         trackRecord.horizonDays ?? 30
       }d PnL`,
       value: telegramRichBold(
-        formatSignedCompactUsd(trackRecord.measurement.value),
+        formatSignedCompactUsd(trackRecord.measurement.value) +
+          " (approximate; may include open positions)",
       ),
     });
   }
@@ -9660,7 +9710,15 @@ function formatSignalBotEvidenceMetric(row: SignalEvidenceMetricV1): {
       : row.horizonDays != null
         ? ` · ${row.horizonDays}d`
         : "";
-  return { qualifier, title, value };
+  return {
+    qualifier:
+      qualifier +
+      (row.kind === "track_record"
+        ? " · approximate; may include open positions"
+        : ""),
+    title,
+    value,
+  };
 }
 
 function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {

@@ -39,6 +39,9 @@ for (const name of [
   "0x" + "a".repeat(40),
   "00000000-0000-4000-8000-000000000001",
   "tracked wallet",
+  "Trading wallet (auto)",
+  "Trading Wallet (generated)",
+  "Anonymous trader",
   "https://example.org",
 ]) {
   assert.equal(intelPublicActorName(name), null);
@@ -81,7 +84,7 @@ const change = {
 };
 assert.match(
   buildIntelActivityHeadline({ ...base, change }),
-  /observed position value.*rose to \$9.5K/,
+  /position.*is now worth \$9.5K \(up \$4.5K\)/,
 );
 assert.doesNotMatch(
   buildIntelActivityHeadline({ ...base, change }),
@@ -105,7 +108,7 @@ assert.match(
     actorCount: 2,
     change: { ...change, scope: "selected_side_cluster", afterUsd: 100000 },
   }),
-  /^Tracked holders’ observed position value.*\$100K/,
+  /^Tracked holders’ position.*is now worth \$100K/,
 );
 for (const label of [
   "backing Under 2.5 total goals in Spain vs. Argentina",
@@ -149,7 +152,7 @@ const headline = buildSignalNotificationHeadline({
   currentPrice: 0.5,
   subject,
 });
-assert.equal(headline.templateKey, "intel_activity_v1");
+assert.equal(headline.templateKey, "intel_activity_v2");
 assert.match(headline.text, /lava-lava holds/);
 assert.equal(headline.continuation, null);
 // A copy change must NOT bypass the existing weak-public-initial gate.

@@ -162,7 +162,7 @@ export function buildSignalBotStructuredNarrative(input: {
 }): string[] | null {
   // Current Intel copy supplies the explanation. Do not replace it with legacy
   // templates inferring motives, persistence or realized profits from snapshots.
-  if (input.headlineTemplateKey === "intel_activity_v1") return null;
+  if (/^intel_activity_v[12]$/.test(input.headlineTemplateKey)) return null;
   if (
     input.messageKind === "research_update" &&
     input.researchDelta?.kind === "new_external_fact"
