@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { intelHoldingObservation } from "./intel-activity-copy.js";
+import {
+  intelHoldingObservation,
+  intelPublicActorName,
+  INTEL_ACTIVITY_COPY_VERSION,
+} from "./intel-activity-copy.js";
 import {
   assessHolderSideChange,
   compareHolderPositionQuantities,
@@ -1326,14 +1330,16 @@ function stripLeadingTelegramMention(
 
 function holderPromptDisplayName(holder: HolderResearchHolder): string | null {
   return stripLeadingTelegramMention(
-    holder.identityDisplayName ?? holder.label,
+    intelPublicActorName(holder.identityDisplayName ?? holder.label),
   );
 }
 
 function buildHolderCredentialBullets(holder: HolderResearchHolder): string[] {
   const bullets: string[] = [];
   if (holder.pnl30dUsd != null && holder.pnl30dUsd >= 1_000) {
-    bullets.push(`Up ${formatUsd(holder.pnl30dUsd)} over the last 30 days`);
+    bullets.push(
+      `Approximate 30-day PnL: ${formatUsd(holder.pnl30dUsd)} (may include open positions)`,
+    );
   }
   let hasEdgeCredential = false;
   if (
@@ -1414,7 +1420,9 @@ function buildClusterCredentialBullets(input: {
     : null;
   const bullets: string[] = [];
   if (pnl30dUsd != null && pnl30dUsd >= 1_000) {
-    bullets.push(`Up ${formatUsd(pnl30dUsd)} combined over the last 30 days`);
+    bullets.push(
+      `Combined approximate 30-day PnL: ${formatUsd(pnl30dUsd)} (may include open positions)`,
+    );
   }
   bullets.push(
     `${plural(sideData.sharpHolders, "strong wallet")} on the same side`,
@@ -2942,6 +2950,7 @@ function holderResearchModelConfigSignature(
 ): string {
   return JSON.stringify([
     "holder_decision_contract_v10",
+    INTEL_ACTIVITY_COPY_VERSION,
     policy.singleGameSportsClusterOnly,
     policy.sideChangeRequiresEvidence,
     policy.selectionClusterBonus,
@@ -7609,11 +7618,390 @@ export async function persistHolderResearchNotes(
   return stats;
 }
 
+/** Private comparison metadata, never a public probability or publication gate. */
+export type HolderContextFactsV1 = {
+  version: 1;
+  copyVersion: string;
+  complete: boolean;
+  observedAt: string;
+  identity: string;
+  sources: string;
+  trackRecordPnlUsd: Record<string, number | null>;
+  holderPositionUsd: Record<string, number | null>;
+  snapshot: HolderResearchDecisionSnapshot;
+};
+
+// Deduplication may only suppress work with a complete, comparable baseline.
+// The legacy decision-cache parser intentionally accepts older snapshots;
+// that is not sufficient evidence to declare two public contexts unchanged.
+function validContextSnapshot(
+  value: unknown,
+): value is HolderResearchDecisionSnapshot {
+  const row = objectRecord(value);
+  const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  const nonNegative = (v: unknown) => finite(v) && (v as number) >= 0;
+  const probability = (v: unknown) => nonNegative(v) && (v as number) <= 1;
+  const text = (v: unknown) => typeof v === "string" && v.length > 0;
+  const side = (v: unknown) => v === "YES" || v === "NO";
+  const positions = row.publicComparisonPositions;
+  const holders = row.evidenceHolders;
+  if (
+    row.version !== 1 ||
+    row.priceMovementVersion !== HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION ||
+    !text(row.marketId) ||
+    !(side(row.side) || row.side === null) ||
+    row.key !==
+      buildHolderResearchThesisKey(
+        row.marketId as string,
+        row.side as HolderResearchSideKey | null,
+      ) ||
+    !(row.eventId === null || text(row.eventId)) ||
+    !(row.publicBaselineNoteId === null || text(row.publicBaselineNoteId)) ||
+    !probability(row.yesProbability) ||
+    !nonNegative(row.recentActivityUsd) ||
+    !nonNegative(row.crossMarketWalletCount) ||
+    !Array.isArray(positions) ||
+    !positions.length ||
+    !Array.isArray(holders) ||
+    !holders.length
+  )
+    return false;
+  const sides = objectRecord(row.sides);
+  for (const key of SIDE_KEYS) {
+    const exposure = objectRecord(sides[key]);
+    if (
+      ![
+        exposure.usd,
+        exposure.wallets,
+        exposure.sharpHolders,
+        exposure.sharpUsd,
+      ].every(nonNegative) ||
+      !(exposure.openPnlUsd === null || finite(exposure.openPnlUsd))
+    )
+      return false;
+  }
+  const positionKeys = new Set<string>();
+  for (const raw of positions) {
+    const position = objectRecord(raw);
+    if (
+      !text(position.walletId) ||
+      !side(position.side) ||
+      !nonNegative(position.positionShares) ||
+      !probability(position.currentPrice) ||
+      typeof position.strong !== "boolean" ||
+      typeof position.observedAt !== "string" ||
+      !Number.isFinite(Date.parse(position.observedAt))
+    )
+      return false;
+    const key = `${position.walletId}:${position.side}`;
+    if (positionKeys.has(key)) return false;
+    positionKeys.add(key);
+  }
+  for (const raw of holders) {
+    const holder = objectRecord(raw);
+    if (
+      !positionKeys.has(`${holder.walletId}:${holder.side}`) ||
+      !nonNegative(holder.positionUsd) ||
+      !(holder.openPnlUsd === null || finite(holder.openPnlUsd)) ||
+      !Array.isArray(holder.relatedOpenPositions)
+    )
+      return false;
+    for (const item of holder.relatedOpenPositions) {
+      const related = objectRecord(item);
+      if (
+        !text(related.marketId) ||
+        !side(related.side) ||
+        !nonNegative(related.positionUsd)
+      )
+        return false;
+    }
+  }
+  return true;
+}
+
+export function usableHolderContextFacts(
+  value: unknown,
+): value is HolderContextFactsV1 {
+  const row = objectRecord(value);
+  const pnl = objectRecord(row.trackRecordPnlUsd);
+  const positions = objectRecord(row.holderPositionUsd);
+  return (
+    row.version === 1 &&
+    row.copyVersion === INTEL_ACTIVITY_COPY_VERSION &&
+    row.complete === true &&
+    typeof row.observedAt === "string" &&
+    Number.isFinite(Date.parse(row.observedAt)) &&
+    typeof row.identity === "string" &&
+    /^[a-f0-9]{64}$/.test(row.identity) &&
+    typeof row.sources === "string" &&
+    /^[a-f0-9]{64}$/.test(row.sources) &&
+    validContextSnapshot(row.snapshot) &&
+    Object.values(pnl).every(
+      (v) => v === null || (typeof v === "number" && Number.isFinite(v)),
+    ) &&
+    Object.keys(positions).length > 0 &&
+    Object.values(positions).every(
+      (v) =>
+        v === null || (typeof v === "number" && Number.isFinite(v) && v >= 0),
+    ) &&
+    row.snapshot.evidenceHolders.every(
+      (h) =>
+        Object.hasOwn(pnl, `${h.walletId}:${h.side}`) &&
+        Object.hasOwn(pnl, `${h.walletId}:${h.side}:open`) &&
+        Object.hasOwn(positions, `${h.walletId}:${h.side}`),
+    )
+  );
+}
+
+export function buildHolderContextFacts(input: {
+  candidate: HolderResearchCandidate;
+  policy: HolderResearchPolicy;
+  externalResearch: HolderResearchExternalResearchV2 | null;
+  backgroundSources?: Array<{
+    sourceUrl: string | null;
+    publishedAt: string | null;
+    confirmation?: string;
+    title?: string;
+    summary?: string;
+  }>;
+  now?: Date;
+}): HolderContextFactsV1 {
+  const { candidate, policy } = input;
+  const selectedSides = candidate.side ? [candidate.side] : SIDE_KEYS;
+  const instruments = selectedSides.map((outcome) =>
+    buildSocialInstrument({
+      marketId: candidate.market.marketId,
+      venue: candidate.market.venue,
+      outcome,
+      tokenId:
+        candidate.market.livePriceCheck?.tops?.[outcome]?.tokenId ?? null,
+      expiry: candidate.market.expirationTime,
+      metadata: candidate.market.metadata,
+      limitlessPositionContract: resolveLimitlessPositionContract(),
+    }),
+  );
+  const snapshot = buildHolderResearchDecisionSnapshot(candidate, policy);
+  const digest = (value: unknown) =>
+    createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const research = input.externalResearch;
+  const date = (value: string | null | undefined) =>
+    value && Number.isFinite(Date.parse(value))
+      ? new Date(value).toISOString()
+      : (value ?? null);
+  const briefOdds = research?.comparableOdds;
+  const canonicalOdds = briefOdds
+    ? {
+        side: briefOdds.side,
+        probabilityMin: briefOdds.probabilityMin,
+        probabilityMax: briefOdds.probabilityMax,
+        asOf: date(briefOdds.asOf),
+        sources: [...new Set(briefOdds.sources.map((s) => s.url))].sort(),
+      }
+    : null;
+  // Opposing prompt-visible holders also matter to a disagreement context.
+  const holders = candidate.market.holders;
+  const credentials = holders
+    .map((h) => [
+      h.walletId,
+      h.side,
+      holderPromptDisplayName(h),
+      h.resolvedEdgeSampleCount30d,
+      roundDecisionNumber(h.resolvedWinRateEdge30d, 4),
+      roundDecisionNumber(h.resolvedEdgeZScore30d, 4),
+      h.resolvedStakeUsd30d,
+      h.trades30d,
+      roundDecisionNumber(h.winRate30d, 4),
+    ])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  // A failed lookup says nothing about outside facts. It may only match an
+  // earlier context based on the same locally available evidence, not a prior
+  // successful search. Never promote a failure to no_evidence or a verdict.
+  const sources = {
+    status: research?.status ?? "not_requested",
+    verdict: research?.status === "ok" ? research.verdict : null,
+    brief:
+      research?.status === "ok"
+        ? [
+            research.summary.replace(/\s+/g, " ").trim(),
+            research.timing,
+            canonicalOdds,
+          ]
+        : null,
+    freshFact:
+      research?.status === "ok" && research.freshFact
+        ? { ...research.freshFact, eventAt: date(research.freshFact.eventAt) }
+        : null,
+    citations:
+      research?.status === "ok"
+        ? [
+            ...new Set(
+              research.citations.map((s) =>
+                JSON.stringify([s.url, date(s.publishedAt)]),
+              ),
+            ),
+          ].sort()
+        : [],
+    background: [
+      ...new Set(
+        (input.backgroundSources ?? [])
+          .filter((s) => s.sourceUrl)
+          .map((s) =>
+            JSON.stringify([
+              s.sourceUrl,
+              date(s.publishedAt),
+              s.confirmation ?? null,
+              s.title?.replace(/\s+/g, " ").trim() ?? null,
+              s.summary?.replace(/\s+/g, " ").trim() ?? null,
+            ]),
+          ),
+      ),
+    ].sort(),
+  };
+  return {
+    version: 1,
+    copyVersion: INTEL_ACTIVITY_COPY_VERSION,
+    complete:
+      !candidate.comparisonPositionsUnavailable &&
+      candidate.publicationHistory?.status === "ok" &&
+      candidate.market.livePriceCheck?.fresh === true &&
+      instruments.every(Boolean) &&
+      validContextSnapshot(snapshot),
+    observedAt: (input.now ?? new Date()).toISOString(),
+    identity: digest([
+      candidate.market.marketId,
+      candidate.market.eventId,
+      candidate.side,
+      instruments,
+      candidate.market.marketTitle,
+      candidate.market.eventTitle,
+      candidate.market.marketDescription,
+      candidate.market.eventDescription,
+      candidate.market.resolutionSource,
+      candidate.market.outcomes,
+      date(candidate.market.closeTime),
+      date(candidate.market.expirationTime),
+      credentials,
+    ]),
+    sources: digest(sources),
+    trackRecordPnlUsd: Object.fromEntries(
+      holders.flatMap((h) => [
+        [`${h.walletId}:${h.side}`, roundDecisionUsd(h.pnl30dUsd)],
+        [`${h.walletId}:${h.side}:open`, roundDecisionUsd(h.openPnlUsd)],
+      ]),
+    ),
+    // Known marked values can change even when opposing holders have no shares
+    // in the comparison snapshot. This only invalidates context reuse: it is
+    // not evidence of buying, selling, or permission to publish a signal.
+    holderPositionUsd: Object.fromEntries(
+      holders.map((h) => [
+        `${h.walletId}:${h.side}`,
+        roundDecisionUsd(h.positionUsd),
+      ]),
+    ),
+    snapshot,
+  };
+}
+
+export function holderContextFactsUnchanged(
+  previous: unknown,
+  current: HolderContextFactsV1,
+  policy: HolderResearchPolicy,
+): boolean {
+  if (
+    !usableHolderContextFacts(previous) ||
+    !usableHolderContextFacts(current) ||
+    previous.identity !== current.identity ||
+    previous.sources !== current.sources ||
+    previous.snapshot.key !== current.snapshot.key ||
+    previous.snapshot.marketId !== current.snapshot.marketId ||
+    previous.snapshot.eventId !== current.snapshot.eventId ||
+    previous.snapshot.side !== current.snapshot.side
+  )
+    return false;
+  const pnlChanged = (before: number | null, after: number | null) =>
+    before == null || after == null
+      ? before !== after
+      : Math.sign(before) !== Math.sign(after) ||
+        Math.abs(after - before) >= holderDiffThreshold(before, policy);
+  if (
+    Object.keys(previous.trackRecordPnlUsd).sort().join("|") !==
+    Object.keys(current.trackRecordPnlUsd).sort().join("|")
+  )
+    return false;
+  for (const [key, value] of Object.entries(current.trackRecordPnlUsd)) {
+    if (pnlChanged(previous.trackRecordPnlUsd[key] ?? null, value))
+      return false;
+  }
+  if (
+    Object.keys(previous.holderPositionUsd).sort().join("|") !==
+    Object.keys(current.holderPositionUsd).sort().join("|")
+  )
+    return false;
+  for (const [key, value] of Object.entries(current.holderPositionUsd)) {
+    if (pnlChanged(previous.holderPositionUsd[key] ?? null, value))
+      return false;
+  }
+  try {
+    return (
+      researchUpdateDeltaReasons(
+        diffHolderResearchDecisionSnapshots(
+          previous.snapshot,
+          current.snapshot,
+          policy,
+          previous.observedAt,
+        ),
+      ).length === 0
+    );
+  } catch {
+    // Incomplete/old comparison metadata must recover through ordinary analysis.
+    return false;
+  }
+}
+
+export const HOLDER_CONTEXT_BASELINES_SQL = `
+ SELECT latest_note.source_id,latest_note.lineage->>'side' AS side,
+        latest_note.note_type,latest_note.metrics->'contextFactsV1' AS facts
+ FROM unnest($1::text[]) requested_market(market_id)
+ CROSS JOIN LATERAL (
+   SELECT DISTINCT ON (n.lineage->>'side') n.source_id,n.lineage,n.note_type,n.metrics
+   FROM ai_notes n WHERE n.source_id=requested_market.market_id
+     AND n.producer_type='holder_research' AND n.source_kind='market'
+     AND n.status='active' AND n.note_type IN ('signal','context')
+   ORDER BY n.lineage->>'side',n.created_at DESC,n.id DESC
+ ) latest_note`;
+
+export async function loadHolderContextBaselines(
+  client: Queryable,
+  marketIds: string[],
+) {
+  if (marketIds.length > 100) throw new Error("holder_context_batch_too_large");
+  if (!marketIds.length) return new Map<string, unknown>();
+  const result = await client.query<{
+    source_id: string;
+    side: string | null;
+    note_type: string;
+    facts: unknown;
+  }>(HOLDER_CONTEXT_BASELINES_SQL, [[...new Set(marketIds)]]);
+  return new Map(
+    result.rows
+      .filter((r) => r.note_type === "context")
+      .map((r) => [
+        buildHolderResearchThesisKey(
+          r.source_id,
+          r.side === "YES" || r.side === "NO" ? r.side : null,
+        ),
+        r.facts,
+      ]),
+  );
+}
+
 export async function persistHolderResearchPublicContext(
   client: PoolClient,
   input: {
     runnerRunId: string;
     decision: HolderResearchPersistDecision;
+    policy?: HolderResearchPolicy;
+    contextFacts?: HolderContextFactsV1;
   },
 ): Promise<"persisted" | "unchanged" | "invalid"> {
   const { candidate, output, modelMeta } = input.decision;
@@ -7680,13 +8068,18 @@ export async function persistHolderResearchPublicContext(
       note_type: string;
       status: string;
       fingerprint: string | null;
+      facts?: unknown;
+      result_key?: string | null;
     }>(
       `select id, note_type, status,
-              metrics->>'publicFingerprint' as fingerprint
+              metrics->>'publicFingerprint' as fingerprint,
+              metrics->'contextFactsV1' as facts,
+              metrics->>'contextResultKeyV1' as result_key
        from ai_notes
        where producer_type = 'holder_research'
          and source_kind = 'market'
          and source_id = $1
+         and lineage->>'side' IS NOT DISTINCT FROM $2::text
          and note_type in ('signal', 'context')
          and status <> 'retracted'
          and (note_type = 'context' or (
@@ -7695,10 +8088,58 @@ export async function persistHolderResearchPublicContext(
          ))
        order by created_at desc, id desc
        limit 1`,
-      [candidate.market.marketId],
+      [candidate.market.marketId, candidate.side],
     );
     const latest = latestRows[0];
-    if (latest?.note_type === "context" && latest.fingerprint === fingerprint) {
+    const resultKey = JSON.stringify([
+      canonicalPublicContext.reason,
+      publicPayload.evidenceIds,
+      publicPayload.sourceUrls,
+    ]);
+    const sameFacts =
+      !!input.policy &&
+      !!input.contextFacts &&
+      holderContextFactsUnchanged(
+        latest?.facts,
+        input.contextFacts,
+        input.policy,
+      ) &&
+      latest?.result_key === resultKey;
+    if (
+      latest?.note_type === "context" &&
+      latest.status === "active" &&
+      (latest.fingerprint === fingerprint || sameFacts)
+    ) {
+      if (
+        input.contextFacts &&
+        usableHolderContextFacts(input.contextFacts) &&
+        (!usableHolderContextFacts(latest.facts) ||
+          (latest.fingerprint === fingerprint &&
+            !!input.policy &&
+            !holderContextFactsUnchanged(
+              latest.facts,
+              input.contextFacts,
+              input.policy,
+            )))
+      ) {
+        // An ordinary analysis can repair legacy/incomplete facts or confirm
+        // the same public conclusion after a material change. Advance only in
+        // those cases: subthreshold reuse must stay anchored to the old facts.
+        // Never alter revision, display order or user read state here.
+        await client.query(
+          `update ai_notes set metrics=metrics || $2::jsonb
+           where id=$1::uuid and status='active' and note_type='context'
+             and metrics->>'publicFingerprint'=$3`,
+          [
+            latest.id,
+            JSON.stringify({
+              contextFactsV1: input.contextFacts,
+              contextResultKeyV1: resultKey,
+            }),
+            latest.fingerprint,
+          ],
+        );
+      }
       if (latest.status === "active" && publicSourceCitations.length > 0) {
         // Source titles/dates can be filled in without publishing a new note or
         // changing its updated_at, revision identity, or read state.
@@ -7712,7 +8153,11 @@ export async function persistHolderResearchPublicContext(
              and note_type = 'context'
              and metrics->>'publicFingerprint' = $3
              and model_meta->'public_source_citations' is distinct from $2::jsonb`,
-          [latest.id, JSON.stringify(publicSourceCitations), fingerprint],
+          [
+            latest.id,
+            JSON.stringify(publicSourceCitations),
+            latest.fingerprint,
+          ],
         );
       }
       await client.query("commit");
@@ -7738,6 +8183,12 @@ export async function persistHolderResearchPublicContext(
         JSON.stringify({
           publicContextV1: canonicalPublicContext,
           publicFingerprint: fingerprint,
+          ...(input.contextFacts
+            ? {
+                contextFactsV1: input.contextFacts,
+                contextResultKeyV1: resultKey,
+              }
+            : {}),
           market: {
             id: candidate.market.marketId,
             venue: candidate.market.venue,
@@ -7797,8 +8248,9 @@ export async function persistHolderResearchPublicContext(
        where producer_type = 'holder_research'
          and source_kind = 'market' and source_id = $1
          and note_type = 'context' and status = 'active' and id <> $2
+         and lineage->>'side' IS NOT DISTINCT FROM $3::text
        returning id`,
-      [candidate.market.marketId, noteId],
+      [candidate.market.marketId, noteId, candidate.side],
     );
     if (previousContexts[0]) {
       await client.query(

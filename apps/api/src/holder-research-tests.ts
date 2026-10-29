@@ -6251,7 +6251,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       });
       assert.equal(actor.mode, "single_holder");
       assert.deepEqual(actor.credentialBullets.slice(0, 3), [
-        "Up $2.5K over the last 30 days",
+        "Approximate 30-day PnL: $2.5K (may include open positions)",
         "Beat market prices by 16 points across 24 resolved bets",
         "Traded $90.0K over the last 30 days",
       ]);
@@ -6344,7 +6344,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(actor.cluster?.openPnlUsd, -3_900);
       assert.equal(actor.cluster?.pnl30dUsd, 14_000);
       assert.deepEqual(actor.credentialBullets.slice(0, 2), [
-        "Up $14.0K combined over the last 30 days",
+        "Combined approximate 30-day PnL: $14.0K (may include open positions)",
         "2 strong wallets on the same side",
       ]);
       const targets = buildHolderResearchWalletTargets(

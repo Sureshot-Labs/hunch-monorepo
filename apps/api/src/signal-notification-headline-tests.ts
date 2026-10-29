@@ -325,11 +325,11 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(result.storyKind, "divergence");
       assert.equal(result.emoji, "📈");
-      assert.equal(result.hook, "+$2.5K observed net inflow. −3¢ anyway.");
       assert.match(
-        result.continuation ?? "",
-        /moved against observed wallet inflow/,
+        result.hook,
+        /^Tracked wallets: \+\$2.5K observed net inflow on .*; price −3¢\.$/,
       );
+      assert.equal(result.continuation, null);
     },
   },
   {
@@ -344,7 +344,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         result.text,
-        "📈 +$352K observed net inflow. −10¢ anyway. NO on a 25 bps increase moved against observed wallet inflow.",
+        "📈 Tracked wallets: +$352K observed net inflow on NO on a 25 bps increase; price −10¢.",
       );
     },
   },
@@ -1333,7 +1333,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "📈 +$345 observed net inflow. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against observed wallet inflow.",
+        "📈 Tracked wallets: +$345 observed net inflow on Will the Iranian regime fall before 2027? · YES; price −1¢.",
       );
       assert.doesNotMatch(result.text, /builds behind|backs/);
     },
@@ -1435,7 +1435,10 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(result.storyKind, "divergence");
       assert.match(result.text, /December 31, 2028/);
-      assert.match(result.hook, /\+\$12K observed net inflow\. −3¢ anyway\./);
+      assert.match(
+        result.hook,
+        /\+\$12K observed net inflow on .*; price −3¢\./,
+      );
       assert.equal(result.lintExceeded, true);
     },
   },

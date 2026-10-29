@@ -212,9 +212,9 @@ export const DISCOVERY_ESTIMATE_INPUTS_SQL = `SELECT n.id AS note_id,
        NOT (coalesce(ws.metadata,'{}'::jsonb) ? 'assets')
        AND ws.metadata->>'tokenId'=n.metrics#>>'{socialInstrumentV1,tokenId}'
        AND (split_part(n.source_id,':',1)='kalshi'
-         OR lower(ws.metadata->>'positionContract')=split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',2)
-         OR (split_part(n.source_id,':',1)='polymarket' AND ws.metadata->>'positionContract' IS NULL))
-       AND (split_part(n.source_id,':',1)<>'polymarket' OR ws.metadata->>'positionContract' IS NOT NULL OR (
+         OR lower(nullif(btrim(ws.metadata->>'positionContract'),''))=split_part(n.metrics#>>'{socialInstrumentV1,generation}',':',2)
+         OR (split_part(n.source_id,':',1)='polymarket' AND nullif(btrim(ws.metadata->>'positionContract'),'') IS NULL))
+       AND (split_part(n.source_id,':',1)<>'polymarket' OR nullif(btrim(ws.metadata->>'positionContract'),'') IS NOT NULL OR (
          EXISTS (SELECT 1 FROM polymarket_asset_bindings binding_row
            WHERE binding_row.asset_id=ws.metadata->>'tokenId' AND binding_row.chain_id=137
            AND binding_row.market_id=n.source_id

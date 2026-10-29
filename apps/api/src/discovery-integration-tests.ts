@@ -192,6 +192,17 @@ try {
     "500",
     "unambiguous indexed contract recovers a legacy token-only snapshot",
   );
+  for (const positionContract of [null, "", "   ", " 0xcurrent "]) {
+    await pool.query(
+      "update wallet_position_snapshots set metadata=$1::jsonb where market_id='polymarket:probe'",
+      [JSON.stringify({ tokenId: "new-asset", positionContract })],
+    );
+    assert.equal(
+      (await repo.estimateInputs([polyNote]))[0].position_shares,
+      "500",
+      "empty contracts use the same verified binding as NULL; current contracts tolerate surrounding spaces",
+    );
+  }
   await pool.query(
     'update wallet_position_snapshots set metadata=\'{"tokenId":"new-asset","positionContract":"0xold"}\' where market_id=\'polymarket:probe\'',
   );
@@ -211,6 +222,17 @@ try {
     null,
     "ambiguous contract cannot confirm current generation",
   );
+  for (const positionContract of ["", "   ", " 0xwrong "]) {
+    await pool.query(
+      "update wallet_position_snapshots set metadata=$1::jsonb where market_id='polymarket:probe'",
+      [JSON.stringify({ tokenId: "new-asset", positionContract })],
+    );
+    assert.equal(
+      (await repo.estimateInputs([polyNote]))[0].position_shares,
+      null,
+      "normalization must not bypass conflicting bindings or explicit wrong contracts",
+    );
+  }
   await pool.query(
     'update wallet_position_snapshots set metadata=\'{"tokenId":"new-asset","positionContract":"0xcurrent"}\' where market_id=\'polymarket:probe\'',
   );

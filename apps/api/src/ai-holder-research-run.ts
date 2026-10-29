@@ -92,6 +92,9 @@ import {
   buildHolderResearchCandidatePromptJsonV2,
   buildHolderResearchDecisionCacheKey,
   buildHolderResearchDecisionCacheRecord,
+  buildHolderContextFacts,
+  holderContextFactsUnchanged,
+  loadHolderContextBaselines,
   buildHolderResearchExternalSearchInputV2,
   buildHolderResearchSelectionDiagnostics,
   buildHolderResearchObservationPool,
@@ -555,6 +558,9 @@ type HolderResearchRunReport = {
     unchanged: number;
     invalid: number;
     errors: number;
+    writerSkipped?: number;
+    technicalRetries?: number;
+    baselineReadErrors?: number;
   };
   resolvedEvaluation: Awaited<
     ReturnType<typeof evaluateResolvedHolderResearchNotes>
@@ -2444,13 +2450,11 @@ export async function maybeWriteDecisionCache(params: {
   candidate: HolderResearchCandidate;
   output: Pick<HolderResearchAgentOutputV1, "rationale" | "status">;
   modelMeta?: Record<string, unknown>;
+  technicalFailure?: boolean;
   decisionCache: HolderResearchDecisionCacheStats;
 }): Promise<void> {
-  const latestPublicSide = params.candidate.publicationHistory?.items[0]?.side;
   const externalResearch = params.modelMeta?.external_research;
-  const reversalSearchFailed =
-    latestPublicSide != null &&
-    latestPublicSide !== params.candidate.side &&
+  const externalResearchFailed =
     externalResearch != null &&
     typeof externalResearch === "object" &&
     "status" in externalResearch &&
@@ -2459,21 +2463,24 @@ export async function maybeWriteDecisionCache(params: {
     !params.policy.decisionCacheEnabled ||
     !params.redis ||
     params.policy.dryRun ||
-    !params.callModel ||
-    params.candidate.comparisonPositionsUnavailable ||
-    (reversalSearchFailed && params.output.status !== "PUBLISH") ||
-    // A model/provider failure is not an editorial verdict; retry next run.
-    params.modelMeta?.mode === "openrouter_error" ||
-    params.output.rationale === "side_change_comparison_missing"
+    !params.callModel
   ) {
     return;
   }
 
   try {
-    if (params.output.status === "PUBLISH") {
+    if (
+      params.output.status === "PUBLISH" ||
+      params.technicalFailure ||
+      externalResearchFailed ||
+      params.candidate.comparisonPositionsUnavailable ||
+      params.modelMeta?.mode === "openrouter_error" ||
+      params.output.rationale === "side_change_comparison_missing"
+    ) {
       // Publication cooldown comes only from committed Postgres notes. A
       // prior CONTEXT/SKIP must not survive a newer publish recommendation,
-      // including a technical save failure. Never cache a provisional publish.
+      // including a technical save failure. Clear old cooldowns too: a transient
+      // delta may have bypassed one before this attempt failed. Retry normally.
       await params.redis.del?.(
         buildHolderResearchDecisionCacheKey(params.candidate.thesisKey),
       );
@@ -3417,7 +3424,20 @@ export async function runHolderResearch(
       unchanged: 0,
       invalid: 0,
       errors: 0,
+      writerSkipped: 0,
+      technicalRetries: 0,
+      baselineReadErrors: 0,
     };
+    let contextBaselines = new Map<string, unknown>();
+    try {
+      contextBaselines = await loadHolderContextBaselines(
+        client,
+        finalCandidates.map((candidate) => candidate.market.marketId),
+      );
+    } catch {
+      // Context reuse is an optimization, never a prerequisite for analysis.
+      publicContextPersistence.baselineReadErrors += 1;
+    }
     let remainingLiveChecks = policy.maxLiveChecksPerRun;
     for (const selectedCandidate of finalCandidates) {
       if (finalModelCalls >= policy.maxAgentCallsPerRun) break;
@@ -3540,6 +3560,43 @@ export async function runHolderResearch(
           )
           .map((holder) => holder.walletId),
       });
+      const contextFacts = buildHolderContextFacts({
+        candidate,
+        policy,
+        externalResearch: canonicalExternalResearchV2(externalResearch),
+        backgroundSources: backgroundByKey
+          .get(candidate.key)
+          ?.items.filter((item) => item.role === "external_source_summary"),
+      });
+      if (externalResearch?.status === "error") {
+        publicContextPersistence.technicalRetries += 1;
+        if (
+          holderContextFactsUnchanged(
+            contextBaselines.get(candidate.thesisKey),
+            contextFacts,
+            policy,
+          )
+        ) {
+          await maybeWriteDecisionCache({
+            redis: options.decisionCacheRedis,
+            policy,
+            callModel: args.callModel,
+            candidate,
+            output: { status: "CONTEXT", rationale: "unchanged_known_facts" },
+            technicalFailure: true,
+            decisionCache,
+          });
+          publicContextPersistence.writerSkipped += 1;
+          toolCalls.push({
+            name: "context_writer",
+            count: 0,
+            status: "skipped",
+            detail:
+              "unchanged_known_facts; external research remains retryable next run",
+          });
+          continue;
+        }
+      }
       const rawDecision = await synthesizeCandidate({
         candidate,
         policy,
@@ -3666,6 +3723,7 @@ export async function runHolderResearch(
           ).map((target) => target.walletId),
         });
       }
+      let contextSaveFailed = false;
       if (
         shouldPersist &&
         decision.rawStatus === "CONTEXT" &&
@@ -3680,11 +3738,15 @@ export async function runHolderResearch(
             {
               runnerRunId: runId,
               decision,
+              policy,
+              contextFacts,
             },
           );
           publicContextPersistence[contextResult] += 1;
+          contextSaveFailed = contextResult === "invalid";
         } catch (error) {
           publicContextPersistence.errors += 1;
+          contextSaveFailed = true;
           console.warn("[holder-research] public context persistence failed", {
             candidateKey: candidate.key,
             error: error instanceof Error ? error.message : String(error),
@@ -3701,6 +3763,7 @@ export async function runHolderResearch(
           publicationProgress.stats?.outcomesByKey[candidate.key],
         ),
         modelMeta: decision.modelMeta,
+        technicalFailure: contextSaveFailed,
         decisionCache,
       });
     }

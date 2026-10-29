@@ -1,5 +1,7 @@
 import { cleanPublicMarketText } from "./market-side-copy.js";
 
+export const INTEL_ACTIVITY_COPY_VERSION = "intel_activity_v2";
+
 /** Editorial rules only: never a publication, trading or freshness gate. */
 export const INTEL_ACTIVITY_COPY_RULES = [
   "Write wallet-activity Intel, not a market-forecast headline. Lead with WHO is doing WHAT in the exact market, and a meaningful amount when supplied. Use the verified public display name; otherwise a trader or a factual group description. Never invent a handle or prepend @ to a display name.",
@@ -7,6 +9,7 @@ export const INTEL_ACTIVITY_COPY_RULES = [
   "A holding snapshot supports holds or has a position, not bought, added, built, still refuses to sell or has not taken profit. Compare exact-wallet, exact-side share observations to describe an observed increase or reduction; unchanged shares do not exclude intervening trades. Use bought only for confirmed trade evidence. A new article, first observation, unsigned activity label or price-driven USD increase is not a purchase.",
   "Keep units and money basis explicit: positionValueUsd is marked holding value, not dollars spent; positionShares are shares, not dollars. A snapshot change valued at current prices is an estimated change in exposure, not trade proceeds. Open PnL is unrealized; approximate 30-day PnL may include open positions and is not realized profit. Negative overall performance must not become a profitable-trader claim through selective thematic statistics.",
   "The body explains WHY the activity is interesting without repeating the title: a verified track record with its sample/period, meaningful opposition, an observed position change or a relevant exact-contract fact. Do not invent motives, unusual conviction, total wealth or continuous holding. A profitable trader does not guarantee a smart trade. A holding can be interesting without a new purchase or catalyst.",
+  "Use one or two concrete facts in natural sentences, not generic 'plausible outcome' or 'consistent with a possible win' filler. 'Holds' already describes a snapshot: do not routinely repeat 'this is not a new purchase' in the body. Keep that caveat only when the comparison could otherwise imply a purchase. If mentioning 30-day PnL, say approximate PnL including open positions, not simply 'up' or realized profits. Omit a secondary PnL number rather than lose its basis to the length limit.",
   "Do not include CTA text in headline, summary or caveats: no View market, View trader, Buy now or notification requests. Navigation and trading controls belong to the interface. Return plain semantic prose, not Markdown, emoji or a formatted card.",
 ] as const;
 
@@ -21,7 +24,9 @@ export function intelPublicActorName(
     /^(?:@?0x[0-9a-f]{40}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[1-9A-HJ-NP-Za-km-z]{32,44})$/i.test(
       name,
     ) ||
-    /^(?:(?:a|the|tracked|profitable|strong)\s+)?(?:trader|wallet)$/i.test(name)
+    /^(?:(?:a|the|tracked|trading|profitable|strong|unknown|anonymous|auto(?:matic)?|generated)\s+)*(?:trader|wallet)(?:\s*\((?:auto(?:matic)?|generated|unknown)\))?$/i.test(
+      name,
+    )
   )
     return null;
   return name;
@@ -116,7 +121,7 @@ export function buildIntelActivityHeadline(
       : actor === "A trader"
         ? "A trader’s"
         : `${actor}${actor.endsWith("s") ? "’" : "’s"}`;
-    return `${owner} observed position value ${position} ${change.positionChangeUsd > 0 ? "rose" : "fell"} to ${usd(change.afterUsd)}.`;
+    return `${owner} position ${position} is now worth ${usd(change.afterUsd)} (${change.positionChangeUsd > 0 ? "up" : "down"} ${usd(Math.abs(change.positionChangeUsd))}).`;
   }
   return `${actor} ${plural ? "hold" : "holds"}${amount != null && amount > 0 ? ` ${usd(amount)}` : " a position"} ${position}.`;
 }
