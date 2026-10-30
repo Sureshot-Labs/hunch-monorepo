@@ -298,6 +298,28 @@ try {
   const liveGem = (await app.inject("/discovery/hidden-gems")).json().items[0];
   assert.equal(liveGem.estimate.status, "available");
   assert.equal(liveGem.estimate.calibrated, false);
+  // Rehydrate an existing Redis version whose latest snapshot did not confirm
+  // the holding. Current market/research still come from real read-only PG.
+  const frozenGem = await store.current("hidden-gems");
+  assert.ok(frozenGem?.estimateInputs?.[noteId]);
+  frozenGem.estimateInputs[noteId].positionShares = null;
+  frozenGem.id = randomUUID();
+  assert.ok(await store.acquire("hidden-gems", "holding-regression"));
+  await store.publish("hidden-gems", "holding-regression", frozenGem);
+  assert.equal((await store.current("hidden-gems"))?.id, frozenGem.id);
+  await store.release("hidden-gems", "holding-regression");
+  const withoutHolding = (await app.inject("/discovery/hidden-gems")).json()
+    .items[0];
+  assert.equal(withoutHolding.estimate.status, "available");
+  assert.equal(withoutHolding.estimate.positionBasis, "published_research");
+  assert.equal(withoutHolding.estimate.currentPositionStatus, "not_confirmed");
+  assert.equal(
+    withoutHolding.estimate.probability,
+    liveGem.estimate.probability,
+  );
+  assert.deepEqual(withoutHolding.valuation, liveGem.valuation);
+  assert.deepEqual(withoutHolding.research, liveGem.research);
+  assert.equal(withoutHolding.copyAvailable, liveGem.copyAvailable);
   const smartSnapshot = await store.current("smart-money");
   assert.ok(smartSnapshot);
   const traderPage = await app.inject(

@@ -114,9 +114,15 @@ outside Hunch can further reduce it; execution checks still apply.
   in-memory cache and in-flight coalescing, keyed by immutable Polymarket token
   or Limitless exact slug. Limitless responses must match the current canonical
   YES token before mirroring for NO; the representations are not added together.
-- Expiry is at most 5 seconds from fetch start and earlier if the source timestamp
-  demands it. Cache reads never extend it. Unknown source time is explicitly
-  flagged; receiving a response now does not prove venue freshness.
+- Expiry is at most 5 seconds from fetch start; slow requests consume that lifetime
+  and cache reads never extend it. Polymarket's book-version timestamp can remain
+  unchanged across fresh HTTP reads, so `sourceAsOf` is diagnostic and does not
+  shorten that local deadline. Limitless retains the earlier source-timestamp
+  bound. Unknown source time is explicitly flagged; this is not a guarantee of
+  execution or upstream correctness. Quote-context loading can refresh an expired
+  initial book once after metadata reads, using the replacement book's levels;
+  it never extends an old observation or loops indefinitely. Existing request
+  deadlines, final freshness, instrument, depth, tick and slippage checks remain.
 - Both endpoints use `no-store`; personal responses use `private, no-store`.
   Balances and credentials never enter the public book cache.
 - The market calculation waits at most 3 seconds for book/context; personal

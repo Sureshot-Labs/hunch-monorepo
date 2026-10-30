@@ -157,6 +157,17 @@ export function applyDiscoveryEstimate(
 ): DiscoveryItem {
   const research = item.research;
   if (item.reason.kind !== "hidden-gems" || !research) return item;
+  // This estimates a published idea, not whether its author still holds it.
+  // The saved representative/side and research instrument remain mandatory;
+  // latest portfolio coverage is informational and must not erase the idea.
+  const currentPositionStatus: DiscoveryEstimate["currentPositionStatus"] =
+    !input?.positionAsOf
+      ? "unavailable"
+      : !recent(input.positionAsOf, now)
+        ? "stale"
+        : input.positionShares && cmp(input.positionShares, "0") > 0
+          ? "confirmed"
+          : "not_confirmed";
   const estimate: DiscoveryEstimate = {
     status: "unavailable",
     method: "research-odds-v1",
@@ -170,6 +181,8 @@ export function applyDiscoveryEstimate(
     researchAsOf: research.createdAt,
     metricsAsOf: input?.metricsAsOf ?? null,
     positionAsOf: input?.positionAsOf ?? null,
+    positionBasis: "published_research",
+    currentPositionStatus,
     quoteAsOf: item.quote.asOf,
     calculatedAt: new Date(now).toISOString(),
     reason: "inputs_unavailable",
@@ -177,9 +190,13 @@ export function applyDiscoveryEstimate(
     warnings: [
       "Experimental, uncalibrated heuristic; historical performance does not establish event probability.",
       "Excludes fees, depth and slippage; not a promised return.",
-      "Position evidence confirms the matched asset in the latest retained snapshot batch, not completeness of the entire portfolio.",
+      "The estimate evaluates published research using its historical positioning evidence, not a claim that the trader still holds the position.",
     ],
   };
+  if (currentPositionStatus !== "confirmed")
+    estimate.warnings.push(
+      "Current ownership is not confirmed by a recent matched snapshot; missing coverage does not establish a sale and does not suppress this estimate.",
+    );
   const unavailable = (reason: DiscoveryEstimate["reason"]) => ({
     ...item,
     estimate: { ...estimate, reason },
@@ -220,9 +237,6 @@ export function applyDiscoveryEstimate(
   if (w === null || b === null || b <= 0 || b >= 1 || n === null || n <= 0)
     return unavailable("metrics_unavailable");
   if (!recent(input.metricsAsOf, now)) return unavailable("metrics_stale");
-  if (!input.positionShares || cmp(input.positionShares, "0") <= 0)
-    return unavailable("position_unavailable");
-  if (!recent(input.positionAsOf, now)) return unavailable("position_stale");
   const ageDays = (now - Date.parse(research.createdAt)) / DAY;
   if (!Number.isFinite(ageDays) || ageDays < -5000 / DAY)
     return unavailable("invalid_research_time");

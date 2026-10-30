@@ -103,6 +103,10 @@ export const discoveryEstimateSchema = z.object({
   researchAsOf: iso,
   metricsAsOf: iso.nullable(),
   positionAsOf: iso.nullable(),
+  positionBasis: z.literal("published_research").optional(),
+  currentPositionStatus: z
+    .enum(["confirmed", "not_confirmed", "stale", "unavailable"])
+    .optional(),
   quoteAsOf: iso.nullable(),
   calculatedAt: iso,
   reason: z.enum([
