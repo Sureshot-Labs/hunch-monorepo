@@ -474,6 +474,16 @@ repository path. Do not translate a deep UI offset into an unbounded series of
 HTTP calls; do not pass `offset` to V2 (observed 400). The current upstream-first
 branch in `routes/trades.ts` must change, not just its field parser.
 
+Hunch `/trades` scope precedence (offset and cursor modes): when `marketId` is
+present, it selects the specific market and `eventId` is ignored. It is not an
+intersection filter. Cursor mode sends only the resolved market `condition` to
+Polymarket; without a market it sends only `event_id`. V2 rejects sending both
+upstream filters together. Clients may keep sending both Hunch IDs, but should
+retain the same market and other effective filters when following `nextCursor`.
+An unknown market returns 404, never a broader event timeline. Provider failures
+still return the existing retryable 503; they do not fall back to local offset
+history or trigger additional upstream attempts.
+
 Handle typed error `code/retryable/trace_id`, 429 `Retry-After` and bounded
 dependency retries. Empty success, delayed enrichment, stale projection and
 unavailable upstream are different states. Partial market metadata must not

@@ -191,16 +191,18 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
       // bounded local-index contract on every page; new clients opt into one
       // upstream page and repeat the same filter with its opaque cursor.
       if (query.paginationMode === "cursor") {
-        const polyEventId = query.eventId
-          ? await resolvePolymarketEventId(query.eventId)
-          : null;
+        // Match the local-index path: the specific market takes precedence
+        // over its event. V2 rejects condition + event_id in one request.
+        // Keep this same scope on every cursor page; never widen a missing
+        // market to the event's trades.
         const polyMarketId = query.marketId
           ? await resolvePolymarketConditionId(query.marketId)
           : null;
-        if (
-          (query.eventId && !polyEventId) ||
-          (query.marketId && !polyMarketId)
-        )
+        const polyEventId =
+          !query.marketId && query.eventId
+            ? await resolvePolymarketEventId(query.eventId)
+            : null;
+        if (!polyMarketId && !polyEventId)
           return reply
             .code(404)
             .send({ error: "Polymarket trade scope not found" });

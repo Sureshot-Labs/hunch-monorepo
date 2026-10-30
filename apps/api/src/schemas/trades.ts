@@ -7,11 +7,15 @@ export const tradesQuerySchema = z
     eventId: z
       .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
       .optional()
-      .transform((v) => (v && v.length ? v : undefined)),
+      .transform((v) => (v && v.length ? v : undefined))
+      .describe("Event scope, used only when marketId is absent."),
     marketId: z
       .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
       .optional()
-      .transform((v) => (v && v.length ? v : undefined)),
+      .transform((v) => (v && v.length ? v : undefined))
+      .describe(
+        "Market scope; takes precedence over eventId in both pagination modes.",
+      ),
     tokenIds: zCsvString("tokenIds is required").optional(),
     paginationMode: z.enum(["offset", "cursor"]).default("offset"),
     cursor: z.string().min(1).max(8192).optional(),
