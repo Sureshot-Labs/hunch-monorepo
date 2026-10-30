@@ -6,7 +6,11 @@ export type TradingBookSnapshot = {
   expiresAt: string;
 };
 
-export function createTradingBookCache(now = Date.now, maxEntries = 500) {
+export function createTradingBookCache(
+  now = () => Date.now(),
+  maxEntries = 500,
+  options: { sourceTimestampBoundsLifetime?: boolean } = {},
+) {
   const entries = new Map<
     string,
     { until: number; pending: boolean; promise: Promise<TradingBookSnapshot> }
@@ -56,8 +60,10 @@ export function createTradingBookCache(now = Date.now, maxEntries = 500) {
             milliseconds > 0 && milliseconds < 10_000_000_000
               ? milliseconds * 1000
               : milliseconds;
-          // Receipt time is not a substitute for a venue timestamp. Future dates
-          // cannot extend the local lifetime. Slow requests also consume it.
+          // Preserve the source clock separately. Some venues (Polymarket) keep
+          // a book version's timestamp unchanged across fresh HTTP reads. That
+          // clock is diagnostic, not a deadline for the new read. In either mode
+          // slow requests consume the local lifetime and cache hits never renew it.
           const sourceAsOf =
             Number.isFinite(sourceMs) &&
             sourceMs > 0 &&
@@ -71,7 +77,9 @@ export function createTradingBookCache(now = Date.now, maxEntries = 500) {
             expiresAt: new Date(
               Math.min(
                 startedAt + 5_000,
-                sourceAsOf ? sourceMs + 5_000 : Infinity,
+                sourceAsOf && options.sourceTimestampBoundsLifetime !== false
+                  ? sourceMs + 5_000
+                  : Infinity,
               ),
             ).toISOString(),
           };

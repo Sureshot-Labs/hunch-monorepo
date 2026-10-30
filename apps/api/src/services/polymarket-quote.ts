@@ -844,7 +844,8 @@ export async function loadPolymarketQuoteContext(
 
   if (!orderbookResult.ok)
     throw polymarketOrderbookFailure(orderbookResult.error, marketInfo);
-  const orderbook = extractOrderbookSummary(orderbookResult.value.payload);
+  let bookSnapshot = orderbookResult.value;
+  let orderbook = extractOrderbookSummary(bookSnapshot.payload);
   if (!orderbook) {
     throw new PolymarketQuoteError(
       502,
@@ -882,8 +883,24 @@ export async function loadPolymarketQuoteContext(
     }
   }
 
+  // Metadata/fee reads can outlive the first book. Recover once with a new
+  // observation, never renew an old snapshot or keep retrying indefinitely.
+  if (Date.parse(bookSnapshot.expiresAt) <= Date.now()) {
+    try {
+      bookSnapshot = await loadPolymarketBook(inputs.tokenId);
+    } catch (error) {
+      throw polymarketOrderbookFailure(error, marketInfo);
+    }
+    orderbook = extractOrderbookSummary(bookSnapshot.payload);
+    if (!orderbook)
+      throw new PolymarketQuoteError(
+        502,
+        "Invalid Polymarket orderbook response",
+        "invalid_orderbook",
+      );
+  }
   const context: PolymarketQuoteContext = {
-    bookSnapshot: orderbookResult.value,
+    bookSnapshot,
     orderbook,
     marketInfo,
     feePolicySnapshot,

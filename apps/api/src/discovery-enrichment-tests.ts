@@ -149,7 +149,34 @@ test("Sample shrinkage, maximum odds, age decay and opposing support", () => {
   assert.equal(limited.estimate?.coverage, "representative_only");
   assert.ok(limited.estimate?.warnings.some((w) => w.includes("unknown")));
 });
-test("Missing, stale, future and closed inputs keep research readable without an estimate", () => {
+test("Latest holding is informational, including missing, closed, stale and legacy coverage", () => {
+  for (const [extra, status] of [
+    [{ positionShares: "100" }, "confirmed"],
+    [{ positionShares: null }, "not_confirmed"],
+    [{ positionShares: "0" }, "not_confirmed"],
+    [{ positionShares: "-1" }, "not_confirmed"],
+    [{ positionAsOf: null, positionShares: null }, "unavailable"],
+    [{ positionAsOf: new Date(now - 86400001).toISOString() }, "stale"],
+    [{ positionAsOf: new Date(now + 60000).toISOString() }, "stale"],
+  ] as [Partial<DiscoveryEstimateInputs>, string][]) {
+    const item = gem();
+    const result = applyDiscoveryEstimate(item, inputs(extra), now);
+    assert.equal(result.estimate?.probability, "0.55");
+    assert.equal(result.estimate?.status, "available");
+    assert.equal(result.estimate?.positionBasis, "published_research");
+    assert.equal(result.estimate?.currentPositionStatus, status);
+    assert.ok(result.valuation);
+    assert.equal(result.research, item.research);
+    assert.equal(result.copyAvailable, item.copyAvailable);
+    assert.ok(discoveryItemSchema.safeParse(result).success);
+  }
+  const oldResponse = applyDiscoveryEstimate(gem(), inputs(), now);
+  assert.ok(oldResponse.estimate);
+  delete oldResponse.estimate.positionBasis;
+  delete oldResponse.estimate.currentPositionStatus;
+  assert.ok(discoveryItemSchema.safeParse(oldResponse).success);
+});
+test("Missing/stale metrics and incompatible instruments still suppress only the estimate", () => {
   for (const [extra, reason] of [
     [{ walletId: null }, "representative_unavailable"],
     [{ side: "NO" }, "side_mismatch"],
@@ -159,13 +186,6 @@ test("Missing, stale, future and closed inputs keep research readable without an
     [{ sampleSize: 0 }, "metrics_unavailable"],
     [{ metricsAsOf: new Date(now - 86400001).toISOString() }, "metrics_stale"],
     [{ metricsAsOf: new Date(now + 60000).toISOString() }, "metrics_stale"],
-    [{ positionShares: null }, "position_unavailable"],
-    [{ positionShares: "0" }, "position_unavailable"],
-    [{ positionShares: "-1" }, "position_unavailable"],
-    [
-      { positionAsOf: new Date(now - 86400001).toISOString() },
-      "position_stale",
-    ],
   ] as [Partial<DiscoveryEstimateInputs>, string][]) {
     const item = gem(),
       result = applyDiscoveryEstimate(item, inputs(extra), now);
@@ -212,10 +232,49 @@ test("69-cent historical research never anchors valuation against a new 2-cent a
     midpoint: "0.015",
     asOf: at,
   };
-  const result = applyDiscoveryEstimate(item, inputs(), now);
+  const result = applyDiscoveryEstimate(
+    item,
+    inputs({ positionShares: null }),
+    now,
+  );
   assert.ok(Number(result.estimate?.probability) < 0.02);
   assert.ok(Number(result.valuation?.modelUpsideRatio) < 0);
   assert.equal(result.research?.researchedPrice, "0.69");
+});
+test("Fed and Yashar regressions preserve estimates without inventing prices or ownership", () => {
+  const fed = gem();
+  fed.quote = {
+    status: "fresh",
+    bid: "0.73",
+    ask: "0.74",
+    midpoint: "0.735",
+    asOf: at,
+  };
+  const result = applyDiscoveryEstimate(
+    fed,
+    inputs({ positionShares: null }),
+    now,
+  );
+  assert.equal(result.estimate?.status, "available");
+  assert.equal(result.estimate?.currentPositionStatus, "not_confirmed");
+  assert.ok(result.valuation);
+  assert.equal(result.research, fed.research);
+  const yashar = gem();
+  yashar.quote = {
+    status: "fresh",
+    bid: "0.001",
+    ask: "0.002",
+    midpoint: "0.0015",
+    asOf: at,
+  };
+  const small = applyDiscoveryEstimate(
+    yashar,
+    inputs({ positionShares: "0" }),
+    now,
+  );
+  assert.ok(Number(small.estimate?.probability) > 0);
+  assert.ok(Number(small.estimate?.probability) < 0.002);
+  assert.ok(Number(small.valuation?.modelUpsideRatio) < 0);
 });
 test("Evidence projection strips internal metadata and only references public sources", () => {
   const research = gem().research;

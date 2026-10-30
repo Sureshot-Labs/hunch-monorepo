@@ -55,6 +55,8 @@ try {
     assert.match(JSON.stringify(reason), /quick-wins/);
     assert.match(JSON.stringify(reason), /smart-money/);
     assert.match(JSON.stringify(reason), /hidden-gems/);
+    assert.match(JSON.stringify(operation), /published_research/);
+    assert.match(JSON.stringify(operation), /currentPositionStatus/);
     assert.match(
       JSON.stringify(reason),
       /"discriminator":\{"propertyName":"kind"\}/,
