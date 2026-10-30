@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { socialSourceRefSchema, thesisSourceSchema } from "./social-trade.js";
+import { intelTagFields } from "./intel-tags.js";
 
 const uuid = z.string().uuid();
 const decimal = z.string().regex(/^-?\d+(?:\.\d+)?$/);
@@ -177,6 +178,7 @@ export const socialThesisSchema = z.object({
   ]),
 });
 export const socialHunchSchema = z.object({
+  ...intelTagFields,
   kind: z.literal("hunch"),
   id: uuid,
   noteType: z.enum(["signal", "context"]),

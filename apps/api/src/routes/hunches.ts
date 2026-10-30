@@ -1,7 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { pool } from "../db.js";
+import type { DbQuery } from "../db.js";
+import { loadIntelTags } from "../services/intel-tags-loader.js";
+import { emptyIntelTags } from "../services/intel-tags.js";
+import { intelTagFields, type IntelTags } from "../schemas/intel-tags.js";
+import { resolveLimitlessPositionContract } from "../services/limitless-protocol-config.js";
 import { readDflowNativeAcceptingOrders } from "../lib/market-availability.js";
 import { publicHunchAcceptingOrders } from "../services/hunch-market-availability.js";
 import { publicHunchPricePresentation } from "../services/hunch-price-presentation.js";
@@ -109,7 +113,10 @@ function outcomeLabel(row: PublicHunchRow, side: string | null): string | null {
   return side;
 }
 
-function toPublicHunch(row: PublicHunchRow) {
+function toPublicHunch(
+  row: PublicHunchRow,
+  tags: IntelTags = emptyIntelTags(),
+) {
   const metrics = record(row.metrics);
   const lineage = record(row.lineage);
   const meta = record(row.model_meta);
@@ -154,6 +161,7 @@ function toPublicHunch(row: PublicHunchRow) {
   const sources = evidence.map((item) => item.url);
   const caveats = row.note_type === "context" ? context.caveats : meta.caveats;
   return {
+    ...tags,
     noteId: row.id,
     cardKey: row.source_id,
     revisionId: row.id,
@@ -214,41 +222,52 @@ const LATEST_HOLDER_CACHE_MAX_KEYS = 256;
 type LatestHolderPositionMap = Awaited<
   ReturnType<typeof loadHunchHolderPositions>
 >;
-const hunchListCache = new Map<
-  string,
-  { expiresAt: number; result: Promise<HunchListResponse> }
->();
-const latestHolderCache = new Map<
-  string,
-  { expiresAt: number; result: Promise<LatestHolderPositionMap> }
->();
+// Typed additive fields; keep every existing public field, including detail-only holders.
+const publicHunchResponseSchema = z.looseObject({
+  noteId: z.string().uuid(),
+  kind: z.enum(["signal", "context"]),
+  ...intelTagFields,
+});
 
-function loadLatestHolderPositions(
-  positionKeys: Parameters<typeof loadHunchHolderPositions>[1],
-): Promise<LatestHolderPositionMap> {
-  const cacheKey = JSON.stringify(positionKeys);
-  const cached = latestHolderCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return cached.result;
-  const result = loadHunchHolderPositions(pool, positionKeys);
-  void result.catch(() => {
-    if (latestHolderCache.get(cacheKey)?.result === result) {
-      latestHolderCache.delete(cacheKey);
+export function createHunchesRoutes(
+  pool: DbQuery,
+  options: { limitlessPositionContract?: string } = {},
+): FastifyPluginAsync {
+  const hunchListCache = new Map<
+    string,
+    { expiresAt: number; result: Promise<HunchListResponse> }
+  >();
+  const latestHolderCache = new Map<
+    string,
+    { expiresAt: number; result: Promise<LatestHolderPositionMap> }
+  >();
+
+  function loadLatestHolderPositions(
+    positionKeys: Parameters<typeof loadHunchHolderPositions>[1],
+  ): Promise<LatestHolderPositionMap> {
+    const cacheKey = JSON.stringify(positionKeys);
+    const cached = latestHolderCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.result;
+    const result = loadHunchHolderPositions(pool, positionKeys);
+    void result.catch(() => {
+      if (latestHolderCache.get(cacheKey)?.result === result) {
+        latestHolderCache.delete(cacheKey);
+      }
+    });
+    latestHolderCache.delete(cacheKey);
+    latestHolderCache.set(cacheKey, {
+      expiresAt: Date.now() + LATEST_HOLDER_CACHE_MS,
+      result,
+    });
+    while (latestHolderCache.size > LATEST_HOLDER_CACHE_MAX_KEYS) {
+      const oldestKey = latestHolderCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      latestHolderCache.delete(oldestKey);
     }
-  });
-  latestHolderCache.delete(cacheKey);
-  latestHolderCache.set(cacheKey, {
-    expiresAt: Date.now() + LATEST_HOLDER_CACHE_MS,
-    result,
-  });
-  while (latestHolderCache.size > LATEST_HOLDER_CACHE_MAX_KEYS) {
-    const oldestKey = latestHolderCache.keys().next().value;
-    if (oldestKey === undefined) break;
-    latestHolderCache.delete(oldestKey);
+    return result;
   }
-  return result;
-}
 
-const PUBLIC_NOTES = `
+  const PUBLIC_NOTES = `
   n.producer_type = 'holder_research'
   and n.source_kind = 'market'
   and n.status <> 'retracted'
@@ -260,7 +279,7 @@ const PUBLIC_NOTES = `
   )
 `;
 
-const HUNCH_COLUMNS = `
+  const HUNCH_COLUMNS = `
   n.id, n.note_type, n.title, n.description, n.created_at, n.updated_at,
   n.source_id, n.lineage, n.metrics, n.model_meta,
   m.title as market_title, m.venue as market_venue,
@@ -281,7 +300,7 @@ const HUNCH_COLUMNS = `
   latest_quote.current_price, latest_quote.current_price_as_of
 `;
 
-const HUNCH_JOINS = `
+  const HUNCH_JOINS = `
   left join unified_markets m on m.id = n.source_id
   left join unified_events e on e.id = m.event_id
   left join polymarket_markets pm on pm.id = m.venue_market_id and m.venue = 'polymarket'
@@ -296,35 +315,46 @@ const HUNCH_JOINS = `
   ) latest_quote on true
 `;
 
-export const hunchesRoutes: FastifyPluginAsync = async (app) => {
-  const typed = app.withTypeProvider<ZodTypeProvider>();
-  typed.get(
-    "/hunches",
-    { schema: { querystring: querySchema } },
-    async (request) => {
-      const { window, strength, limit, marketId, walletId } = request.query;
-      const strengths = strength.split(",");
-      const marketFilter = marketId ? "and n.source_id = $4::text" : "";
-      const walletJoin = walletId
-        ? `join ai_note_targets wallet_target
+  return async (app) => {
+    const typed = app.withTypeProvider<ZodTypeProvider>();
+    typed.get(
+      "/hunches",
+      {
+        schema: {
+          querystring: querySchema,
+          response: {
+            200: z.object({
+              ok: z.literal(true),
+              items: z.array(publicHunchResponseSchema),
+              total: z.number().int().nonnegative(),
+            }),
+          },
+        },
+      },
+      async (request) => {
+        const { window, strength, limit, marketId, walletId } = request.query;
+        const strengths = strength.split(",");
+        const marketFilter = marketId ? "and n.source_id = $4::text" : "";
+        const walletJoin = walletId
+          ? `join ai_note_targets wallet_target
              on wallet_target.note_id = n.id
             and wallet_target.target_kind = 'wallet'
             and wallet_target.target_id = $${marketId ? 5 : 4}::uuid::text`
-        : "";
-      const contextOnlyFilter =
-        strength === "neutral" ? "and n.note_type = 'context'" : "";
-      const cacheKey = JSON.stringify([
-        window,
-        strength,
-        limit,
-        marketId ?? null,
-        walletId ?? null,
-      ]);
-      const cached = hunchListCache.get(cacheKey);
-      if (cached && cached.expiresAt > Date.now()) return cached.result;
-      const result = pool
-        .query<PublicHunchRow>(
-          `with recent_notes as materialized (
+          : "";
+        const contextOnlyFilter =
+          strength === "neutral" ? "and n.note_type = 'context'" : "";
+        const cacheKey = JSON.stringify([
+          window,
+          strength,
+          limit,
+          marketId ?? null,
+          walletId ?? null,
+        ]);
+        const cached = hunchListCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) return cached.result;
+        const result = pool
+          .query<PublicHunchRow>(
+            `with recent_notes as materialized (
          select distinct on (n.source_id) n.id, n.source_id
          from ai_notes n
          ${walletJoin}
@@ -354,61 +384,87 @@ export const hunchesRoutes: FastifyPluginAsync = async (app) => {
        join ai_notes n on n.id = selected.id
        ${HUNCH_JOINS}
        order by selected.created_at desc, n.id desc`,
-          [
-            window === "latest" ? null : durations[window],
-            strengths,
-            limit,
-            ...(marketId ? [marketId] : []),
-            ...(walletId ? [walletId] : []),
-          ],
-        )
-        .then(({ rows }): HunchListResponse => {
-          const items = rows.map(toPublicHunch);
-          return { ok: true, items, total: items.length };
-        });
-      hunchListCache.delete(cacheKey);
-      hunchListCache.set(cacheKey, {
-        expiresAt: Date.now() + HUNCH_LIST_CACHE_MS,
-        result,
-      });
-      if (hunchListCache.size > HUNCH_LIST_CACHE_MAX_KEYS) {
-        const oldestKey = hunchListCache.keys().next().value;
-        if (oldestKey) hunchListCache.delete(oldestKey);
-      }
-      try {
-        return await result;
-      } catch (error) {
+            [
+              window === "latest" ? null : durations[window],
+              strengths,
+              limit,
+              ...(marketId ? [marketId] : []),
+              ...(walletId ? [walletId] : []),
+            ],
+          )
+          .then(async ({ rows }): Promise<HunchListResponse> => {
+            const tags = await loadIntelTags(
+              pool,
+              rows.map((row) => row.id),
+              {
+                limitlessPositionContract: options.limitlessPositionContract,
+                onError: (stage) =>
+                  request.log.warn(
+                    { stage },
+                    "Intel tag enrichment unavailable",
+                  ),
+              },
+            );
+            if (!tags.complete) hunchListCache.delete(cacheKey);
+            const items = rows.map((row) =>
+              toPublicHunch(row, tags.byId.get(row.id)),
+            );
+            return { ok: true, items, total: items.length };
+          });
         hunchListCache.delete(cacheKey);
-        throw error;
-      }
-    },
-  );
-  typed.get(
-    "/hunches/:noteId",
-    { schema: { params: paramsSchema } },
-    async (request, reply) => {
-      const { rows } = await pool.query<PublicHunchRow>(
-        `select ${HUNCH_COLUMNS}
+        hunchListCache.set(cacheKey, {
+          expiresAt: Date.now() + HUNCH_LIST_CACHE_MS,
+          result,
+        });
+        if (hunchListCache.size > HUNCH_LIST_CACHE_MAX_KEYS) {
+          const oldestKey = hunchListCache.keys().next().value;
+          if (oldestKey) hunchListCache.delete(oldestKey);
+        }
+        try {
+          return await result;
+        } catch (error) {
+          hunchListCache.delete(cacheKey);
+          throw error;
+        }
+      },
+    );
+    typed.get(
+      "/hunches/:noteId",
+      {
+        schema: {
+          params: paramsSchema,
+          response: {
+            200: z.object({
+              ok: z.literal(true),
+              item: publicHunchResponseSchema,
+            }),
+            404: z.object({ error: z.string() }),
+          },
+        },
+      },
+      async (request, reply) => {
+        const { rows } = await pool.query<PublicHunchRow>(
+          `select ${HUNCH_COLUMNS}
          from ai_notes n
          ${HUNCH_JOINS}
          where n.id = $1::uuid and ${PUBLIC_NOTES}`,
-        [request.params.noteId],
-      );
-      const row = rows[0];
-      if (!row) return reply.code(404).send({ error: "Hunch not found" });
-      const { rows: holderRows } = await pool.query<{
-        wallet_id: string | null;
-        address: string | null;
-        chain: string | null;
-        profile_label: string | null;
-        target_meta: unknown;
-        metrics_as_of: Date | null;
-        metrics_pnl_30d: string | null;
-        metrics_trades_30d: number | null;
-        metrics_resolved_win_rate_edge_30d: string | null;
-        metrics_resolved_edge_sample_count_30d: number | null;
-      }>(
-        `select w.id as wallet_id, w.address, w.chain,
+          [request.params.noteId],
+        );
+        const row = rows[0];
+        if (!row) return reply.code(404).send({ error: "Hunch not found" });
+        const { rows: holderRows } = await pool.query<{
+          wallet_id: string | null;
+          address: string | null;
+          chain: string | null;
+          profile_label: string | null;
+          target_meta: unknown;
+          metrics_as_of: Date | null;
+          metrics_pnl_30d: string | null;
+          metrics_trades_30d: number | null;
+          metrics_resolved_win_rate_edge_30d: string | null;
+          metrics_resolved_edge_sample_count_30d: number | null;
+        }>(
+          `select w.id as wallet_id, w.address, w.chain,
                 wp.profile->>'label_short' as profile_label,
                 target_row.target_meta,
                 selector.metrics_as_of, selector.metrics_pnl_30d,
@@ -424,111 +480,127 @@ export const hunchesRoutes: FastifyPluginAsync = async (app) => {
            and target_row.target_kind = 'wallet'
          order by target_row.target_rank, target_row.target_id
          limit 5`,
-        [row.id],
-      );
-      const positionKeys = holderRows.flatMap((holder) => {
-        const side = nonEmptyString(
-          record(holder.target_meta).side,
-        )?.toUpperCase();
-        return holder.wallet_id &&
-          row.market_venue &&
-          (side === "YES" || side === "NO")
-          ? [
-              {
-                walletId: holder.wallet_id,
-                venue: row.market_venue,
-                marketId: row.source_id,
-                outcomeSide: side,
-              },
-            ]
-          : [];
-      });
-      let latestPositions: LatestHolderPositionMap = new Map();
-      if (positionKeys.length > 0) {
-        try {
-          latestPositions = await loadLatestHolderPositions(positionKeys);
-        } catch (error) {
-          request.log.warn(
-            { error, noteId: row.id },
-            "Latest holder positions unavailable; using research snapshots",
-          );
-        }
-      }
-      const now = Date.now();
-      const researchedAt = new Date(row.created_at).getTime();
-      const isRecent = (value: Date | string | null | undefined) => {
-        if (!value) return false;
-        const timestamp = new Date(value).getTime();
-        return (
-          Number.isFinite(timestamp) &&
-          timestamp >= researchedAt - 5 * 60_000 &&
-          timestamp <= now + 5 * 60_000 &&
-          now - timestamp <= LATEST_HOLDER_MAX_AGE_MS
+          [row.id],
         );
-      };
-      const holders = holderRows.map((holder) => {
-        const meta = record(holder.target_meta);
-        const side = nonEmptyString(meta.side)?.toUpperCase() ?? null;
-        const latestPosition = holder.wallet_id
-          ? latestPositions.get(
-              makeWalletPositionLedgerKey(
-                holder.wallet_id,
-                row.source_id,
-                side,
-              ),
-            )
-          : null;
-        const positionIsRecent =
-          latestPosition?.positionSizeUsd != null &&
-          latestPosition.positionSizeUsd > 0 &&
-          isRecent(latestPosition.snapshotAt);
-        const metricsAreRecent = isRecent(holder.metrics_as_of);
-        return {
-          address: holder.address,
-          chain: holder.chain,
-          side,
-          outcomeLabel: outcomeLabel(row, side),
-          descriptor: null,
-          displayName: publicHolderDisplayName({
-            profileLabel: holder.profile_label,
-            identityDisplayName: meta.identityDisplayName,
-            identityDisplayNameSource: meta.identityDisplayNameSource,
-            address: holder.address,
-          }),
-          positionUsd: finiteNumber(meta.positionUsd),
-          openPnlUsd: finiteNumber(meta.openPnlUsd),
-          positionResult: latestPosition?.positionResult ?? null,
-          latestPosition: positionIsRecent
-            ? {
-                positionUsd: latestPosition.positionSizeUsd,
-                openPnlUsd:
-                  latestPosition.approxReliable &&
-                  latestPosition.approxPnlSource === "activity"
-                    ? latestPosition.openPnlUsd
-                    : null,
-              }
-            : null,
-          pnl30dUsd: finiteNumber(meta.pnl30dUsd),
-          resolvedWinRateEdge30d: finiteNumber(meta.resolvedWinRateEdge30d),
-          resolvedEdgeSampleCount30d: finiteNumber(
-            meta.resolvedEdgeSampleCount30d,
-          ),
-          trades30d: finiteNumber(meta.trades30d),
-          latestMetrics: metricsAreRecent
-            ? {
-                pnl30dUsd: finiteNumber(holder.metrics_pnl_30d),
-                resolvedWinRateEdge30d: finiteNumber(
-                  holder.metrics_resolved_win_rate_edge_30d,
-                ),
-                resolvedEdgeSampleCount30d: finiteNumber(
-                  holder.metrics_resolved_edge_sample_count_30d,
-                ),
-                trades30d: finiteNumber(holder.metrics_trades_30d),
-              }
-            : null,
+        const positionKeys = holderRows.flatMap((holder) => {
+          const side = nonEmptyString(
+            record(holder.target_meta).side,
+          )?.toUpperCase();
+          return holder.wallet_id &&
+            row.market_venue &&
+            (side === "YES" || side === "NO")
+            ? [
+                {
+                  walletId: holder.wallet_id,
+                  venue: row.market_venue,
+                  marketId: row.source_id,
+                  outcomeSide: side,
+                },
+              ]
+            : [];
+        });
+        let latestPositions: LatestHolderPositionMap = new Map();
+        if (positionKeys.length > 0) {
+          try {
+            latestPositions = await loadLatestHolderPositions(positionKeys);
+          } catch (error) {
+            request.log.warn(
+              { error, noteId: row.id },
+              "Latest holder positions unavailable; using research snapshots",
+            );
+          }
+        }
+        const now = Date.now();
+        const researchedAt = new Date(row.created_at).getTime();
+        const isRecent = (value: Date | string | null | undefined) => {
+          if (!value) return false;
+          const timestamp = new Date(value).getTime();
+          return (
+            Number.isFinite(timestamp) &&
+            timestamp >= researchedAt - 5 * 60_000 &&
+            timestamp <= now + 5 * 60_000 &&
+            now - timestamp <= LATEST_HOLDER_MAX_AGE_MS
+          );
         };
-      });
-      return { ok: true, item: { ...toPublicHunch(row), holders } };
-    },
-  );
+        const holders = holderRows.map((holder) => {
+          const meta = record(holder.target_meta);
+          const side = nonEmptyString(meta.side)?.toUpperCase() ?? null;
+          const latestPosition = holder.wallet_id
+            ? latestPositions.get(
+                makeWalletPositionLedgerKey(
+                  holder.wallet_id,
+                  row.source_id,
+                  side,
+                ),
+              )
+            : null;
+          const positionIsRecent =
+            latestPosition?.positionSizeUsd != null &&
+            latestPosition.positionSizeUsd > 0 &&
+            isRecent(latestPosition.snapshotAt);
+          const metricsAreRecent = isRecent(holder.metrics_as_of);
+          return {
+            address: holder.address,
+            chain: holder.chain,
+            side,
+            outcomeLabel: outcomeLabel(row, side),
+            descriptor: null,
+            displayName: publicHolderDisplayName({
+              profileLabel: holder.profile_label,
+              identityDisplayName: meta.identityDisplayName,
+              identityDisplayNameSource: meta.identityDisplayNameSource,
+              address: holder.address,
+            }),
+            positionUsd: finiteNumber(meta.positionUsd),
+            openPnlUsd: finiteNumber(meta.openPnlUsd),
+            positionResult: latestPosition?.positionResult ?? null,
+            latestPosition: positionIsRecent
+              ? {
+                  positionUsd: latestPosition.positionSizeUsd,
+                  openPnlUsd:
+                    latestPosition.approxReliable &&
+                    latestPosition.approxPnlSource === "activity"
+                      ? latestPosition.openPnlUsd
+                      : null,
+                }
+              : null,
+            pnl30dUsd: finiteNumber(meta.pnl30dUsd),
+            resolvedWinRateEdge30d: finiteNumber(meta.resolvedWinRateEdge30d),
+            resolvedEdgeSampleCount30d: finiteNumber(
+              meta.resolvedEdgeSampleCount30d,
+            ),
+            trades30d: finiteNumber(meta.trades30d),
+            latestMetrics: metricsAreRecent
+              ? {
+                  pnl30dUsd: finiteNumber(holder.metrics_pnl_30d),
+                  resolvedWinRateEdge30d: finiteNumber(
+                    holder.metrics_resolved_win_rate_edge_30d,
+                  ),
+                  resolvedEdgeSampleCount30d: finiteNumber(
+                    holder.metrics_resolved_edge_sample_count_30d,
+                  ),
+                  trades30d: finiteNumber(holder.metrics_trades_30d),
+                }
+              : null,
+          };
+        });
+        const tags = await loadIntelTags(pool, [row.id], {
+          limitlessPositionContract: options.limitlessPositionContract,
+          onError: (stage) =>
+            request.log.warn({ stage }, "Intel tag enrichment unavailable"),
+        });
+        return {
+          ok: true as const,
+          item: { ...toPublicHunch(row, tags.byId.get(row.id)), holders },
+        };
+      },
+    );
+  };
+}
+
+export const hunchesRoutes: FastifyPluginAsync = async (app) => {
+  const { pool } = await import("../db.js");
+  return createHunchesRoutes(pool, {
+    limitlessPositionContract: resolveLimitlessPositionContract(),
+  })(app, {});
 };

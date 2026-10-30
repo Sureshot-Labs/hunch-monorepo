@@ -49,6 +49,8 @@ import {
 } from "./social-trader-ranking-cursor.js";
 import { buildSocialTraderStatisticsRevision } from "./social-trader-statistics-policy.js";
 import { paperPerformanceSchema } from "../schemas/social.js";
+import { loadIntelTags } from "./intel-tags-loader.js";
+import { emptyIntelTags } from "./intel-tags.js";
 
 type Row = {
   is_agent?: boolean;
@@ -1198,12 +1200,22 @@ export class SocialService {
       where n.id=any($2::uuid[]) and ${SOCIAL_PUBLIC_AI}`,
       [viewerId, ids],
     );
+    const tagResult = await loadIntelTags(
+      this.db,
+      rows.map((row) => row.id),
+      {
+        limitlessPositionContract: this.options.limitlessPositionContract,
+        onError: (stage) =>
+          console.warn("[intel-tags] enrichment unavailable", { stage }),
+      },
+    );
     return rows.map((row) => {
       const instrument = verifiedBuyFactsSchema.shape.instrument.safeParse(
         row.instrument_snapshot,
       );
       return {
         kind: "hunch" as const,
+        ...(tagResult.byId.get(row.id) ?? emptyIntelTags()),
         id: row.id,
         noteType: row.note_type as "signal" | "context",
         title: row.title,
