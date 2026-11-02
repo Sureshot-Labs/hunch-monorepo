@@ -4516,7 +4516,7 @@ const tests: TestCase[] = [
       assert.match(queries[0]?.sql ?? "", /last_refresh_attempted_at/);
       assert.match(queries[0]?.sql ?? "", /last_selected_at/);
       assert.match(queries[0]?.sql ?? "", /wts\.venue = any\(\$6::text\[\]\)/);
-      assert.deepEqual(queries[0]?.params, [
+      assert.deepEqual(queries[0]?.params.slice(0, 6), [
         150,
         asOf,
         6,
@@ -4524,6 +4524,99 @@ const tests: TestCase[] = [
         14,
         ["polymarket", "limitless"],
       ]);
+      assert.match(
+        queries[0]?.sql ?? "",
+        /lower\(w.address\) <> all\(\$7::text\[\]\)/,
+      );
+      assert.ok(
+        (queries[0]?.params[6] as string[]).includes(
+          "0x0000000000000000000000000000000000000000",
+        ),
+      );
+    },
+  },
+  {
+    name: "partial Polymarket discovery cannot zero holdings and checkpoint progress has no failure cooldown",
+    run: async () => {
+      const tracked = {
+        wallet_id: "11111111-1111-4111-8111-111111111111",
+        address: "0x1111111111111111111111111111111111111111",
+        chain: "polygon" as const,
+        venue: "polymarket" as const,
+        sources: ["whale" as const],
+        priority: 100,
+      };
+      for (const reason of [
+        "time_budget",
+        "upstream_timeout",
+        "rate_limited",
+      ] as const) {
+        const queries: string[] = [];
+        const client = {
+          query: async (sql: string) => {
+            queries.push(sql);
+            return { rows: [], rowCount: 0 };
+          },
+        };
+        const result = await collectAutoTrackedWalletSnapshotRows(
+          client as never,
+          {
+            autoTrackedWallets: [tracked],
+            previousOpenPositions: [
+              {
+                wallet_id: tracked.wallet_id,
+                venue: "polymarket",
+                market_id: "polymarket:previous",
+                outcome_side: "YES",
+                token_id: "123",
+                price: "0.5",
+              },
+            ],
+            snapshotAt: new Date("2026-11-02T12:00:00Z"),
+            tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+            tokenIndexByVenue: {
+              polymarket: new Map(),
+              limitless: new Map(),
+              kalshi: new Map(),
+            },
+            telemetry: {} as never,
+            autoTrackedWalletFetchConcurrency: 1,
+            touchedWalletIds: new Set(),
+            discoverPolymarketPositions: async () => ({
+              status: "deferred",
+              reason,
+              tokens: [],
+              pages: 25,
+              pagesThisSlice: 5,
+              discoveredTokens: 12000,
+              elapsedMs: 15000,
+              resumed: true,
+              checkpointAvailable: true,
+              retries: 1,
+              cursorRestarts: 0,
+              httpStatus: null,
+              parameter: null,
+              traceId: null,
+            }),
+          },
+        );
+        assert.deepEqual(result.refreshedWallets, []);
+        assert.deepEqual(result.previousOpenMarketKeys, []);
+        assert.deepEqual(result.marketIds, []);
+        assert.equal(result.rowInserts, 0);
+        assert.equal(
+          result.attemptedWallets.length,
+          reason === "time_budget" ? 0 : 1,
+        );
+        assert.equal(
+          queries.some((sql) =>
+            /insert into wallet_position_snapshots|insert into wallet_activity/i.test(
+              sql,
+            ),
+          ),
+          false,
+        );
+      }
     },
   },
   {
