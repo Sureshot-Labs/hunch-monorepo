@@ -17,6 +17,34 @@ export function isExpiredSolanaPreparation(value: unknown, now: Date): boolean {
   );
 }
 
+/** Durable server closure, NOT a client cancellation or an inferred timeout.
+ * The reference-null database constraint also requires both encrypted reference
+ * fields and the lookup key to be null. The registered-submission marker takes
+ * precedence even if a damaged record otherwise resembles an expired lease.
+ */
+export function isClosedUnbroadcastSolanaPreparation(
+  input: Readonly<{
+    executorId: string;
+    actionKind: string | null;
+    outcome: string | null;
+    broadcastMayHaveOccurred: boolean | null;
+    referenceKind: string | null;
+    actualCosts: Readonly<Record<string, unknown>> | null;
+    now: Date;
+  }>,
+): boolean {
+  return (
+    input.executorId === "wallet_profile_svm_v1" &&
+    input.actionKind === "svm_transaction" &&
+    input.outcome === "cancelled" &&
+    input.broadcastMayHaveOccurred === false &&
+    input.referenceKind === null &&
+    input.actualCosts?.reasonCode === "solana_pre_submit_lease_expired" &&
+    !Object.hasOwn(input.actualCosts, "verifiedSolanaSubmission") &&
+    isExpiredSolanaPreparation(input.actualCosts.solanaPreparation, input.now)
+  );
+}
+
 /** Caller holds the operation lock, also used by signed-transaction registration.
  * Registration wins => never close it. Closure wins => registration rejects the
  * terminal attempt, so the negotiated client cannot broadcast a late signature.

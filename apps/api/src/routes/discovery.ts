@@ -4,6 +4,7 @@ import {
   discoveryErrorSchema,
   discoveryQuerySchema,
   discoveryQuickQuerySchema,
+  discoverySmartQuerySchema,
   discoveryResponseSchema,
   discoverySections,
   type DiscoveryQuery,
@@ -41,7 +42,9 @@ export function createDiscoveryRoutes(service: {
             querystring:
               section === "quick-wins"
                 ? discoveryQuickQuerySchema
-                : discoveryQuerySchema,
+                : section === "smart-money"
+                  ? discoverySmartQuerySchema
+                  : discoveryQuerySchema,
             response: {
               200: discoveryResponseSchema,
               400: z.object({ error: z.string(), code: z.string().optional() }),

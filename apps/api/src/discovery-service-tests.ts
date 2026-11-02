@@ -12,7 +12,9 @@ import { DiscoveryService } from "./services/discovery-service.js";
 import { DiscoveryError } from "./services/discovery-domain.js";
 import {
   discoveryQuerySchema,
+  discoverySmartQuerySchema,
   discoveryResponseSchema,
+  type DiscoveryItem,
 } from "./schemas/discovery.js";
 import {
   discoveryTestComponents,
@@ -27,6 +29,213 @@ async function test(name: string, run: () => Promise<void>): Promise<void> {
   await run();
   console.log(`[discovery-service-tests] ok ${name}`);
 }
+async function setupSmart(
+  asks: string[],
+  eventIds?: string[],
+  side: "YES" | "NO" = "YES",
+) {
+  const items: DiscoveryItem[] = asks.map((ask, i) => {
+    const item = discoveryTestItem(`limitless:${i}`, {
+      best_ask: ask,
+      best_bid: "0.1",
+      side,
+      ...(eventIds ? { event_id: eventIds[i] } : {}),
+    });
+    return {
+      ...item,
+      id: `smart-money:${i}:${side}`,
+      reason: {
+        kind: "smart-money",
+        evidenceBasis: "observed_snapshot_increase",
+        ownerGroups: 12 - Math.min(i, 10),
+        oppositeOwnerGroups: 1,
+        observedIncreaseValueUsd: "1000",
+        observedAt: new Date(discoveryTestNow).toISOString(),
+        windowHours: 24,
+        traders: [],
+        opposingViews: true,
+      },
+    };
+  });
+  const parts = discoveryTestComponents(items),
+    snapshot = {
+      ...discoveryTestSnapshot(items),
+      section: "smart-money" as const,
+    };
+  await parts.store.acquire("smart-money", "smart");
+  await parts.store.publish("smart-money", "smart", snapshot);
+  await parts.store.release("smart-money", "smart");
+  // Quote rows are intentionally separate from the prepared snapshot.
+  asks.forEach((ask, i) =>
+    parts.repo.rows.set(
+      `limitless:${i}`,
+      discoveryTestRow(`limitless:${i}`, {
+        best_ask: ask,
+        best_bid: "0.1",
+        side,
+        ...(eventIds ? { event_id: eventIds[i] } : {}),
+      }),
+    ),
+  );
+  const service = new DiscoveryService(
+    parts.builder,
+    async () => parts.store,
+    async () => discoveryTestScope,
+    () => discoveryTestNow,
+  );
+  return { ...parts, snapshot, service };
+}
+await test("Smart Money caps live ask before event representatives and binds normalized price filters to cursors", async () => {
+  const c = await setupSmart(
+    ["0.999", "0.94", "0.95", "0.96", "0.4"],
+    ["one", "one", "two", "three", "four"],
+  );
+  const page = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({ limit: 1 }),
+  );
+  assert.equal(page.items[0].market.marketId, "limitless:1");
+  assert.ok(page.nextCursor);
+  const next = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({
+      cursor: page.nextCursor,
+      maxAsk: "0.9500",
+      limit: 50,
+    }),
+  );
+  assert.deepEqual(
+    next.items.map((i) => i.market.marketId),
+    ["limitless:2", "limitless:4"],
+  );
+  assert.equal(next.nextCursor, null);
+  await assert.rejects(
+    () =>
+      c.service.read(
+        "smart-money",
+        discoverySmartQuerySchema.parse({
+          cursor: page.nextCursor,
+          maxAsk: "1",
+        }),
+      ),
+    (e: unknown) =>
+      e instanceof DiscoveryError && e.code === "discovery_invalid_cursor",
+  );
+  const all = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({ maxAsk: "1" }),
+  );
+  assert.deepEqual(
+    all.items.map((i) => i.market.marketId),
+    ["limitless:0", "limitless:2", "limitless:3", "limitless:4"],
+  );
+  // Crossing either direction uses the current price, never the cached ask.
+  c.repo.rows.set(
+    "limitless:0",
+    discoveryTestRow("limitless:0", {
+      best_ask: "0.9",
+      best_bid: "0.89",
+      event_id: "one",
+    }),
+  );
+  c.repo.rows.set(
+    "limitless:2",
+    discoveryTestRow("limitless:2", { best_ask: "0.951", event_id: "two" }),
+  );
+  const changed = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({}),
+  );
+  assert.deepEqual(
+    changed.items.map((i) => i.market.marketId),
+    ["limitless:0", "limitless:4"],
+  );
+  assert.equal(c.snapshot.items.length, 5, "the full pool is retained");
+  assert.ok(
+    (
+      await c.service.read(
+        "smart-money",
+        discoverySmartQuerySchema.parse({ q: "absent" }),
+      )
+    ).items.length === 0,
+  );
+  await c.service.stop();
+});
+await test("Smart Money filtered work budget keeps a continuation inside a large event", async () => {
+  const c = await setupSmart(
+    [...Array<string>(205).fill("0.999"), "0.9"],
+    Array<string>(206).fill("same-event"),
+  );
+  const page = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({}),
+  );
+  assert.deepEqual(page.items, []);
+  assert.equal(page.page.scannedCandidates, 200);
+  assert.equal(page.page.scanBudgetReached, true);
+  assert.ok(page.nextCursor);
+  const next = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({ cursor: page.nextCursor }),
+  );
+  assert.deepEqual(
+    next.items.map((i) => i.market.marketId),
+    ["limitless:205"],
+  );
+  assert.equal(next.nextCursor, null);
+  await c.service.stop();
+});
+await test("Smart Money NO cap uses exact decimals; show-all cannot bypass live trading safeguards", async () => {
+  const c = await setupSmart(
+    ["0.950000000000000001", "0.95", "0.999", "0.5"],
+    undefined,
+    "NO",
+  );
+  const normal = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({}),
+  );
+  assert.deepEqual(
+    normal.items.map((i) => i.market.marketId),
+    ["limitless:1", "limitless:3"],
+  );
+  assert.ok(normal.items.every((i) => i.selection.side === "NO"));
+  const exact = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({ maxAsk: "0.950000000000000001" }),
+  );
+  assert.deepEqual(
+    exact.items.map((i) => i.market.marketId),
+    ["limitless:0", "limitless:1", "limitless:3"],
+  );
+  const all = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({ maxAsk: "1" }),
+  );
+  assert.equal(all.items.length, 4);
+  for (const [i, changes] of [
+    [0, { quote_at: new Date(discoveryTestNow - 300001).toISOString() }],
+    [1, { status: "CLOSED" }],
+    [2, { token_id: "new-generation" }],
+    [3, { best_ask: null, best_bid: null }],
+  ] as const)
+    c.repo.rows.set(
+      `limitless:${i}`,
+      discoveryTestRow(`limitless:${i}`, {
+        side: "NO",
+        best_bid: "0.1",
+        best_ask: "0.9",
+        ...changes,
+      }),
+    );
+  const unavailable = await c.service.read(
+    "smart-money",
+    discoverySmartQuerySchema.parse({ maxAsk: "1" }),
+  );
+  assert.deepEqual(unavailable.items, []);
+  assert.equal(unavailable.nextCursor, null);
+  await c.service.stop();
+});
 
 async function setup(count = 60) {
   let now = discoveryTestNow;
@@ -284,6 +493,26 @@ await test("Fastify routes validate filters, expose typed OpenAPI and error reco
     const unavailable = await app.inject("/discovery/smart-money");
     assert.equal(unavailable.statusCode, 503);
     assert.equal(unavailable.headers["retry-after"], "15");
+    for (const value of [
+      "0",
+      "0.0",
+      "-0.1",
+      "1.01",
+      "NaN",
+      "1e-2",
+      "",
+      "0.9500000000000000001",
+    ])
+      assert.equal(
+        (await app.inject(`/discovery/smart-money?maxAsk=${value}`)).statusCode,
+        400,
+        value,
+      );
+    for (const section of ["quick-wins", "hidden-gems"])
+      assert.equal(
+        (await app.inject(`/discovery/${section}?maxAsk=1`)).statusCode,
+        400,
+      );
     const spec = app.swagger();
     for (const name of ["quick-wins", "smart-money", "hidden-gems"])
       assert.ok(spec.paths?.[`/discovery/${name}`]);

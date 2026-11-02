@@ -357,6 +357,8 @@ export function normalizeDiscoveryQuery(query: DiscoveryQuery) {
     venues: list(query.venues),
     withResearch: query.withResearch === "true",
     horizonHours: query.horizonHours ?? 72,
+    // Omit for other sections and the independent traders cursor contract.
+    ...(query.maxAsk === undefined ? {} : { maxAsk: sub(query.maxAsk, "0") }),
   };
 }
 export function discoveryFilterHash(

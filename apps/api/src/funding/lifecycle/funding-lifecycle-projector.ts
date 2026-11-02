@@ -92,6 +92,8 @@ export type FundingLifecycleActionAttempt = Readonly<{
   clientExecutionFailed?: boolean;
   /** Versioned server-owned Safe hash identity exists before submission. */
   safeSubmissionRecoverable?: boolean;
+  /** Negotiated Solana lease closed by the server before signature registration. */
+  unbroadcastSolanaPreparationClosed?: boolean;
   startedAt: Date;
   updatedAt: Date;
   receipt: FundingLifecycleActionReceipt | null;
@@ -682,7 +684,10 @@ function expiredWithoutSourceExecution(
     action.attempts.every(
       (attempt) =>
         fundingAttemptHasSafeRetryEvidence({ receipt: attempt.receipt }) ||
-        (attempt.outcome === "failed" &&
+        ((attempt.outcome === "failed" ||
+          (action.executorId === "wallet_profile_svm_v1" &&
+            attempt.outcome === "cancelled" &&
+            attempt.unbroadcastSolanaPreparationClosed === true)) &&
           !attempt.broadcastMayHaveOccurred &&
           attempt.referenceKind === null &&
           attempt.receipt === null),
