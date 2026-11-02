@@ -16,6 +16,10 @@ import {
 import { polymarketOrderStorageContractSql } from "./lib/polymarket-order-ledger-sql.js";
 
 import { pool } from "./db.js";
+import { serialQueryClient } from "./lib/serial-query-client.js";
+import { discoverWalletIntelPositions } from "./services/wallet-intel-position-discovery.js";
+import { walletIntelProtocolAddresses } from "./services/wallet-intel-protocol-addresses.js";
+import { WALLET_INTEL_AUTO_TRACKED_SQL } from "./services/wallet-intel-auto-tracked-selection.js";
 import { WALLET_INTEL_WHALE_MARKETS_SQL } from "./services/wallet-intel-whale-selection.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
@@ -48,7 +52,6 @@ import {
   estimateErc1155BalanceRpcCalls,
   estimateErc1155OwnerTokenPairRpcCalls,
   extractLimitlessTokenBalances,
-  fetchPolymarketDataApiPositionSnapshots,
   fetchPolymarketOwnerBalancesByLedger,
   assertCompleteTokenBalanceRead,
   isLimitlessPublicPortfolioUserNotFound,
@@ -219,6 +222,20 @@ const SYSTEM_TAGS = [
   { slug: "dormant", label: "Dormant", tagType: "behavior" },
   { slug: "whale", label: "Whale", tagType: "performance" },
 ] as const;
+function protocolWalletExclusions() {
+  return walletIntelProtocolAddresses([
+    env.polymarketNegRiskAdapterAddress,
+    env.polymarketExchangeAddress,
+    env.polymarketNegRiskExchangeAddress,
+    env.polymarketConditionalTokensAddress,
+    env.polymarketCollateralOnrampAddress,
+    env.polymarketCollateralOfframpAddress,
+    env.polymarketCtfCollateralAdapterAddress,
+    env.polymarketNegRiskCollateralAdapterAddress,
+    env.polymarketSafeFactoryAddress,
+    env.polymarketMagicProxyFactoryAddress,
+  ]);
+}
 const REFRESH_ADVISORY_LOCK_KEY_1 = 4207;
 const REFRESH_ADVISORY_LOCK_KEY_2 = 1;
 // The five-minute selector job is expected to finish quickly and retry when the
@@ -2545,57 +2562,15 @@ export async function loadAutoTrackedWalletRows(
     venue: Venue;
     sources: AutoTrackedWalletSource[] | null;
     priority: string | number | null;
-  }>(
-    `
-      select
-        w.id::text as wallet_id,
-        w.address,
-        w.chain,
-        wts.venue,
-        array_agg(distinct wts.source order by wts.source) as sources,
-        max(wts.priority) as priority
-      from wallet_tracking_subjects wts
-      join wallets w on w.id = wts.wallet_id
-      where wts.status = 'active'
-        and wts.source in ('whale', 'recent_top_holder', 'signal_candidate')
-        and wts.venue = any($6::text[])
-        and (
-          $5::int <= 0 or
-          (
-            wts.last_selected_at is not null and
-            wts.last_selected_at >= $2::timestamptz - ($5::int * interval '1 day')
-          )
-        )
-        and (
-          (wts.venue = 'polymarket' and w.chain = 'polygon') or
-          (wts.venue = 'limitless' and w.chain = 'base') or
-          (wts.venue = 'kalshi' and w.chain = 'solana')
-        )
-        and (
-          wts.last_refreshed_at is null or
-          wts.last_refreshed_at <= $2::timestamptz - ($3::int * interval '1 hour')
-        )
-        and (
-          wts.last_refresh_attempted_at is null or
-          wts.last_refreshed_at >= wts.last_refresh_attempted_at or
-          wts.last_refresh_attempted_at <= $2::timestamptz - ($4::int * interval '1 minute')
-        )
-      group by w.id, w.address, w.chain, wts.venue
-      order by
-        max(wts.priority) desc,
-        min(coalesce(wts.last_refreshed_at, 'epoch'::timestamptz)) asc,
-        min(wts.created_at) asc
-      limit $1
-    `,
-    [
-      inputs.limit,
-      inputs.asOf,
-      Math.max(1, inputs.refreshHours),
-      Math.max(1, inputs.attemptBackoffMinutes),
-      Math.max(0, inputs.subjectTtlDays),
-      inputs.liveVenues,
-    ],
-  );
+  }>(WALLET_INTEL_AUTO_TRACKED_SQL, [
+    inputs.limit,
+    inputs.asOf,
+    Math.max(1, inputs.refreshHours),
+    Math.max(1, inputs.attemptBackoffMinutes),
+    Math.max(0, inputs.subjectTtlDays),
+    inputs.liveVenues,
+    protocolWalletExclusions(),
+  ]);
 
   return rows.map((row) => ({
     wallet_id: row.wallet_id,
@@ -3216,12 +3191,31 @@ async function fetchPolymarketAutoTrackedTokenBalances(
   inputs: {
     address: string;
     previousOpenTokenIds: string[];
+    onProgressPending?: () => void;
+    discover?: typeof discoverWalletIntelPositions;
   },
-): Promise<WalletTokenBalance[]> {
-  const snapshots = await fetchPolymarketDataApiPositionSnapshots(
-    inputs.address,
+): Promise<WalletTokenBalance[] | null> {
+  const discovery = await (inputs.discover ?? discoverWalletIntelPositions)({
+    owner: inputs.address,
+    baseUrl: env.polymarketDataApiBase,
+    protocolAddresses: protocolWalletExclusions(),
+  });
+  const { tokens: discovered, ...diagnostic } = discovery;
+  console.log(
+    "[wallets:intel:refresh] polymarket position discovery",
+    diagnostic,
   );
-  const dataApiTokenIds = snapshots.map((snapshot) => snapshot.tokenId);
+  if (discovery.status !== "complete") {
+    if (
+      discovery.status === "deferred" &&
+      discovery.checkpointAvailable &&
+      discovery.pagesThisSlice > 0 &&
+      ["time_budget", "page_budget"].includes(discovery.reason)
+    )
+      inputs.onProgressPending?.();
+    return null;
+  }
+  const dataApiTokenIds = discovered.map((snapshot) => snapshot.tokenId);
   const tokenIds = Array.from(
     new Set([...dataApiTokenIds, ...inputs.previousOpenTokenIds]),
   );
@@ -3504,6 +3498,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
     telemetry: WalletIntelRefreshTelemetry;
     autoTrackedWalletFetchConcurrency: number;
     touchedWalletIds: Set<string>;
+    discoverPolymarketPositions?: typeof discoverWalletIntelPositions;
   },
 ): Promise<AutoTrackedCollectionResult> {
   if (inputs.autoTrackedWallets.length === 0) {
@@ -3522,6 +3517,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
   let rowInserts = 0;
   const marketIds = new Set<string>();
   const attemptedWallets: AutoTrackedWalletRow[] = [];
+  const progressPending = new Set<string>();
   const refreshedWallets: AutoTrackedWalletRow[] = [];
   const successfulWalletVenueKeys = new Set<string>();
   const fetchStartedAt = Date.now();
@@ -3544,13 +3540,23 @@ export async function collectAutoTrackedWalletSnapshotRows(
           if (tracked.venue === "polymarket" && tracked.chain === "polygon") {
             const address = normalizeAddress(tracked.address, "polygon");
             if (!address) return null;
-            tokenBalances = await fetchPolymarketAutoTrackedTokenBalances(
+            const balances = await fetchPolymarketAutoTrackedTokenBalances(
               client,
               {
                 address,
                 previousOpenTokenIds,
+                onProgressPending: () =>
+                  progressPending.add(
+                    buildAutoTrackedWalletVenueKey(
+                      tracked.wallet_id,
+                      tracked.venue,
+                    ),
+                  ),
+                discover: inputs.discoverPolymarketPositions,
               },
             );
+            if (balances === null) return null;
+            tokenBalances = balances;
           } else if (
             tracked.venue === "limitless" &&
             tracked.chain === "base"
@@ -3813,6 +3819,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
     pricedRows,
     freshPricedRows,
     unpricedRows,
+    pendingPositionDiscovery: progressPending.size,
   });
 
   return {
@@ -3821,7 +3828,14 @@ export async function collectAutoTrackedWalletSnapshotRows(
     activityRows: rowInserts,
     marketIds: Array.from(marketIds),
     previousOpenMarketKeys,
-    attemptedWallets,
+    // Successful checkpoint progress is not a failed attempt: allow immediate
+    // continuation/explicit repair instead of imposing the failure backoff.
+    attemptedWallets: attemptedWallets.filter(
+      (row) =>
+        !progressPending.has(
+          buildAutoTrackedWalletVenueKey(row.wallet_id, row.venue),
+        ),
+    ),
     refreshedWallets,
   };
 }
@@ -7741,7 +7755,9 @@ async function runSnapshot(
     `[wallets:intel:refresh] start startedAt=${runStartedAt.toISOString()} markets=${marketLimit} holders=${holderLimit} snapshot=${snapshotAt.toISOString()} liveVenues=${liveVenues.join(",") || "none"} lifecycleRevision=${liveIntelScope.revision} marketFetchConcurrency=${marketFetchConcurrency} followedFetchConcurrency=${followedFetchConcurrency} autoTrackedWalletFetchConcurrency=${autoTrackedWalletFetchConcurrency} autoTrackedFreshPriceCheckEnabled=${walletIntelRefreshPolicy.autoTrackedFreshPriceCheckEnabled} freshPriceMaxAgeMs=${walletIntelRefreshPolicy.freshPriceMaxAgeMs} freshPriceTimeoutMs=${walletIntelRefreshPolicy.freshPriceTimeoutMs}`,
   );
 
-  const client = await pool.connect();
+  const connection = await pool.connect();
+  const serial = serialQueryClient(connection);
+  const client = serial.client;
   try {
     await client.query("SET statement_timeout = '300s'");
     const tagIds = await ensureSystemTags(client);
@@ -8274,7 +8290,8 @@ async function runSnapshot(
       `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} autoTracked=${autoTrackedProcessed} autoTrackedRows=${autoTrackedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors} onchainStateSelected=${onchainStateRefresh.selected} onchainIdentitiesInspected=${onchainStateRefresh.identitiesInspected} onchainIdentityErrors=${onchainStateRefresh.identityErrors} identityNamesSelected=${onchainStateRefresh.identityNamesSelected} identityNamesUpdated=${onchainStateRefresh.identityNamesUpdated} identityNamesPolymarketResolved=${onchainStateRefresh.identityNamesPolymarketResolved} identityNamesPolymarketNotFound=${onchainStateRefresh.identityNamesPolymarketNotFound} identityNamesPolymarketFresh=${onchainStateRefresh.identityNamesPolymarketFresh} identityNamesPolymarketErrors=${onchainStateRefresh.identityNamesPolymarketErrors} identityNamesEnsSkipped=${onchainStateRefresh.identityNamesEnsSkipped} onchainOwnersUpserted=${onchainStateRefresh.ownersUpserted} onchainBalancesFetched=${onchainStateRefresh.balancesFetched} onchainBalanceSubjectsFetched=${onchainStateRefresh.balanceSubjectsFetched} onchainOwnerBalanceSubjects=${onchainStateRefresh.ownerBalanceSubjects} onchainSkippedInvalidAddresses=${onchainStateRefresh.skippedInvalidAddresses} onchainStateUpserts=${onchainStateRefresh.stateUpserts}`,
     );
   } finally {
-    client.release();
+    await serial.drain();
+    connection.release();
   }
 }
 

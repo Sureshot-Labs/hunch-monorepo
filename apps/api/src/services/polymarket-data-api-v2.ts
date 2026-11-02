@@ -6,6 +6,12 @@ export type PolymarketDataApiPage<T> = {
   data: T[];
   nextCursor: string | null;
 };
+export class PolymarketDataApiV2CursorError extends Error {
+  constructor() {
+    super("Polymarket Data API V2 repeated a pagination cursor.");
+    this.name = "PolymarketDataApiV2CursorError";
+  }
+}
 
 export class PolymarketDataApiV2Error extends Error {
   constructor(
@@ -14,6 +20,11 @@ export class PolymarketDataApiV2Error extends Error {
     public readonly retryable: boolean,
     public readonly traceId: string | null,
     public readonly retryAfterMs: number | null,
+    public readonly parameter: string | null = null,
+    public readonly reason:
+      | "protocol_contract"
+      | "invalid_cursor"
+      | null = null,
   ) {
     super(`Polymarket Data API V2 request failed (${status}).`);
     this.name = "PolymarketDataApiV2Error";
@@ -91,6 +102,18 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
         : response.status === 429 || response.status >= 500,
       typeof error.trace_id === "string" ? error.trace_id : null,
       parseRetryAfterMs(response.headers.get("retry-after")),
+      typeof error.parameter === "string" &&
+        /^[a-z_]{1,40}$/i.test(error.parameter)
+        ? error.parameter
+        : null,
+      response.status === 400 &&
+        error.parameter === "user" &&
+        typeof error.error === "string" &&
+        /user is a protocol contract address/i.test(error.error)
+        ? "protocol_contract"
+        : response.status === 400 && error.parameter === "cursor"
+          ? "invalid_cursor"
+          : null,
     );
   }
   const page = parsePolymarketDataApiV2Page(
@@ -99,7 +122,7 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
   );
   signal.throwIfAborted();
   if (inputs.cursor != null && page.nextCursor === inputs.cursor)
-    throw new Error("Polymarket Data API V2 repeated a pagination cursor.");
+    throw new PolymarketDataApiV2CursorError();
   return page;
 }
 
