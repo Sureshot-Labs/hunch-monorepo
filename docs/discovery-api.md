@@ -6,15 +6,17 @@ Mobile integration guide (Russian), including request/response examples and UI s
 
 ## Endpoints and filters
 
-| GET endpoint             | Selection                                                       | Additional filter                      |
-| ------------------------ | --------------------------------------------------------------- | -------------------------------------- |
-| `/discovery/quick-wins`  | Near-term markets with high-priced, narrow-spread outcomes      | `horizonHours=24\|72\|168`, default 72 |
-| `/discovery/smart-money` | Observed position increases by qualified, distinct owner groups | None                                   |
-| `/discovery/hidden-gems` | Recent public, quality-gated holder research                    | None                                   |
+| GET endpoint             | Selection                                                       | Additional filter                                       |
+| ------------------------ | --------------------------------------------------------------- | ------------------------------------------------------- |
+| `/discovery/quick-wins`  | Near-term markets with high-priced, narrow-spread outcomes      | `horizonHours=24\|72\|168`, default 72                  |
+| `/discovery/smart-money` | Observed position increases by qualified, distinct owner groups | `maxAsk`, default `0.95`; `1` shows all eligible prices |
+| `/discovery/hidden-gems` | Recent public, quality-gated holder research                    | None                                                    |
 
 Common parameters: `limit` (1–50, default 20), `cursor`, `q` (at most 100 characters), comma-separated `categories` and `venues`. Venue values are `polymarket`, `limitless`, `kalshi`; live venue lifecycle policy still controls availability. Category identifiers use lowercase letters, digits, underscores and hyphens; an absent category returns an empty collection. Search normalizes case, accents and whitespace and requires every query term in the event, market or outcome name. There is no translation or semantic search.
 
 `withResearch=true` restricts Quick Wins and Smart Money to markets with a current public approved directional research note. Hidden Gems already requires that research. Filters apply before choosing an event representative and before pagination. Changing filters requires a new traversal; changing `limit` is allowed.
+
+Smart Money alone accepts `maxAsk`: a positive decimal string up to 1 (at most 18 decimal places), default `0.95`. It caps the **current selected-side ask**, inclusively, during live hydration before selecting the event representative. `maxAsk=1` shows all otherwise eligible prices; it does not admit settled markets, stale quotes or invalid instruments. All candidates remain in the prepared pool. Ordering remains owner-group count, observed increase value, then stable ID; price is a filter, not a predicted return score. A different market of the same event can replace an over-cap candidate. Preserve `maxAsk` when following `nextCursor`; a filter change (including pre-cap collection cursors issued by an older release) requires a fresh traversal. The separate traders endpoint/cursors and its frozen cohort are unchanged.
 
 Research presence is not endorsement of the selected side: for Quick Wins and Smart Money, `research.side` may differ from `selection.side`. Display the research as an opposing view in that case, not as support for the selected ticket. Research has its own instrument and dated price; never silently use its price or side for the Discovery selection.
 

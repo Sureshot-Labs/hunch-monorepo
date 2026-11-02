@@ -57,6 +57,14 @@ try {
     assert.match(JSON.stringify(reason), /hidden-gems/);
     assert.match(JSON.stringify(operation), /published_research/);
     assert.match(JSON.stringify(operation), /currentPositionStatus/);
+    const parameters = operation.get?.parameters as
+      | { name?: string; schema?: { default?: unknown } }[]
+      | undefined;
+    const maxAsk = parameters?.find((parameter) => parameter.name === "maxAsk");
+    if (name === "smart-money") {
+      assert.ok(maxAsk && "schema" in maxAsk);
+      assert.equal((maxAsk.schema as { default?: unknown }).default, "0.95");
+    } else assert.equal(maxAsk, undefined);
     assert.match(
       JSON.stringify(reason),
       /"discriminator":\{"propertyName":"kind"\}/,

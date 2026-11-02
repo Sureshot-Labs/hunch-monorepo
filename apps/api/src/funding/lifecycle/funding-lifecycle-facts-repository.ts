@@ -8,6 +8,7 @@ import {
 } from "../domain/transitions.js";
 import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
 import { parseSafeFundingSubmission } from "../execution/safe-funding-submission-contract.js";
+import { isClosedUnbroadcastSolanaPreparation } from "../execution/solana-preparation.js";
 import {
   listFundingObservationsForOperations,
   type FundingObservationRow,
@@ -42,6 +43,7 @@ type LifecycleRouteLegRow = Readonly<{
 }>;
 
 type LifecycleActionRow = Readonly<{
+  action_kind: string | null;
   action_expires_at: Date | null;
   action_validation_result: JsonRecord;
   attempt_actual_costs: JsonRecord | null;
@@ -494,6 +496,16 @@ function compileFundingLifecycleFacts(
             outcome: row.attempt_outcome,
             broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
             referenceKind: row.attempt_reference_kind,
+            unbroadcastSolanaPreparationClosed:
+              isClosedUnbroadcastSolanaPreparation({
+                executorId: row.executor_id,
+                actionKind: row.action_kind,
+                outcome: row.attempt_outcome,
+                broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
+                referenceKind: row.attempt_reference_kind,
+                actualCosts: row.attempt_actual_costs,
+                now,
+              }),
             safeSubmissionRecoverable:
               row.executor_id === "polymarket_safe_relayer_v1" &&
               parseSafeFundingSubmission(
@@ -771,6 +783,7 @@ export async function loadFundingLifecycleFactsForOperationsInTransaction(
              step.step_kind,
              step.depends_on_step_id,
              step.action_validation_result,
+             step.normalized_action->>'kind' as action_kind,
              step.action_expires_at,
              step.executor_id,
              attempt.attempt_number,

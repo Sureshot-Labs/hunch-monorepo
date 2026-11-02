@@ -2307,7 +2307,9 @@ async function testOwnedRouteCompetitionQueryParses(): Promise<void> {
   });
 }
 
-async function testPartialRelayReceiptSettlement(): Promise<void> {
+async function testPartialRelayReceiptSettlement(
+  omittedAttempt: "none" | "server_closed_solana" | "client_cancelled" = "none",
+): Promise<void> {
   const userId = await insertUser(pool);
   const base = buildPlan({ purpose: "trade_shortfall", venueId: "limitless" });
   const baseSegment = base.segments[0];
@@ -2341,6 +2343,12 @@ async function testPartialRelayReceiptSettlement(): Promise<void> {
       ordinal,
       segmentOrdinal: ordinal,
       actionFingerprint: hash(ordinal === 0 ? "b" : "c"),
+      ...(ordinal === 1 && omittedAttempt !== "none"
+        ? {
+            executorId: "wallet_profile_svm_v1",
+            normalizedAction: { kind: "svm_transaction" },
+          }
+        : {}),
     })),
     reservations: [0, 1].map((ordinal) => ({
       ...baseReservation,
@@ -2402,6 +2410,56 @@ async function testPartialRelayReceiptSettlement(): Promise<void> {
       ],
     );
     const now = new Date(Date.now() + 120_000);
+    if (omittedAttempt !== "none") {
+      const second = steps[1];
+      assert.ok(second);
+      const cancelled = await startFundingStepAttemptInTransaction(pool, {
+        operationId,
+        stepId: second.id,
+        canonicalActionFingerprint: hash("c"),
+        executorId: "wallet_profile_svm_v1",
+        solanaSigningContext: {
+          blockhash: "11111111111111111111111111111111",
+          lastValidBlockHeight: 100,
+        },
+        ...(omittedAttempt === "server_closed_solana"
+          ? {
+              solanaPreparation: {
+                version: 1 as const,
+                expiresAt: new Date(now.getTime() - 1).toISOString(),
+              },
+            }
+          : {}),
+      });
+      if (omittedAttempt === "server_closed_solana") {
+        await tx(pool, async (client) => {
+          assert.ok(operationId);
+          await client.query(
+            "select id from funding_operations where id=$1 for update",
+            [operationId],
+          );
+          assert.equal(
+            await closeExpiredSolanaPreparationsInTransaction(
+              client,
+              operationId,
+              now,
+            ),
+            true,
+          );
+        });
+      } else {
+        await finishFundingStepAttemptInTransaction(pool, {
+          attemptId: cancelled.id,
+          outcome: "cancelled",
+          broadcastMayHaveOccurred: false,
+          referenceKind: null,
+          receiptRefCiphertext: null,
+          receiptRefLookupHmac: null,
+          lookupKeyVersion: null,
+          actualCosts: { reasonCode: "client_execution_failed" },
+        });
+      }
+    }
     await ingestFundingObservationInTransaction(pool, {
       discoverySource: "chain_rpc",
       observation: {
@@ -2452,7 +2510,7 @@ async function testPartialRelayReceiptSettlement(): Promise<void> {
     const result = await reduceFundingOperation(pool, { operationId, now });
     assert.equal(
       result.finalState.status,
-      "failed",
+      omittedAttempt === "client_cancelled" ? "recovery_required" : "failed",
       "partial settled funding stops the Buy instead of waiting for an unsigned expired leg",
     );
     const reservations = await pool.query<{ state: string }>(
@@ -2460,6 +2518,15 @@ async function testPartialRelayReceiptSettlement(): Promise<void> {
       [operationId],
     );
     assert.ok(reservations.rows.every((row) => row.state === "released"));
+    const consumerAttempts = await pool.query<{ total: string }>(
+      "select count(*)::text as total from funding_trade_attempts where operation_id=$1",
+      [operationId],
+    );
+    assert.equal(
+      consumerAttempts.rows[0]?.total,
+      "0",
+      "cash settlement cannot revive a historical Buy",
+    );
     const credits = await pool.query<{ total: string }>(
       "select count(*)::text as total from funding_observations where operation_id=$1 and kind='destination_credit'",
       [operationId],
@@ -9389,6 +9456,8 @@ console.log(
   "[funding-persistence-integration-tests] ok an older failed attempt cannot rearm a newer broadcast, while a reorg still stops it",
 );
 await testPartialRelayReceiptSettlement();
+await testPartialRelayReceiptSettlement("server_closed_solana");
+await testPartialRelayReceiptSettlement("client_cancelled");
 await testOwnedRouteCompetitionQueryParses();
 console.log(
   "[funding-persistence-integration-tests] ok owned-route competition query parses",

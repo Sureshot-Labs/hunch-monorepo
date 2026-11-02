@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { compareSocialDecimal } from "./social-primitives.js";
 import {
   discoverySections,
   type DiscoveryItem,
@@ -154,6 +155,8 @@ export class DiscoveryService {
     section: DiscoverySection,
     query: DiscoveryQuery,
   ): Promise<DiscoveryResponse> {
+    if (section === "smart-money")
+      query = { ...query, maxAsk: query.maxAsk ?? "0.95" };
     const hash = discoveryFilterHash(section, query),
       cursor = decodeDiscoveryCursor(query.cursor, section, hash);
     try {
@@ -449,6 +452,14 @@ export class DiscoveryService {
             card.selection.instrument,
           ) ||
           !card.copyAvailable
+        )
+          return null;
+        // Use the live quote, not the prepared quote. Reject this member before
+        // event grouping advances so a lower-ranked eligible member can replace it.
+        if (
+          item.reason.kind === "smart-money" &&
+          (!card.quote.ask ||
+            compareSocialDecimal(card.quote.ask, query.maxAsk ?? "0.95") > 0)
         )
           return null;
         if (item.reason.kind === "quick-wins") {

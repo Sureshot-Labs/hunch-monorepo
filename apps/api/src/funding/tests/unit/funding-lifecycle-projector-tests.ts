@@ -758,6 +758,100 @@ function facts(
     "failed",
     "expired pre-broadcast failure must not strand a fully settled partial Buy",
   );
+  const serverClosedSolana = {
+    ...omittedAction,
+    executorId: "wallet_profile_svm_v1",
+    attempts: [
+      attempt({
+        outcome: "cancelled",
+        unbroadcastSolanaPreparationClosed: true,
+      }),
+    ],
+  };
+  const safelyClosed = {
+    ...partial,
+    actions: [completedAction, serverClosedSolana],
+  };
+  const stopped = deriveFundingLifecycle(safelyClosed);
+  assert.equal(stopped.status, "failed");
+  assert.equal(stopped.progressStage, "terminal");
+  assert.equal(
+    stopped.safety.terminal,
+    true,
+    "received cash is retained, not a resumed Buy",
+  );
+  for (const unsafe of [
+    { ...safelyClosed, consumer: { ...partial.consumer, unresolved: true } },
+    { ...safelyClosed, transfers: [] },
+    {
+      ...safelyClosed,
+      actions: [
+        completedAction,
+        { ...serverClosedSolana, expiresAt: new Date(now.getTime() + 1) },
+      ],
+    },
+    {
+      ...safelyClosed,
+      actions: [
+        completedAction,
+        { ...serverClosedSolana, executorId: "test-executor" },
+      ],
+    },
+    ...[
+      attempt({ outcome: "cancelled" }),
+      attempt({
+        outcome: "cancelled",
+        unbroadcastSolanaPreparationClosed: true,
+        broadcastMayHaveOccurred: true,
+      }),
+      attempt({
+        outcome: "cancelled",
+        unbroadcastSolanaPreparationClosed: true,
+        referenceKind: "signature",
+      }),
+      attempt({
+        outcome: "cancelled",
+        unbroadcastSolanaPreparationClosed: true,
+        receipt: {
+          status: "pending",
+          canonical: false,
+          actionMatched: null,
+          failureFinalized: false,
+        },
+      }),
+    ].map((unsafeAttempt) => ({
+      ...safelyClosed,
+      actions: [
+        completedAction,
+        { ...serverClosedSolana, attempts: [unsafeAttempt] },
+      ],
+    })),
+    {
+      ...safelyClosed,
+      actions: [
+        completedAction,
+        {
+          ...serverClosedSolana,
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "signature",
+            }),
+            ...serverClosedSolana.attempts.map((row) => ({
+              ...row,
+              attemptNumber: 2,
+            })),
+          ],
+        },
+      ],
+    },
+  ])
+    assert.equal(
+      deriveFundingLifecycle(unsafe).safety.terminal,
+      false,
+      "uncertain money movement must remain recoverable",
+    );
   assert.equal(
     deriveFundingLifecycle({
       ...partial,

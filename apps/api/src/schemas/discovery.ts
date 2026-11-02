@@ -42,8 +42,19 @@ export const discoveryQuickQuerySchema = discoveryQuerySchema.extend({
     .pipe(z.union([z.literal(24), z.literal(72), z.literal(168)]))
     .default(72),
 });
+export const discoverySmartQuerySchema = discoveryQuerySchema.extend({
+  maxAsk: z
+    .string()
+    .regex(/^(?:0(?:\.\d{1,18})?|1(?:\.0{1,18})?)$/)
+    .refine((value) => /[1-9]/.test(value), "maxAsk must be positive")
+    .default("0.95")
+    .describe(
+      "Inclusive live selected-side ask cap (0 < maxAsk <= 1). Default 0.95; use 1 to show all eligible prices.",
+    ),
+});
 export type DiscoveryQuery = z.infer<typeof discoveryQuerySchema> & {
   horizonHours?: 24 | 72 | 168;
+  maxAsk?: string;
 };
 
 export const discoveryInstrumentSchema = z.object({
