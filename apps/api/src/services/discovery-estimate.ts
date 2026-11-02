@@ -236,7 +236,18 @@ export function applyDiscoveryEstimate(
     n = input.sampleSize;
   if (w === null || b === null || b <= 0 || b >= 1 || n === null || n <= 0)
     return unavailable("metrics_unavailable");
-  if (!recent(input.metricsAsOf, now)) return unavailable("metrics_stale");
+  // A published idea may use older historical statistics. Their age is useful
+  // context, not a reason to withdraw an otherwise calculable estimate. Keep
+  // invalid/future timestamps diagnostic as well; numeric checks above and the
+  // independent current-quote/instrument guards remain authoritative.
+  if (!recent(input.metricsAsOf, now))
+    estimate.warnings.push(
+      input.metricsAsOf === null
+        ? "The historical statistics have no observation time; their age is unknown."
+        : Date.parse(input.metricsAsOf) > now + 5000
+          ? "The historical statistics are future-dated; their observation time may be inaccurate."
+          : "The historical statistics are older than 24 hours; the estimate uses the last available record, not freshly verified performance.",
+    );
   const ageDays = (now - Date.parse(research.createdAt)) / DAY;
   if (!Number.isFinite(ageDays) || ageDays < -5000 / DAY)
     return unavailable("invalid_research_time");

@@ -176,7 +176,37 @@ test("Latest holding is informational, including missing, closed, stale and lega
   delete oldResponse.estimate.currentPositionStatus;
   assert.ok(discoveryItemSchema.safeParse(oldResponse).success);
 });
-test("Missing/stale metrics and incompatible instruments still suppress only the estimate", () => {
+test("Historical statistics remain usable regardless of age, with explicit timestamp warnings", () => {
+  for (const metricsAsOf of [
+    new Date(now - 86400001).toISOString(),
+    new Date(now - 365 * 86400000).toISOString(),
+    new Date(now + 60000).toISOString(),
+    null,
+  ]) {
+    const item = gem();
+    const result = applyDiscoveryEstimate(item, inputs({ metricsAsOf }), now);
+    assert.equal(result.estimate?.probability, "0.55");
+    assert.equal(result.estimate?.status, "available");
+    assert.equal(result.estimate?.metricsAsOf, metricsAsOf);
+    assert.ok(
+      result.estimate?.warnings.some((w) =>
+        w.includes("historical statistics"),
+      ),
+    );
+    assert.ok(result.valuation);
+    assert.equal(result.research, item.research);
+    assert.equal(result.copyAvailable, item.copyAvailable);
+    assert.ok(discoveryItemSchema.safeParse(result).success);
+  }
+  const staleQuote = gem();
+  staleQuote.quote.asOf = new Date(now - 300001).toISOString();
+  assert.equal(
+    applyDiscoveryEstimate(staleQuote, inputs({ metricsAsOf: null }), now)
+      .estimate?.reason,
+    "quote_unavailable",
+  );
+});
+test("Missing numeric metrics and incompatible instruments still suppress only the estimate", () => {
   for (const [extra, reason] of [
     [{ walletId: null }, "representative_unavailable"],
     [{ side: "NO" }, "side_mismatch"],
@@ -184,8 +214,6 @@ test("Missing/stale metrics and incompatible instruments still suppress only the
     [{ expectedWinRate: "0" }, "metrics_unavailable"],
     [{ expectedWinRate: "1" }, "metrics_unavailable"],
     [{ sampleSize: 0 }, "metrics_unavailable"],
-    [{ metricsAsOf: new Date(now - 86400001).toISOString() }, "metrics_stale"],
-    [{ metricsAsOf: new Date(now + 60000).toISOString() }, "metrics_stale"],
   ] as [Partial<DiscoveryEstimateInputs>, string][]) {
     const item = gem(),
       result = applyDiscoveryEstimate(item, inputs(extra), now);

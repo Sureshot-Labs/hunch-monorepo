@@ -16,6 +16,7 @@ import {
 import { polymarketOrderStorageContractSql } from "./lib/polymarket-order-ledger-sql.js";
 
 import { pool } from "./db.js";
+import { WALLET_INTEL_WHALE_MARKETS_SQL } from "./services/wallet-intel-whale-selection.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
 import { fetchMarketHolderDataBatch } from "./services/holders-core.js";
@@ -7818,38 +7819,11 @@ async function runSnapshot(
             id: string;
             venue: string;
             volume_24h: number | null;
-          }>(
-            `
-              with whale_wallets as (
-                select tm.wallet_id
-                from wallet_tags t
-                join wallet_tag_map tm on tm.tag_id = t.id
-                where t.slug = 'whale'
-              ),
-              whale_markets as (
-                select distinct wah.market_id
-                from wallet_activity_hourly wah
-                join whale_wallets ww on ww.wallet_id = wah.wallet_id
-                where wah.hour_bucket >= $2::timestamptz - interval '7 days'
-                  and wah.activity_type in ('delta', 'trade')
-                  and wah.market_id is not null
-              )
-              select um.id, um.venue, um.volume_24h
-              from whale_markets wm
-              join unified_markets um on um.id = wm.market_id
-              left join unified_events ue on ue.id = um.event_id
-              where ${buildWalletIntelTrackableMarketSql({
-                marketAlias: "um",
-                eventAlias: "ue",
-                asOfSql: "$2::timestamptz",
-              })}
-                and um.venue = any($3::text[])
-                and (um.venue != 'kalshi' or um.is_initialized is true)
-              order by um.volume_24h desc nulls last
-              limit $1
-            `,
-            [walletIntelRefreshPolicy.whaleMarketLimit, snapshotAt, liveVenues],
-          )
+          }>(WALLET_INTEL_WHALE_MARKETS_SQL, [
+            walletIntelRefreshPolicy.whaleMarketLimit,
+            snapshotAt,
+            liveVenues,
+          ])
         : { rows: [] };
 
     const marketMap = new Map<
