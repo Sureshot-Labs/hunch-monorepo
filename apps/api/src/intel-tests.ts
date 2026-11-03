@@ -28,6 +28,7 @@ import {
   walletMatchesFilters,
 } from "./services/wallet-attribution.js";
 import { walletIntelRetryConfig } from "./services/wallet-intel-retry.js";
+import { discoverBackgroundPolymarketPositions } from "./services/polymarket-background-positions.js";
 import {
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
@@ -5090,6 +5091,23 @@ const tests: TestCase[] = [
             telemetry: {} as never,
             autoTrackedWalletFetchConcurrency: 1,
             touchedWalletIds: new Set(),
+            discoverPolymarketPositions: (input) =>
+              discoverBackgroundPolymarketPositions({
+                ...input,
+                fetchImpl: globalThis.fetch,
+              }),
+            scopePolymarketTokens: async () => ({
+              tokenIds: ["123"],
+              complete: true,
+              summary: {
+                scope: "hunch_catalog",
+                discoveredTokens: 1,
+                inScopeTokens: 1,
+                skippedOutsideCatalog: 0,
+                pendingTokens: 0,
+                repairedBindings: 0,
+              },
+            }),
           },
         );
 

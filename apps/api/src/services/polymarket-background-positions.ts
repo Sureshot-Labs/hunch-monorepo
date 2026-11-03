@@ -15,7 +15,11 @@ export interface PositionDiscoveryStore {
   set(key: string, value: string, options: { PX: number }): Promise<unknown>;
   del(key: string): Promise<unknown>;
 }
-type Token = { tokenId: string; averagePrice: string | null };
+type Token = {
+  tokenId: string;
+  averagePrice: string | null;
+  conditionIds?: string[];
+};
 type Checkpoint = {
   version: 1;
   scope: string;
@@ -24,6 +28,7 @@ type Checkpoint = {
   cursor: string | null;
   seen: string[];
   tokens: [string, string | null][];
+  hints?: [string, string[]][];
   pages: number;
   retryDelay?: { until: number; reason: "rate_limited" | "upstream_error" };
 };
@@ -146,10 +151,12 @@ export async function discoverBackgroundPolymarketPositions(input: {
     cursor: null,
     seen: [],
     tokens: [],
+    hints: [],
     pages: 0,
   });
   state = fresh();
   let tokens = new Map<string, string | null>();
+  let hints = new Map<string, Set<string>>();
   const result = (
     status: BackgroundPositionResult["status"],
     reason: Reason,
@@ -161,6 +168,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
         ? [...tokens].map(([tokenId, averagePrice]) => ({
             tokenId,
             averagePrice,
+            conditionIds: [...(hints.get(tokenId) ?? [])],
           }))
         : [],
     pages: state.pages,
@@ -214,9 +222,14 @@ export async function discoverBackgroundPolymarketPositions(input: {
   if (input.store) {
     try {
       const raw = await input.store.get(key);
-      // Bound untrusted cache parsing; 100k compact tokens are about 10 MB.
-      if (raw && raw.length <= cfg.maxRows * 180 + cfg.maxPages * 8192) {
+      // Bound compact token/provenance parsing, including both possible ledgers.
+      if (raw && raw.length <= cfg.maxRows * 400 + cfg.maxPages * 8192) {
         const value: Checkpoint = JSON.parse(raw);
+        const cachedTokenIds = new Set(
+          Array.isArray(value.tokens)
+            ? value.tokens.filter(Array.isArray).map((row) => row[0])
+            : [],
+        );
         if (
           value.version === 1 &&
           value.scope === scope &&
@@ -259,7 +272,26 @@ export async function discoverBackgroundPolymarketPositions(input: {
                 (typeof t[1] === "string" &&
                   t[1].length <= 80 &&
                   Number.isFinite(Number(t[1])))),
-          )
+          ) &&
+          (value.hints === undefined ||
+            (Array.isArray(value.hints) &&
+              value.hints.length === value.tokens.length &&
+              new Set(value.hints.map((row) => row?.[0])).size ===
+                value.hints.length &&
+              value.hints.every(
+                (row) =>
+                  Array.isArray(row) &&
+                  row.length === 2 &&
+                  cachedTokenIds.has(row[0]) &&
+                  Array.isArray(row[1]) &&
+                  row[1].length <= 2 &&
+                  new Set(row[1]).size === row[1].length &&
+                  row[1].every(
+                    (condition) =>
+                      typeof condition === "string" &&
+                      /^0x[a-fA-F0-9]{64}$/.test(condition),
+                  ),
+              )))
         ) {
           if (now() - value.startedAt > cfg.checkpointTtlMs) {
             // Discard old discovery facts, not an upstream-mandated retry deadline.
@@ -267,9 +299,22 @@ export async function discoverBackgroundPolymarketPositions(input: {
               state = fresh();
               state.retryDelay = value.retryDelay;
             } else await clear();
+          } else if (value.pages > 0 && value.hints === undefined) {
+            // Old checkpoints lack the condition provenance needed to prove a
+            // token is outside the Hunch catalog. Restart once, not a fake empty
+            // portfolio; preserve any provider-mandated deadline across upgrade.
+            state = fresh();
+            if (value.retryDelay && value.retryDelay.until > now())
+              state.retryDelay = value.retryDelay;
           } else {
             state = value;
             tokens = new Map(value.tokens);
+            hints = new Map(
+              (value.hints ?? []).map(([id, conditions]) => [
+                id,
+                new Set(conditions),
+              ]),
+            );
             resumed = state.cursor !== null;
           }
         } else await clear();
@@ -283,6 +328,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
     if (!input.store) return;
     state.updatedAt = now();
     state.tokens = [...tokens];
+    state.hints = [...hints].map(([id, conditions]) => [id, [...conditions]]);
     try {
       await input.store.set(key, JSON.stringify(state), {
         PX: Math.max(
@@ -349,6 +395,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
           await clear();
           state = fresh();
           tokens.clear();
+          hints.clear();
           if (cursorRestarts > 0) return result("deferred", "invalid_response");
           cursorRestarts++;
           break;
@@ -430,9 +477,20 @@ export async function discoverBackgroundPolymarketPositions(input: {
       state.pages >= cfg.maxPages
     )
       return defer("capacity"); // keep the cursor; a larger explicit resource budget can resume
-    for (const row of page.data)
+    for (const row of page.data) {
       if (!tokens.has(row.tokenId))
         tokens.set(row.tokenId, row.averagePrice?.toString() ?? null);
+      const conditions = hints.get(row.tokenId) ?? new Set<string>();
+      // An unusable optional hint cannot prove outside-catalog status, but
+      // exact local token/binding provenance may still identify this holding.
+      if (/^0x[a-fA-F0-9]{64}$/.test(row.conditionId))
+        conditions.add(row.conditionId.toLowerCase());
+      if (conditions.size > 2) {
+        await clear();
+        return result("deferred", "invalid_response");
+      }
+      hints.set(row.tokenId, conditions);
+    }
     state.pages++;
     pagesThisSlice++;
     state.cursor = page.nextCursor;

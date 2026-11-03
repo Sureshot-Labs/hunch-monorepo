@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { readFileSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { PoolClient } from "pg";
 
@@ -21,6 +22,12 @@ import { discoverWalletIntelPositions } from "./services/wallet-intel-position-d
 import { walletIntelProtocolAddresses } from "./services/wallet-intel-protocol-addresses.js";
 import { WALLET_INTEL_AUTO_TRACKED_SQL } from "./services/wallet-intel-auto-tracked-selection.js";
 import { withDataApiLane } from "./services/polymarket-data-api-admission.js";
+import { scopeWalletIntelPolymarketTokens } from "./services/wallet-intel-market-scope.js";
+import {
+  loadWalletIntelRepairPlan,
+  parseWalletIntelRepairArgs,
+  type WalletIntelRepairArgs,
+} from "./services/wallet-intel-repair.js";
 import { WALLET_INTEL_WHALE_MARKETS_SQL } from "./services/wallet-intel-whale-selection.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
@@ -3194,8 +3201,13 @@ async function fetchPolymarketAutoTrackedTokenBalances(
     previousOpenTokenIds: string[];
     onProgressPending?: () => void;
     discover?: typeof discoverWalletIntelPositions;
+    scopeTokens?: typeof scopeWalletIntelPolymarketTokens;
   },
-): Promise<WalletTokenBalance[] | null> {
+): Promise<{
+  balances: WalletTokenBalance[];
+  inventoryComplete: boolean;
+  catalogScope: { skippedOutsideCatalog: number; pendingTokens: number };
+} | null> {
   const discovery = await (inputs.discover ?? discoverWalletIntelPositions)({
     owner: inputs.address,
     baseUrl: env.polymarketDataApiBase,
@@ -3216,11 +3228,19 @@ async function fetchPolymarketAutoTrackedTokenBalances(
       inputs.onProgressPending?.();
     return null;
   }
-  const dataApiTokenIds = discovered.map((snapshot) => snapshot.tokenId);
-  const tokenIds = Array.from(
-    new Set([...dataApiTokenIds, ...inputs.previousOpenTokenIds]),
+  const scoped = await (inputs.scopeTokens ?? scopeWalletIntelPolymarketTokens)(
+    client,
+    discovered,
+    inputs.previousOpenTokenIds,
   );
-  if (tokenIds.length === 0) return [];
+  console.log("[wallets:intel:refresh] token catalog scope", scoped.summary);
+  const tokenIds = scoped.tokenIds;
+  if (tokenIds.length === 0)
+    return {
+      balances: [],
+      inventoryComplete: scoped.complete,
+      catalogScope: scoped.summary,
+    };
 
   const { balancesByOwner } = await fetchPolymarketOwnerBalancesByLedger(
     client,
@@ -3232,7 +3252,11 @@ async function fetchPolymarketAutoTrackedTokenBalances(
       maxPairsPerCall: 200,
     },
   );
-  return balancesByOwner.get(inputs.address.toLowerCase()) ?? [];
+  return {
+    balances: balancesByOwner.get(inputs.address.toLowerCase()) ?? [],
+    inventoryComplete: scoped.complete,
+    catalogScope: scoped.summary,
+  };
 }
 
 async function fetchLimitlessAutoTrackedTokenBalances(
@@ -3500,6 +3524,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
     autoTrackedWalletFetchConcurrency: number;
     touchedWalletIds: Set<string>;
     discoverPolymarketPositions?: typeof discoverWalletIntelPositions;
+    scopePolymarketTokens?: typeof scopeWalletIntelPolymarketTokens;
   },
 ): Promise<AutoTrackedCollectionResult> {
   if (inputs.autoTrackedWallets.length === 0) {
@@ -3516,6 +3541,8 @@ export async function collectAutoTrackedWalletSnapshotRows(
 
   let processed = 0;
   let rowInserts = 0;
+  let skippedOutsideCatalog = 0;
+  let pendingCatalogTokens = 0;
   const marketIds = new Set<string>();
   const attemptedWallets: AutoTrackedWalletRow[] = [];
   const progressPending = new Set<string>();
@@ -3533,6 +3560,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
         inputs.touchedWalletIds.add(tracked.wallet_id);
         try {
           let tokenBalances: WalletTokenBalance[] = [];
+          let inventoryComplete = true;
           const previousOpenTokenIds = previousOpenTokenIdsForTrackedWallet(
             inputs.previousOpenPositions,
             tracked,
@@ -3554,10 +3582,15 @@ export async function collectAutoTrackedWalletSnapshotRows(
                     ),
                   ),
                 discover: inputs.discoverPolymarketPositions,
+                scopeTokens: inputs.scopePolymarketTokens,
               },
             );
             if (balances === null) return null;
-            tokenBalances = balances;
+            tokenBalances = balances.balances;
+            inventoryComplete = balances.inventoryComplete;
+            skippedOutsideCatalog +=
+              balances.catalogScope.skippedOutsideCatalog;
+            pendingCatalogTokens += balances.catalogScope.pendingTokens;
           } else if (
             tracked.venue === "limitless" &&
             tracked.chain === "base"
@@ -3585,6 +3618,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
           return {
             tracked,
             tokenBalances,
+            inventoryComplete,
             tokenIdsForIndex,
             previousOpenRows: previousOpenRowsForTrackedWallet(
               inputs.previousOpenPositions,
@@ -3610,6 +3644,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
     ): row is {
       tracked: AutoTrackedWalletRow;
       tokenBalances: WalletTokenBalance[];
+      inventoryComplete: boolean;
       tokenIdsForIndex: string[];
       previousOpenRows: AutoTrackedPreviousOpenPositionRow[];
     } => row != null,
@@ -3729,7 +3764,8 @@ export async function collectAutoTrackedWalletSnapshotRows(
   let unpricedRows = 0;
   for (const result of fetched) {
     const tokenIndex = finalTokenIndexByVenue[result.tracked.venue];
-    let completePositiveHoldings = true;
+    let completePositiveHoldings = result.inventoryComplete;
+    const walletCandidates: AutoTrackedSnapshotCandidate[] = [];
     for (const balance of result.tokenBalances) {
       const shares = Number(balance.size);
       if (!Number.isFinite(shares) || shares <= 0) continue;
@@ -3760,7 +3796,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
       if (entry.price != null) pricedRows += 1;
       if (entry.priceFresh === true) freshPricedRows += 1;
       if (entry.price == null) unpricedRows += 1;
-      snapshotCandidates.push({
+      walletCandidates.push({
         walletId: result.tracked.wallet_id,
         venue: entry.venue,
         marketId: entry.marketId,
@@ -3776,9 +3812,11 @@ export async function collectAutoTrackedWalletSnapshotRows(
         priceUpdatedAt: entry.priceUpdatedAt,
       });
     }
-    // Keep useful partial rows, but missing positive holdings are not proof
-    // that old inventory disappeared. A later bounded refresh can repair it.
+    // A partial per-market snapshot becomes a future delta/exposure baseline;
+    // publishing one side without another could manufacture a SELL/exit. Keep
+    // discovery checkpoints and repaired bindings, not an incomplete baseline.
     if (completePositiveHoldings) {
+      snapshotCandidates.push(...walletCandidates);
       refreshedWallets.push(result.tracked);
       successfulWalletVenueKeys.add(
         buildAutoTrackedWalletVenueKey(
@@ -3821,6 +3859,9 @@ export async function collectAutoTrackedWalletSnapshotRows(
     freshPricedRows,
     unpricedRows,
     pendingPositionDiscovery: progressPending.size,
+    coverage: "hunch_catalog",
+    skippedOutsideCatalog,
+    pendingCatalogTokens,
   });
 
   return {
@@ -3850,6 +3891,7 @@ async function refreshTouchedWalletArtifacts(
     snapshotAt: Date;
     tagIds: Record<string, string>;
     attributionPolicy: WalletIntelAttributionPolicy;
+    includeGlobalWhales?: boolean;
   },
 ): Promise<{ deltaInserts: number; deltaUpdates: number }> {
   const walletIds = Array.from(inputs.touchedWalletIds);
@@ -3890,13 +3932,16 @@ async function refreshTouchedWalletArtifacts(
     }),
   );
 
-  const whaleRows = await client.query<{ wallet_id: string }>(
-    `
+  const whaleRows =
+    inputs.includeGlobalWhales === false
+      ? { rows: [] }
+      : await client.query<{ wallet_id: string }>(
+          `
       select tm.wallet_id
       from wallet_tag_map tm
       join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
     `,
-  );
+        );
   const aggregateWalletIds = Array.from(
     new Set([...walletIds, ...whaleRows.rows.map((row) => row.wallet_id)]),
   );
@@ -8296,7 +8341,128 @@ async function runSnapshot(
   }
 }
 
+async function runTargetedWalletIntelRepair(
+  args: WalletIntelRepairArgs,
+  liveScope: LiveIntelVenueScope,
+) {
+  const connection = await pool.connect();
+  const serial = serialQueryClient(connection);
+  const client = serial.client;
+  try {
+    const plan = await loadWalletIntelRepairPlan(client, args.walletIds, {
+      protocolAddresses: protocolWalletExclusions(),
+      enabledVenues: liveScope.venues,
+      maxWallets: walletIntelRefreshPolicy.autoTrackedWalletLimit,
+    });
+    console.log("[wallets:intel:repair] plan", {
+      ...plan.report,
+      execute: args.execute,
+    });
+    if (!args.execute) return;
+    const wallets: AutoTrackedWalletRow[] = plan.targets.map((row) => ({
+      wallet_id: row.wallet_id,
+      address: row.address,
+      chain: "polygon",
+      venue: "polymarket",
+      sources: row.sources as AutoTrackedWalletSource[],
+      priority: Number(row.priority),
+    }));
+    // An explicit repair is a new observation, not a replay of an hourly
+    // timestamp that can overwrite a newer partial/full snapshot.
+    const snapshotAt = new Date();
+    const touchedWalletIds = new Set<string>();
+    const previous = await loadAutoTrackedPreviousOpenPositions(client, {
+      wallets,
+    });
+    const result = await collectAutoTrackedWalletSnapshotRows(client, {
+      autoTrackedWallets: wallets,
+      previousOpenPositions: previous,
+      snapshotAt,
+      tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+      tokenIndexByVenue: {
+        polymarket: new Map(),
+        limitless: new Map(),
+        kalshi: new Map(),
+      },
+      telemetry: createRefreshTelemetry(),
+      autoTrackedWalletFetchConcurrency:
+        walletIntelRefreshPolicy.autoTrackedWalletFetchConcurrency,
+      touchedWalletIds,
+    });
+    await markAutoTrackedWalletRefreshAttempted(client, {
+      attemptedAt: snapshotAt,
+      wallets: result.attemptedWallets,
+    });
+    await markAutoTrackedWalletsRefreshed(client, {
+      refreshedAt: snapshotAt,
+      wallets: result.refreshedWallets,
+    });
+    const attribution = await resolveWalletIntelAttributionPolicy(client);
+    const tags = await client.query<{ id: string; slug: string }>(
+      "select id,slug from wallet_tags where slug=any($1::text[])",
+      [SYSTEM_TAGS.map((tag) => tag.slug)],
+    );
+    // Failed/incomplete targets must not receive new derived freshness markers.
+    const complete = new Set(
+      result.refreshedWallets.map((row) => row.wallet_id),
+    );
+    await refreshTouchedWalletArtifacts(client, {
+      touchedWalletIds: complete,
+      selectedMarketIds: result.marketIds,
+      previousOpenMarketKeys: result.previousOpenMarketKeys,
+      snapshotAt,
+      attributionPolicy: attribution.effective,
+      tagIds: Object.fromEntries(tags.rows.map((row) => [row.slug, row.id])),
+      includeGlobalWhales: false,
+    });
+    const pending = args.walletIds.filter((id) => !complete.has(id));
+    console.log("[wallets:intel:repair] done", {
+      ...plan.report,
+      coverage: "hunch_catalog",
+      snapshotAt: snapshotAt.toISOString(),
+      refreshed: complete.size,
+      pendingWalletIds: pending,
+      snapshotRows: result.rowInserts,
+    });
+    if (pending.length) process.exitCode = 2;
+  } finally {
+    await serial.drain();
+    connection.release();
+  }
+}
+
 async function main() {
+  const repair = parseWalletIntelRepairArgs(process.argv.slice(2), (path) => {
+    if (statSync(path).size > 65536)
+      throw new Error("Repair manifest exceeds64KiB.");
+    return readFileSync(path, "utf8");
+  });
+  // The default repair preview is enforced read-only, does not take the job
+  // lease, fetch providers, refresh wallets, or run cleanup/models/global work.
+  if (repair && !repair.execute) {
+    const reader = await pool.connect();
+    try {
+      await reader.query("BEGIN READ ONLY");
+      await reader.query(
+        "SET LOCAL statement_timeout='15s'; SET LOCAL lock_timeout='2s'",
+      );
+      const policy = await resolveWalletIntelRefreshPolicy(reader);
+      const scope = await resolveLiveIntelVenueScope(reader);
+      const plan = await loadWalletIntelRepairPlan(reader, repair.walletIds, {
+        protocolAddresses: protocolWalletExclusions(),
+        enabledVenues: scope.venues,
+        maxWallets: policy.effective.autoTrackedWalletLimit,
+      });
+      console.log("[wallets:intel:repair] plan", {
+        ...plan.report,
+        execute: false,
+      });
+    } finally {
+      await reader.query("ROLLBACK");
+      reader.release();
+    }
+    return;
+  }
   const lockClient = await pool.connect();
   let lockAcquired = false;
   try {
@@ -8306,6 +8472,7 @@ async function main() {
       console.warn(
         `[wallets:intel:refresh] skipped; advisory lock remained held after ${REFRESH_ADVISORY_LOCK_MAX_WAIT_MS}ms`,
       );
+      if (repair) process.exitCode = 2;
       return;
     }
 
@@ -8335,6 +8502,11 @@ async function main() {
         ignoreRuntimePolicy: cliArgs.ignoreRuntimePolicy,
         walletIntelRefreshPolicy,
       });
+    }
+
+    if (repair) {
+      await runTargetedWalletIntelRepair(repair, liveIntelScope);
+      return;
     }
 
     const runAt = new Date();
@@ -8422,7 +8594,7 @@ if (
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   withDataApiLane("background", main)
-    .then(() => process.exit(0))
+    .then(() => process.exit(process.exitCode ?? 0))
     .catch((error) => {
       console.error("[wallets:intel:refresh] failed", error);
       process.exit(1);

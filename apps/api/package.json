@@ -78,6 +78,7 @@
     "ai:xai:usage": "tsx src/ai-xai-usage.ts",
     "ai:wallet:profiles": "tsx src/ai-wallet-profiles.ts",
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
+    "wallets:intel:repair": "tsx src/wallet-intel-refresh.ts --repair",
     "wallets:intel:attribution-backfill": "tsx src/wallet-specialist-attribution-backfill.ts",
     "wallets:intel:position-rollup-backfill": "tsx src/wallet-position-rollup-backfill.ts",
     "wallets:intel:internal-hunch-cleanup": "tsx src/wallet-intel-internal-hunch-cleanup.ts",
