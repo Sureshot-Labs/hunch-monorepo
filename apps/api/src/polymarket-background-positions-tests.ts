@@ -56,7 +56,13 @@ const basic = await discover({
   fetchImpl: fetcher(() => page([position(maxToken)], null)),
 });
 assert.equal(basic.status, "complete");
-assert.deepEqual(basic.tokens, [{ tokenId: maxToken, averagePrice: "0.4" }]);
+assert.deepEqual(basic.tokens, [
+  {
+    tokenId: maxToken,
+    averagePrice: "0.4",
+    conditionIds: [position().condition_id],
+  },
+]);
 assert.equal(loadBackgroundPositionConfig({}).walletBudgetMs, 15000);
 assert.equal(
   loadBackgroundPositionConfig({
@@ -110,6 +116,103 @@ assert.equal(second.tokens.length, 25);
 assert.equal(second.pages, 25);
 assert.equal(cursors[10], "10");
 assert.equal(resume.values.size, 0);
+assert.deepEqual(second.tokens[0]?.conditionIds, [position().condition_id]);
+
+// A v1 checkpoint from the previous release has no condition provenance.
+// Restart discovery once, but never bypass a real provider Retry-After.
+for (const delayed of [false, true]) {
+  const legacyCache = memoryStore();
+  let legacyClock = 100000;
+  await discover({
+    ...defaults,
+    store: legacyCache.store,
+    now: () => legacyClock,
+    config: { pagesPerSlice: 1 },
+    fetchImpl: many,
+  });
+  const entry = [...legacyCache.values][0];
+  assert.ok(entry);
+  const [key, raw] = entry;
+  const old = JSON.parse(raw);
+  delete old.hints;
+  if (delayed)
+    old.retryDelay = { until: legacyClock + 60000, reason: "rate_limited" };
+  legacyCache.values.set(key, JSON.stringify(old));
+  let requests = 0;
+  const fetchImpl = fetcher((url) => {
+    requests++;
+    assert.equal(url.searchParams.get("cursor"), null);
+    return page([position("90")], null);
+  });
+  const first = await discover({
+    ...defaults,
+    store: legacyCache.store,
+    now: () => legacyClock,
+    fetchImpl,
+  });
+  if (delayed) {
+    assert.equal(first.reason, "rate_limited");
+    assert.equal(requests, 0);
+    legacyClock += 60001;
+  }
+  const complete = delayed
+    ? await discover({
+        ...defaults,
+        store: legacyCache.store,
+        now: () => legacyClock,
+        fetchImpl,
+      })
+    : first;
+  assert.equal(complete.status, "complete");
+  assert.deepEqual(complete.tokens, [
+    {
+      tokenId: "90",
+      averagePrice: "0.4",
+      conditionIds: [position().condition_id],
+    },
+  ]);
+  assert.equal(complete.cursorRestarts, 0);
+  assert.equal(requests, 1);
+}
+const secondCondition = `0x${"22".repeat(32)}`;
+const twoLedgers = await discover({
+  ...defaults,
+  fetchImpl: fetcher(() =>
+    page([position(), { ...position(), condition_id: secondCondition }], null),
+  ),
+});
+assert.deepEqual(twoLedgers.tokens[0]?.conditionIds, [
+  position().condition_id,
+  secondCondition,
+]);
+const invalidHints = await discover({
+  ...defaults,
+  fetchImpl: fetcher(() =>
+    page(
+      [
+        position(),
+        { ...position(), condition_id: secondCondition },
+        { ...position(), condition_id: `0x${"33".repeat(32)}` },
+      ],
+      null,
+    ),
+  ),
+});
+assert.equal(invalidHints.status, "deferred");
+assert.equal(invalidHints.reason, "invalid_response");
+assert.deepEqual(invalidHints.tokens, []);
+const absentHint = await discover({
+  ...defaults,
+  fetchImpl: fetcher(() =>
+    page([{ ...position(), condition_id: "unavailable" }], null),
+  ),
+});
+assert.equal(absentHint.status, "complete");
+assert.deepEqual(
+  absentHint.tokens[0]?.conditionIds,
+  [],
+  "an unusable hint is not proof of an external market",
+);
 
 // Wall-clock budget applies to the slice, not an entire large portfolio.
 let clock = 1000;

@@ -26,6 +26,8 @@ import { positionAssetKey } from "./lib/position-asset-context.js";
 import { fetchMarketsByTokenIds } from "./repos/unified-read.js";
 import {
   collectAutoTrackedWalletSnapshotRows,
+  applySnapshotDeltas,
+  refreshWalletPositionExposure,
   loadAutoTrackedPreviousOpenPositions,
   snapshotFollowedWalletHoldingsEvm,
   snapshotInternalHunchWalletPositions,
@@ -644,6 +646,8 @@ try {
   let incompleteRpc = false;
   let rpcCalls = 0;
   let emptyDataApi = false;
+  let outsideCatalogPosition = false;
+  const outsideToken = ((1n << 256n) - 1n).toString();
   let zeroPm = false;
   let zeroCtf = false;
   const rpcAssets: Array<{ contract: string; ids: string[] }> = [];
@@ -652,17 +656,23 @@ try {
     if (init?.method !== "POST")
       return new Response(
         JSON.stringify({
-          data: (emptyDataApi ? [] : [tokenId, sibling]).map(
-            (id, outcomeIndex) => ({
-              token_id: id,
-              proxy_wallet: wallet,
-              condition_id: conditionId,
-              current_size: 2,
-              avg_price: 0.4,
-              outcome_index: outcomeIndex,
-              redeemable: false,
-            }),
-          ),
+          data: (emptyDataApi
+            ? []
+            : [
+                tokenId,
+                sibling,
+                ...(outsideCatalogPosition ? [outsideToken] : []),
+              ]
+          ).map((id, outcomeIndex) => ({
+            token_id: id,
+            proxy_wallet: wallet,
+            condition_id:
+              id === outsideToken ? `0x${"ff".repeat(32)}` : conditionId,
+            current_size: 2,
+            avg_price: 0.4,
+            outcome_index: outcomeIndex % 2,
+            redeemable: false,
+          })),
           pagination: { next_cursor: null },
         }),
         { status: 200 },
@@ -743,6 +753,43 @@ try {
       ["YES", 10],
     ],
   );
+  outsideCatalogPosition = true;
+  rpcAssets.length = 0;
+  const scopedAt = new Date(autoAt.getTime() + 100);
+  const scoped = await collectAutoTrackedWalletSnapshotRows(
+    db,
+    autoInputs(scopedAt),
+  );
+  assert.equal(
+    scoped.refreshedWallets.length,
+    1,
+    "an outside-catalog position does not block Hunch-scoped refresh",
+  );
+  assert.ok(
+    rpcAssets.every((request) => !request.ids.includes(outsideToken)),
+    "outside-catalog tokens do not cause RPC reads",
+  );
+  assert.deepEqual(
+    (await readSnapshots(scopedAt)).map((row) => [
+      row.outcome_side,
+      Number(row.shares),
+    ]),
+    [
+      ["NO", 2],
+      ["YES", 10],
+    ],
+  );
+  assert.equal(
+    (
+      await db.query(
+        "select count(*)::int as total from polymarket_asset_bindings where asset_id=$1",
+        [outsideToken],
+      )
+    ).rows[0].total,
+    0,
+    "no external market/binding import",
+  );
+  outsideCatalogPosition = false;
   await db.query(
     `insert into wallet_position_exposure(wallet_id,as_of,open_positions_version,open_positions)
     values($1,$2,1,$3::jsonb)`,
@@ -803,6 +850,12 @@ try {
   emptyDataApi = false;
   zeroPm = false;
   zeroCtf = false;
+  const baselineAt = new Date(autoAt.getTime() + 450);
+  const baseline = await collectAutoTrackedWalletSnapshotRows(
+    db,
+    autoInputs(baselineAt),
+  );
+  assert.equal(baseline.refreshedWallets.length, 1);
   const partialAt = new Date(autoAt.getTime() + 500);
   const partialIndexDb = {
     query: async (sql: string, params: unknown[]) => {
@@ -842,6 +895,61 @@ try {
     0,
     "incomplete index cannot zero a previously open PM position",
   );
+  assert.equal(
+    (await readSnapshots(partialAt)).length,
+    0,
+    "do not publish an incomplete canonical snapshot for later delta/exposure readers",
+  );
+  const assertExposure = async (asOf: Date) => {
+    await refreshWalletPositionExposure(db, {
+      walletIds: [trackedWalletId],
+      asOf,
+    });
+    const open = (
+      await db.query(
+        "select open_positions from wallet_position_exposure where wallet_id=$1",
+        [trackedWalletId],
+      )
+    ).rows[0].open_positions as Array<{ outcomeSide: string; shares: string }>;
+    assert.deepEqual(
+      open.map((row) => [row.outcomeSide, Number(row.shares)]).sort(),
+      [
+        ["NO", 2],
+        ["YES", 10],
+      ],
+    );
+  };
+  assert.deepEqual(
+    await applySnapshotDeltas(db, {
+      walletIds: [trackedWalletId],
+      occurredAt: partialAt,
+      marketIds: [marketId],
+      extraPreviousMarketKeys: partialIndex.previousOpenMarketKeys,
+    }),
+    { inserts: 0, updates: 0 },
+  );
+  await assertExposure(partialAt);
+  const retryAt = new Date(autoAt.getTime() + 600);
+  const retry = await collectAutoTrackedWalletSnapshotRows(
+    db,
+    autoInputs(retryAt),
+  );
+  assert.equal(
+    retry.refreshedWallets.length,
+    1,
+    "ordinary retry recovers missing mark without a new cohort",
+  );
+  assert.deepEqual(
+    await applySnapshotDeltas(db, {
+      walletIds: [trackedWalletId],
+      occurredAt: retryAt,
+      marketIds: [marketId],
+      extraPreviousMarketKeys: retry.previousOpenMarketKeys,
+    }),
+    { inserts: 0, updates: 0 },
+    "complete→pending→retry cannot fabricate SELL or re-entry BUY from a partial baseline",
+  );
+  await assertExposure(retryAt);
   await db.query(
     "update positions set is_hidden=true,hidden_reason='auto_lost' where user_id=$1 and position_contract=''",
     [userId],

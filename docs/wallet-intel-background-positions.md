@@ -116,6 +116,65 @@ generated test keys, never an entire Redis database. Injected HTTP transports
 must supply admission explicitly when testing limiter behavior; HTTP-only
 fixtures bypass runtime coordination deliberately.
 
+## Hunch-catalog coverage and explicit repair
+
+Auto-tracked Polymarket snapshots cover **markets in the Hunch catalog**, not
+every position a wallet may hold on Polymarket. A complete Data API walk supplies
+token IDs and condition IDs. Indexed lookups check existing token projections,
+durable bindings and market conditions before any ledger reads:
+
+- A token with a valid condition hint and no local market/token/binding match is
+  skipped as `skippedOutsideCatalog`. No Gamma hydration, external-market import,
+  or on-chain balance request is made for it.
+- A local market with missing token linkage is repaired only from its canonical
+  stored protocol metadata. Bindings are append-only; historical generations,
+  ledger contracts and outcome indices are never overwritten. Conflicts remain
+  `pendingCatalogTokens`, not an invented match.
+- Previously tracked holdings are never discarded merely because a current
+  token projection is missing. Complete pagination, exact on-chain zero evidence,
+  hidden-position suppression and generation compatibility remain required.
+- Deferred/incomplete discovery is still not a completed portfolio. An incomplete
+  wallet cannot publish a new canonical snapshot: missing sides would otherwise
+  become false sales/entries in later delta and exposure readers. Checkpoints
+  and repaired bindings preserve progress for the next bounded attempt.
+  `coverage: hunch_catalog` and the skip/pending counts identify the scope of a
+  successful collector result; it is not a full-account NAV or trading balance.
+
+Checkpoints remain version 1 and accept the previous format. New checkpoints
+also contain compact condition hints. Old partial inventories without those
+hints restart discovery once, preserving an unexpired provider `Retry-After`.
+Neither a missing hint nor a corrupt checkpoint proves that a token is external.
+
+An explicit repair command retries **the supplied wallet IDs**, not a re-ranked
+cohort. From `apps/api`, after separately authorizing any production execution:
+
+```sh
+pnpm wallets:intel:repair --repair-wallet-ids-file=/absolute/path/wallet-ids.json
+pnpm wallets:intel:repair --repair-wallet-ids-file=/absolute/path/wallet-ids.json --repair-execute
+```
+
+The manifest is a JSON string array of existing wallet UUIDs, at most 64 KiB.
+`--repair-wallet-ids=uuid,uuid` is an alternative. Default mode is an enforced
+read-only plan: no lock, providers, snapshots, models, or cleanup. Missing or
+mistyped repair options fail rather than launching a normal refresh.
+
+Execution uses the ordinary job's advisory lock, live venue policy, current
+wallet batch cap, protocol-address exclusions, shared admission, provider
+deadlines and checkpoints. Only active auto-tracked Polygon/Polymarket subjects
+are eligible; disabled subjects are reported, not reactivated. Explicit IDs
+bypass selection ranking, subject TTL, refresh age and attempt-selection backoff,
+but never real provider backoff. Normal cron selection is unchanged.
+
+Repairs use the actual observation timestamp rather than replaying the hourly
+bucket. They do not run market/holder selection, followed/internal/global wallet
+scans, AI, cleanup, or global-whale rollups. Derived artifacts are refreshed only
+for successfully completed target wallets; incomplete targets retain their prior
+canonical snapshot rather than manufacturing sell activity. The final
+report includes the requested/eligible/refreshed counts, manifest hash, coverage
+and pending/excluded IDs (never addresses or credentials). Exit 0 means every
+requested wallet completed; exit 2 means at least one remains pending/excluded
+or the shared refresh lock was busy. A process error is not a successful repair.
+
 ## Optional background-only configuration
 
 All settings have defaults; no production env change is required. Invalid values
