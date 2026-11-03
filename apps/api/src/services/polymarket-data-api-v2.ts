@@ -1,6 +1,21 @@
 import { normalizePolymarketAssetId, parseRetryAfterMs } from "@hunch/shared";
 
 import { isRecord } from "../lib/type-guards.js";
+import {
+  currentDataApiLane,
+  awaitDataApiTask,
+  DataApiAdmissionError,
+  type DataApiAdmission,
+  type DataApiLane,
+  type DataApiPermit,
+} from "./polymarket-data-api-admission.js";
+
+export type DataApiErrorDiagnostics = Readonly<{
+  source: "upstream" | "shared_limiter";
+  cfRay: string | null;
+  contentType: string | null;
+  responseFormat: "json" | "empty_or_non_json" | null;
+}>;
 
 export type PolymarketDataApiPage<T> = {
   data: T[];
@@ -24,7 +39,16 @@ export class PolymarketDataApiV2Error extends Error {
     public readonly reason:
       | "protocol_contract"
       | "invalid_cursor"
+      | "shared_cooldown"
+      | "admission_deadline"
+      | "coordination_unavailable"
       | null = null,
+    public readonly diagnostics: DataApiErrorDiagnostics = {
+      source: "upstream",
+      cfRay: null,
+      contentType: null,
+      responseFormat: null,
+    },
   ) {
     super(`Polymarket Data API V2 request failed (${status}).`);
     this.name = "PolymarketDataApiV2Error";
@@ -67,6 +91,8 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
   cursor?: string | null;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  admission?: DataApiAdmission;
+  lane?: DataApiLane;
 }): Promise<PolymarketDataApiPage<T>> {
   if (
     !Number.isFinite(inputs.timeoutMs) ||
@@ -86,44 +112,121 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
     ? AbortSignal.any([inputs.signal, timeoutSignal])
     : timeoutSignal;
   signal.throwIfAborted();
-  const response = await (inputs.fetchImpl ?? fetch)(url, {
-    method: "GET",
-    headers: { accept: "application/json" },
-    signal,
-  });
-  if (!response.ok) {
-    const payload: unknown = await response.json().catch(() => null);
-    const error = isRecord(payload) ? payload : {};
-    throw new PolymarketDataApiV2Error(
-      response.status,
-      typeof error.code === "string" ? error.code : null,
-      typeof error.retryable === "boolean"
-        ? error.retryable
-        : response.status === 429 || response.status >= 500,
-      typeof error.trace_id === "string" ? error.trace_id : null,
-      parseRetryAfterMs(response.headers.get("retry-after")),
-      typeof error.parameter === "string" &&
-        /^[a-z_]{1,40}$/i.test(error.parameter)
-        ? error.parameter
-        : null,
-      response.status === 400 &&
-        error.parameter === "user" &&
-        typeof error.error === "string" &&
-        /user is a protocol contract address/i.test(error.error)
-        ? "protocol_contract"
-        : response.status === 400 && error.parameter === "cursor"
-          ? "invalid_cursor"
+  // Injected fetches are an offline transport boundary. Runtime wrappers (such
+  // as holder telemetry) explicitly carry the shared admission dependency.
+  const admission =
+    inputs.admission ??
+    (inputs.fetchImpl
+      ? undefined
+      : await awaitDataApiTask(
+          import("./polymarket-data-api-admission-runtime.js").then((module) =>
+            module.getDataApiAdmission(),
+          ),
+          signal,
+        ));
+  let permit: DataApiPermit | undefined;
+  let outcome: "success" | "other" = "other";
+  try {
+    if (admission) {
+      try {
+        permit = await admission.acquire(
+          url,
+          signal,
+          inputs.lane ?? currentDataApiLane(),
+          inputs.timeoutMs,
+        );
+      } catch (error) {
+        if (!(error instanceof DataApiAdmissionError)) throw error;
+        throw new PolymarketDataApiV2Error(
+          error.reason === "shared_cooldown" ? 429 : 503,
+          error.reason,
+          true,
+          null,
+          error.retryAfterMs,
+          null,
+          error.reason,
+          {
+            source: "shared_limiter",
+            cfRay: null,
+            contentType: null,
+            responseFormat: null,
+          },
+        );
+      }
+    }
+    signal.throwIfAborted();
+    const response = await (inputs.fetchImpl ?? fetch)(url, {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal,
+    });
+    outcome =
+      response.status < 500 && response.status !== 429 ? "success" : "other";
+    if (!response.ok) {
+      let retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+      if (response.status === 429 && admission && permit) {
+        const limitedPermit = permit;
+        permit = undefined;
+        const wait = await awaitDataApiTask(
+          admission.finish(limitedPermit, {
+            kind: "limited",
+            retryAfterMs: retryAfterMs ?? 0,
+          }),
+          signal,
+        );
+        retryAfterMs = Math.max(retryAfterMs ?? 0, wait);
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      const error = isRecord(payload) ? payload : {};
+      throw new PolymarketDataApiV2Error(
+        response.status,
+        typeof error.code === "string" ? error.code : null,
+        typeof error.retryable === "boolean"
+          ? error.retryable
+          : response.status === 429 || response.status >= 500,
+        typeof error.trace_id === "string"
+          ? error.trace_id
+          : response.headers.get("x-trace-id"),
+        retryAfterMs,
+        typeof error.parameter === "string" &&
+          /^[a-z_]{1,40}$/i.test(error.parameter)
+          ? error.parameter
           : null,
+        response.status === 400 &&
+          error.parameter === "user" &&
+          typeof error.error === "string" &&
+          /user is a protocol contract address/i.test(error.error)
+          ? "protocol_contract"
+          : response.status === 400 && error.parameter === "cursor"
+            ? "invalid_cursor"
+            : null,
+        {
+          source: "upstream",
+          cfRay: response.headers.get("cf-ray")?.slice(0, 80) ?? null,
+          contentType:
+            response.headers.get("content-type")?.slice(0, 100) ?? null,
+          responseFormat: isRecord(payload) ? "json" : "empty_or_non_json",
+        },
+      );
+    }
+    const page = parsePolymarketDataApiV2Page(
+      await response.json(),
+      inputs.parseRow,
     );
+    signal.throwIfAborted();
+    if (inputs.cursor != null && page.nextCursor === inputs.cursor)
+      throw new PolymarketDataApiV2CursorError();
+    return page;
+  } finally {
+    if (admission && permit) {
+      const completion = admission.finish(permit, {
+        kind: outcome,
+        retryAfterMs: 0,
+      });
+      if (signal.aborted) void completion.catch(() => {});
+      else await awaitDataApiTask(completion, signal);
+    }
   }
-  const page = parsePolymarketDataApiV2Page(
-    await response.json(),
-    inputs.parseRow,
-  );
-  signal.throwIfAborted();
-  if (inputs.cursor != null && page.nextCursor === inputs.cursor)
-    throw new PolymarketDataApiV2CursorError();
-  return page;
 }
 
 /** Complete API projection only: inactive markets can be absent even after
@@ -139,6 +242,8 @@ export async function fetchPolymarketDataApiV2Pages<T>(inputs: {
   timeoutMs: number;
   maxPages?: number;
   fetchImpl?: typeof fetch;
+  admission?: DataApiAdmission;
+  lane?: DataApiLane;
 }): Promise<T[]> {
   const maxPages = inputs.maxPages ?? 20;
   if (
@@ -158,7 +263,6 @@ export async function fetchPolymarketDataApiV2Pages<T>(inputs: {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
   const deadline = Date.now() + inputs.timeoutMs;
-  const fetchImpl = inputs.fetchImpl ?? fetch;
   const rows: T[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
@@ -178,7 +282,7 @@ export async function fetchPolymarketDataApiV2Pages<T>(inputs: {
           cursor,
           timeoutMs: Math.max(1, deadline - Date.now()),
           signal: controller.signal,
-          fetchImpl,
+          fetchImpl: inputs.fetchImpl,
         },
       );
       controller.signal.throwIfAborted();

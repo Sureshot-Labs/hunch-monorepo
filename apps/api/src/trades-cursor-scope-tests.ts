@@ -2,6 +2,8 @@
 import assert from "node:assert/strict";
 import Fastify from "fastify";
 import swagger from "@fastify/swagger";
+import { offlineDataApiAdmission } from "./polymarket-data-api-admission-test-fixtures.js";
+import { replaceDataApiAdmissionForTests } from "./services/polymarket-data-api-admission-runtime.js";
 import {
   jsonSchemaTransform,
   serializerCompiler,
@@ -26,6 +28,9 @@ const { closeAcquiredRuntimeResources } =
 const originalFetch = globalThis.fetch;
 const originalQuery = pool.query;
 const originalConnect = pool.connect;
+const previousAdmission = replaceDataApiAdmissionForTests(
+  offlineDataApiAdmission,
+);
 const sqlCalls: Array<{ sql: string; values: unknown[] }> = [];
 const upstreamCalls: URL[] = [];
 const condition = `0x${"a".repeat(64)}`;
@@ -240,6 +245,7 @@ try {
     "Trades scope: combined/individual filters, opaque cursors, 404/400, upstream failure/recovery and offset compatibility passed",
   );
 } finally {
+  replaceDataApiAdmissionForTests(previousAdmission);
   globalThis.fetch = originalFetch;
   pool.query = originalQuery;
   pool.connect = originalConnect;

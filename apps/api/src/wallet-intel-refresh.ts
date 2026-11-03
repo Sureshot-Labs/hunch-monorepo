@@ -20,6 +20,7 @@ import { serialQueryClient } from "./lib/serial-query-client.js";
 import { discoverWalletIntelPositions } from "./services/wallet-intel-position-discovery.js";
 import { walletIntelProtocolAddresses } from "./services/wallet-intel-protocol-addresses.js";
 import { WALLET_INTEL_AUTO_TRACKED_SQL } from "./services/wallet-intel-auto-tracked-selection.js";
+import { withDataApiLane } from "./services/polymarket-data-api-admission.js";
 import { WALLET_INTEL_WHALE_MARKETS_SQL } from "./services/wallet-intel-whale-selection.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
@@ -8420,7 +8421,7 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  main()
+  withDataApiLane("background", main)
     .then(() => process.exit(0))
     .catch((error) => {
       console.error("[wallets:intel:refresh] failed", error);

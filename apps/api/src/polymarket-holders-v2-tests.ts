@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 
 import { fetchPolymarketHolders } from "./services/holders-core.js";
+import { replaceDataApiAdmissionForTests } from "./services/polymarket-data-api-admission-runtime.js";
+import { offlineDataApiAdmission } from "./polymarket-data-api-admission-test-fixtures.js";
 
 const conditionId = `0x${"11".repeat(32)}`;
 const originalFetch = globalThis.fetch;
+const priorAdmission = replaceDataApiAdmissionForTests(offlineDataApiAdmission);
 const group = (tokenId: string, ordinal: number, count: number) => ({
   token_id: tokenId,
   holders: Array.from({ length: count }, (_, i) => ({
@@ -66,6 +69,7 @@ try {
     /repeated/,
   );
 } finally {
+  replaceDataApiAdmissionForTests(priorAdmission);
   globalThis.fetch = originalFetch;
 }
 console.log(

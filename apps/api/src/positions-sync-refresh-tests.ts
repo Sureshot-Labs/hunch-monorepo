@@ -2,6 +2,8 @@
 
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
+import { offlineDataApiAdmission } from "./polymarket-data-api-admission-test-fixtures.js";
+import { replaceDataApiAdmissionForTests } from "./services/polymarket-data-api-admission-runtime.js";
 
 import {
   assertCompleteTokenBalanceRead,
@@ -23,12 +25,16 @@ assert.throws(
 );
 
 async function test(name: string, fn: () => void | Promise<void>) {
+  // These HTTP/RPC fixtures must not connect to production-style coordination.
+  const previous = replaceDataApiAdmissionForTests(offlineDataApiAdmission);
   try {
     await fn();
     console.log(`ok - ${name}`);
   } catch (error) {
     console.error(`not ok - ${name}`);
     throw error;
+  } finally {
+    replaceDataApiAdmissionForTests(previous);
   }
 }
 

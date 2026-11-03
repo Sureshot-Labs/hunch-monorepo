@@ -1,4 +1,5 @@
 import { getDedicatedRedis, discardDedicatedRedis } from "../redis.js";
+import { getDataApiAdmission } from "./polymarket-data-api-admission-runtime.js";
 import {
   discoverBackgroundPolymarketPositions,
   loadBackgroundPositionConfig,
@@ -47,5 +48,6 @@ export async function discoverWalletIntelPositions(input: {
     ...input,
     store,
     config: loadBackgroundPositionConfig(),
+    admission: getDataApiAdmission(),
   });
 }

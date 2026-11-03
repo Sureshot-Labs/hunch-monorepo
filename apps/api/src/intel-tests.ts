@@ -4597,6 +4597,10 @@ const tests: TestCase[] = [
               httpStatus: null,
               parameter: null,
               traceId: null,
+              rateLimitSource: null,
+              retryAfterMs: null,
+              cfRay: null,
+              responseFormat: null,
             }),
           },
         );
