@@ -72,6 +72,11 @@ After separate rollout approval:
 
 ## Earlier quote compression: research, not an enabled policy
 
+This section records the October 22 investigation. The later three-day policy
+and bounded rollout are documented in [raw-book compression](../docs/raw-book-compression.md)
+and migration `0293`; the historical results below are not current activation
+or production-load evidence.
+
 Read-only production inventory at 17:43–17:53 UTC on October 22 found 87 GiB free
 on the 290 GiB root filesystem. PostgreSQL accounted for about 189 GiB on disk.
 Raw `unified_book_top` used about 38 GiB: eight daily uncompressed chunks used
