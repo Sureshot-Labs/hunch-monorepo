@@ -8,6 +8,7 @@ import {
   PolymarketDataApiV2CursorError,
 } from "./polymarket-data-api-v2.js";
 import { walletIntelProtocolAddresses } from "./wallet-intel-protocol-addresses.js";
+import type { DataApiAdmission } from "./polymarket-data-api-admission.js";
 
 export interface PositionDiscoveryStore {
   get(key: string): Promise<string | null>;
@@ -96,6 +97,10 @@ export type BackgroundPositionResult = {
   httpStatus: number | null;
   parameter: string | null;
   traceId: string | null;
+  rateLimitSource: "upstream" | "shared_limiter" | null;
+  retryAfterMs: number | null;
+  cfRay: string | null;
+  responseFormat: string | null;
 };
 
 /** Only called by wallet-intel under its process-wide PG advisory lock. Redis is
@@ -111,6 +116,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
   fetchImpl?: typeof fetch;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  admission?: DataApiAdmission;
 }): Promise<BackgroundPositionResult> {
   const cfg = { ...BACKGROUND_POSITION_DEFAULTS, ...input.config };
   for (const value of Object.values(cfg))
@@ -173,6 +179,22 @@ export async function discoverBackgroundPolymarketPositions(input: {
         : null,
     traceId:
       lastError instanceof PolymarketDataApiV2Error ? lastError.traceId : null,
+    rateLimitSource:
+      lastError instanceof PolymarketDataApiV2Error
+        ? lastError.diagnostics.source
+        : null,
+    retryAfterMs:
+      lastError instanceof PolymarketDataApiV2Error
+        ? lastError.retryAfterMs
+        : null,
+    cfRay:
+      lastError instanceof PolymarketDataApiV2Error
+        ? lastError.diagnostics.cfRay
+        : null,
+    responseFormat:
+      lastError instanceof PolymarketDataApiV2Error
+        ? lastError.diagnostics.responseFormat
+        : null,
   });
   if (!/^0x[a-f0-9]{40}$/.test(owner))
     return result("excluded", "invalid_owner");
@@ -303,6 +325,8 @@ export async function discoverBackgroundPolymarketPositions(input: {
           timeoutMs: Math.max(1, Math.min(cfg.pageTimeoutMs, deadline - now())),
           parseRow: parsePolymarketDataApiV2Position,
           fetchImpl: input.fetchImpl,
+          admission: input.admission,
+          lane: "background",
         });
         delete state.retryDelay;
         lastError = undefined;
@@ -338,6 +362,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
         if (
           error instanceof PolymarketDataApiV2Error &&
           (error.status === 429 || error.status === 503) &&
+          error.diagnostics.source !== "shared_limiter" &&
           error.retryAfterMs !== null &&
           error.retryAfterMs > 0
         ) {
@@ -346,6 +371,16 @@ export async function discoverBackgroundPolymarketPositions(input: {
             reason: error.status === 429 ? "rate_limited" : "upstream_error",
           };
         }
+        // Shared half-open probe deadlines are not wallet-specific evidence.
+        // Persist the cursor, but do not strand a wallet behind an obsolete
+        // synthetic deadline after another process has recovered the circuit.
+        if (
+          error instanceof PolymarketDataApiV2Error &&
+          error.diagnostics.source === "shared_limiter"
+        )
+          return defer(
+            error.status === 429 ? "rate_limited" : "upstream_error",
+          );
         if (!retryable || attempt + 1 >= cfg.maxAttempts || now() >= deadline)
           return defer(
             aborted

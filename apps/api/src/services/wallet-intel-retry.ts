@@ -123,7 +123,9 @@ export async function fetchWithWalletIntelRetry(inputs: {
       if (telemetry) telemetry.actualCalls += 1;
       const response = await fetch(inputs.url, {
         ...inputs.init,
-        signal: controller.signal,
+        signal: inputs.init.signal
+          ? AbortSignal.any([controller.signal, inputs.init.signal])
+          : controller.signal,
       });
       if (response.ok) {
         if (telemetry) telemetry.succeeded += 1;

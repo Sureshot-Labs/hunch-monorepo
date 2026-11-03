@@ -10,6 +10,7 @@ import type { PoolClient } from "pg";
 
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { getDataApiAdmission } from "./polymarket-data-api-admission-runtime.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchErc1155BalancesForOwnerTokenPairs } from "./polygon-rpc.js";
 import {
@@ -240,6 +241,7 @@ export async function fetchPolymarketHolders(inputs: {
         signal,
         parseRow: parsePolymarketDataApiV2HolderGroup,
         timeoutMs: Math.max(1, deadline - Date.now()),
+        admission: getDataApiAdmission(),
         fetchImpl: (url, init) =>
           fetchWithWalletIntelRetry({
             url: String(url),

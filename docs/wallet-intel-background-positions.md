@@ -14,7 +14,7 @@ or a missing RPC. Its identity is independently reproducible from the official
 [NegRiskAdapter source](https://github.com/Polymarket/neg-risk-ctf-adapter/blob/main/src/NegRiskAdapter.sol):
 `address(bytes20(keccak256("NO_TOKEN_BURN_ADDRESS")))`.
 
-This patch changes only background auto-tracked discovery. Foreground portfolio
+The original bounded-reader change affects only background auto-tracked discovery. Foreground portfolio
 deadlines, quote/slippage checks, execution, schedules and publication rules are
 unchanged. It adds no SQL migration, index or model call.
 
@@ -58,6 +58,63 @@ The refresh's single PG connection now has an explicit promise-based query queue
 instead of relying on node-postgres's deprecated implicit queue. HTTP/RPC workers
 remain concurrent. The queue drains and rejects late calls before pool release;
 one rejected statement does not poison following queries outside a transaction.
+
+## Shared Data API admission and 429 recovery
+
+All native Data API V2 requests now share an origin-wide Redis admission state
+across API processes and cron jobs. Endpoint families have separate rate-limit
+circuits; a positions outage does not block `/trades`. The wallet-intel entrypoint
+marks its requests as background work, including holder telemetry. The limiter
+does not wrap trading CLOB requests, RPC, or other venues.
+
+- Origin pacing: one start per 20 ms. Endpoint-family pacing: one per 100 ms.
+  Each family allows four concurrent requests, at most two from background work,
+  leaving two slots available to interactive reads. Existing caller deadlines
+  include time waiting for admission; there is no unbounded waiting queue.
+- A real HTTP 429 publishes feedback before its body is read. `Retry-After` is
+  honored even for an empty/non-JSON response. Without a header, backoff starts
+  at one second and doubles to 60 seconds, with 0–25% jitter. A longer provider
+  deadline is never capped at 60 seconds.
+- Concurrent 429s extend deadlines without independently doubling the same
+  failure wave. After cooldown, exactly one expiring half-open lease can probe
+  recovery. A successful older request cannot clear a newer 429 deadline.
+- Redis Lua uses Redis time and atomic operations. State contains only the
+  hashed origin, endpoint family, lease identifiers and scheduling counters;
+  never wallet addresses, request query strings, portfolio rows or cursors.
+- Redis connect/commands are bounded to 500 ms and reconnect is retried after
+  one second. If configured shared coordination is unavailable, background
+  discovery defers while preserving its checkpoint. Interactive requests use a
+  process-local fallback. Observed 429 deadlines survive both fallback and
+  reconnection. No new infrastructure or production env setting is required.
+- Shared-limiter denials are not upstream calls and do not create an independent
+  per-wallet cooldown. An actual provider 429 still persists its retry deadline
+  with the wallet checkpoint. Success from another process can therefore restore
+  admission without leaving unrelated wallets behind stale half-open waits.
+- Caller cancellation returns promptly even during Redis work. A late admitted
+  lease is released asynchronously; expired leases also have a bounded recovery
+  path. Partial inventories remain unavailable until the final page, never zero.
+
+Diagnostics distinguish `upstream` from `shared_limiter`, with retry delay,
+bounded Cloudflare Ray ID and JSON/non-JSON response format. They do not log
+response bodies or URLs containing wallet/cursor parameters. There is no model
+call, publication, balance mutation, SQL/schema change or cron change.
+
+The November 3 read-only investigation observed empty HTTP 429 responses on
+`/v2/positions`, including a minimal documented public request from two networks,
+while `/v2/status` returned 200. This is evidence of an upstream/edge restriction,
+not proof of its exact cause. Local backoff avoids amplification but cannot
+guarantee removal of a provider-side restriction; persistent failures need
+provider investigation with the sanitized timestamp/status/Ray ID. Published
+limits and endpoint contracts: [Data API overview](https://docs.polymarket.com/api-reference/data-api/overview)
+and [rate limits](https://docs.polymarket.com/api-reference/rate-limits).
+
+Offline tests exercise fifty concurrent wallets, exact Retry-After, competing
+late 429s/recovery probes, Redis/local transitions, cancellation and cursor
+recovery. The integration suite executes the exact Lua on local Redis using two
+independent clients and a disposable PostgreSQL 16 target. It deletes only
+generated test keys, never an entire Redis database. Injected HTTP transports
+must supply admission explicitly when testing limiter behavior; HTTP-only
+fixtures bypass runtime coordination deliberately.
 
 ## Optional background-only configuration
 
