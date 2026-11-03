@@ -157,7 +157,13 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
     signal.throwIfAborted();
     const response = await (inputs.fetchImpl ?? fetch)(url, {
       method: "GET",
-      headers: { accept: "application/json" },
+      // The positions edge returns an empty 429 for Node's default User-Agent,
+      // even below its request allowance. Identify our client truthfully; keep
+      // shared admission and Retry-After handling for real capacity limits.
+      headers: {
+        accept: "application/json",
+        "user-agent": "Hunch/1.0 (+https://hunch.trade)",
+      },
       signal,
     });
     outcome =

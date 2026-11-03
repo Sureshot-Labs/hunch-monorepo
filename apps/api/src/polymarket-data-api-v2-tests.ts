@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  fetchPolymarketDataApiV2Page,
   fetchPolymarketDataApiV2Pages,
   parsePolymarketDataApiV2HolderGroup,
   parsePolymarketDataApiV2Page,
@@ -142,6 +143,11 @@ const pages = await fetchPolymarketDataApiV2Pages({
     const url = new URL(String(input));
     requests.push(url);
     assert.equal(init?.method, "GET");
+    assert.equal(
+      new Headers(init?.headers).get("user-agent"),
+      "Hunch/1.0 (+https://hunch.trade)",
+      "identify Hunch on every cursor page, not only the first request",
+    );
     assert.equal(url.pathname, "/v2/positions");
     assert.equal(url.searchParams.has("offset"), false);
     return requests.length === 1
@@ -159,6 +165,43 @@ for (const [key, value] of Object.entries(inputs.params)) {
   );
 }
 assert.equal(inputs.params.user, owner);
+for (const endpoint of [
+  "positions",
+  "holders",
+  "trades",
+  "prices-history",
+] as const) {
+  let calls = 0;
+  const fetchImpl = (async (_input, init) => {
+    calls++;
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("user-agent"), "Hunch/1.0 (+https://hunch.trade)");
+    assert.equal(headers.get("accept"), "application/json");
+    assert.equal(headers.has("authorization"), false);
+    // Identifying the client must not suppress a genuine upstream rate limit.
+    return calls === 1
+      ? new Response(null, { status: 429, headers: { "retry-after": "2" } })
+      : pageResponse([position], null);
+  }) as typeof fetch;
+  await assert.rejects(
+    fetchPolymarketDataApiV2Page({ ...inputs, endpoint, fetchImpl }),
+    (error: unknown) => {
+      assert.ok(error instanceof PolymarketDataApiV2Error);
+      assert.equal(error.status, 429);
+      assert.equal(error.retryAfterMs, 2000);
+      assert.equal(error.diagnostics.responseFormat, "empty_or_non_json");
+      return true;
+    },
+  );
+  assert.equal(calls, 1, "client identification must not add hidden retries");
+  const recovered = await fetchPolymarketDataApiV2Page({
+    ...inputs,
+    endpoint,
+    fetchImpl,
+  });
+  assert.equal(recovered.data.length, 1);
+  assert.equal(calls, 2, "a normal later request can recover");
+}
 assert.deepEqual(
   await fetchPolymarketDataApiV2Pages({
     ...inputs,
