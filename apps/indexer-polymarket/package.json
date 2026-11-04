@@ -31,7 +31,7 @@
     "p-queue": "^8.0.1",
     "uuid": "^9.0.1",
     "ws": "^8.21.0",
-    "undici": "^6.27.0",
+    "undici": "^6.29.1",
     "fast-json-stable-stringify": "^2.1.0"
   }
 }
