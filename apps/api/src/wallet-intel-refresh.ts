@@ -19,6 +19,18 @@ import { polymarketOrderStorageContractSql } from "./lib/polymarket-order-ledger
 import { pool } from "./db.js";
 import { serialQueryClient } from "./lib/serial-query-client.js";
 import { discoverWalletIntelPositions } from "./services/wallet-intel-position-discovery.js";
+import {
+  loadBackgroundPositionConfig,
+  type BackgroundPositionResult,
+} from "./services/polymarket-background-positions.js";
+import {
+  runWalletIntelDiscoveryQueue,
+  canContinueWalletDiscovery,
+} from "./services/wallet-intel-discovery-queue.js";
+import {
+  loadWalletIntelPolymarketLedgers,
+  loadWalletIntelPolymarketMarks,
+} from "./services/wallet-intel-polymarket-enrichment.js";
 import { walletIntelProtocolAddresses } from "./services/wallet-intel-protocol-addresses.js";
 import { WALLET_INTEL_AUTO_TRACKED_SQL } from "./services/wallet-intel-auto-tracked-selection.js";
 import { withDataApiLane } from "./services/polymarket-data-api-admission.js";
@@ -75,10 +87,7 @@ import {
   positionStorageContract,
 } from "./lib/position-asset-context.js";
 import { POSITION_MARKET_JOIN_SQL } from "./lib/pnl-sql.js";
-import {
-  loadPolymarketHoldingMarkRows,
-  type PolymarketHoldingMarkRow,
-} from "./services/polymarket-holding-marks.js";
+import type { PolymarketHoldingMarkRow } from "./services/polymarket-holding-marks.js";
 import { markHotTokens } from "./lib/hot-tokens.js";
 import { normalizeLimitlessScopedTokenId } from "./lib/limitless-token.js";
 import { requestPriceRefreshForTokens } from "./lib/price-refresh.js";
@@ -2721,77 +2730,6 @@ function isNearlySamePrice(a: number | null, b: number | null): boolean {
   return Math.abs(a - b) <= 1e-9;
 }
 
-async function backfillPolymarketUnifiedTokensForWalletIntel(
-  client: Queryable,
-  tokenIds: string[],
-): Promise<void> {
-  const normalizedTokenIds = Array.from(
-    new Set(
-      tokenIds
-        .map((tokenId) => normalizeOnchainTokenId("polymarket", tokenId))
-        .filter((tokenId): tokenId is string => Boolean(tokenId)),
-    ),
-  );
-  if (normalizedTokenIds.length === 0) return;
-  await client.query(
-    `
-      with wanted as (
-        select distinct unnest($1::text[]) as token_id
-      ),
-      missing as (
-        select w.token_id
-        from wanted w
-        left join unified_tokens ut
-          on ut.venue = 'polymarket'
-         and ut.token_id = w.token_id
-        where ut.token_id is null
-      ),
-      matched_yes as (
-        select m.id as market_id, w.token_id, 'YES'::text as side
-        from unified_markets m
-        join missing w on w.token_id = m.token_yes
-        where m.venue = 'polymarket'
-      ),
-      matched_no as (
-        select m.id as market_id, w.token_id, 'NO'::text as side
-        from unified_markets m
-        join missing w on w.token_id = m.token_no
-        where m.venue = 'polymarket'
-      ),
-      matched_clob as (
-        select m.id as market_id,
-               w.token_id,
-               case
-                 when m.clob_token_ids::jsonb->>0 = w.token_id then 'YES'
-                 else 'NO'
-               end as side
-        from unified_markets m
-        join missing w on m.clob_token_ids::jsonb ? w.token_id
-        where m.venue = 'polymarket'
-          and m.clob_token_ids is not null
-          and m.clob_token_ids <> ''
-          and m.clob_token_ids <> '[]'
-          and (
-            m.clob_token_ids::jsonb->>0 = w.token_id
-            or m.clob_token_ids::jsonb->>1 = w.token_id
-          )
-      ),
-      to_insert as (
-        select * from matched_yes
-        union all
-        select * from matched_no
-        union all
-        select * from matched_clob
-      )
-      insert into unified_tokens(token_id, venue, market_id, side)
-      select token_id, 'polymarket', market_id, side
-      from to_insert
-      on conflict do nothing
-    `,
-    [normalizedTokenIds],
-  );
-}
-
 async function backfillKalshiUnifiedTokensForWalletIntel(
   client: Queryable,
   tokenIds: string[],
@@ -2995,9 +2933,17 @@ function walletIntelTokenIndexEntry(
 async function loadPolymarketWalletIntelTokenIndex(
   client: Queryable,
   balances: readonly WalletTokenBalance[],
-  inputs: { freshPriceMaxAgeMs?: number | null; now?: Date } = {},
+  inputs: {
+    freshPriceMaxAgeMs?: number | null;
+    now?: Date;
+    isolateBatchErrors?: boolean;
+  } = {},
 ): Promise<Map<string, TokenIndexEntry>> {
-  const rows = await loadPolymarketHoldingMarkRows(client, balances);
+  const rows = await loadWalletIntelPolymarketMarks(client, balances, {
+    isolateBatchErrors: inputs.isolateBatchErrors,
+    observe: (diagnostic) =>
+      console.log("[wallets:intel:refresh] enrichment batch", diagnostic),
+  });
   return new Map(
     [...rows].map(([key, row]) => [
       key,
@@ -3201,6 +3147,8 @@ async function fetchPolymarketAutoTrackedTokenBalances(
     previousOpenTokenIds: string[];
     onProgressPending?: () => void;
     discover?: typeof discoverWalletIntelPositions;
+    discovery?: BackgroundPositionResult;
+    readBalances?: typeof fetchPolymarketOwnerBalancesByLedger;
     scopeTokens?: typeof scopeWalletIntelPolymarketTokens;
   },
 ): Promise<{
@@ -3208,24 +3156,20 @@ async function fetchPolymarketAutoTrackedTokenBalances(
   inventoryComplete: boolean;
   catalogScope: { skippedOutsideCatalog: number; pendingTokens: number };
 } | null> {
-  const discovery = await (inputs.discover ?? discoverWalletIntelPositions)({
-    owner: inputs.address,
-    baseUrl: env.polymarketDataApiBase,
-    protocolAddresses: protocolWalletExclusions(),
-  });
+  const discovery =
+    inputs.discovery ??
+    (await (inputs.discover ?? discoverWalletIntelPositions)({
+      owner: inputs.address,
+      baseUrl: env.polymarketDataApiBase,
+      protocolAddresses: protocolWalletExclusions(),
+    }));
   const { tokens: discovered, ...diagnostic } = discovery;
   console.log(
     "[wallets:intel:refresh] polymarket position discovery",
     diagnostic,
   );
   if (discovery.status !== "complete") {
-    if (
-      discovery.status === "deferred" &&
-      discovery.checkpointAvailable &&
-      discovery.pagesThisSlice > 0 &&
-      ["time_budget", "page_budget"].includes(discovery.reason)
-    )
-      inputs.onProgressPending?.();
+    if (canContinueWalletDiscovery(discovery)) inputs.onProgressPending?.();
     return null;
   }
   const scoped = await (inputs.scopeTokens ?? scopeWalletIntelPolymarketTokens)(
@@ -3242,16 +3186,21 @@ async function fetchPolymarketAutoTrackedTokenBalances(
       catalogScope: scoped.summary,
     };
 
-  const { balancesByOwner } = await fetchPolymarketOwnerBalancesByLedger(
-    client,
-    {
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
-      owners: [inputs.address],
+  const { balancesByOwner } = await (
+    inputs.readBalances ?? fetchPolymarketOwnerBalancesByLedger
+  )(client, {
+    rpcUrl: env.polygonRpcUrl,
+    timeoutMs: env.polygonRpcTimeoutMs,
+    owners: [inputs.address],
+    tokenIds,
+    maxPairsPerCall: 200,
+    ledgers: await loadWalletIntelPolymarketLedgers(
+      client,
       tokenIds,
-      maxPairsPerCall: 200,
-    },
-  );
+      (diagnostic) =>
+        console.log("[wallets:intel:refresh] enrichment batch", diagnostic),
+    ),
+  });
   return {
     balances: balancesByOwner.get(inputs.address.toLowerCase()) ?? [],
     inventoryComplete: scoped.complete,
@@ -3524,6 +3473,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
     autoTrackedWalletFetchConcurrency: number;
     touchedWalletIds: Set<string>;
     discoverPolymarketPositions?: typeof discoverWalletIntelPositions;
+    readPolymarketBalances?: typeof fetchPolymarketOwnerBalancesByLedger;
     scopePolymarketTokens?: typeof scopeWalletIntelPolymarketTokens;
   },
 ): Promise<AutoTrackedCollectionResult> {
@@ -3549,6 +3499,25 @@ export async function collectAutoTrackedWalletSnapshotRows(
   const refreshedWallets: AutoTrackedWalletRow[] = [];
   const successfulWalletVenueKeys = new Set<string>();
   const fetchStartedAt = Date.now();
+  const polymarketTargets = inputs.autoTrackedWallets.filter(
+    (row) => row.venue === "polymarket" && row.chain === "polygon",
+  );
+  const discoveryQueue = await runWalletIntelDiscoveryQueue({
+    targets: polymarketTargets,
+    concurrency: Math.min(2, inputs.autoTrackedWalletFetchConcurrency),
+    sliceBudgetMs: loadBackgroundPositionConfig().walletBudgetMs,
+    discover: (tracked, walletBudgetMs) =>
+      (inputs.discoverPolymarketPositions ?? discoverWalletIntelPositions)({
+        owner: tracked.address,
+        baseUrl: env.polymarketDataApiBase,
+        protocolAddresses: protocolWalletExclusions(),
+        walletBudgetMs,
+      }),
+  });
+  console.log(
+    "[wallets:intel:refresh] discovery queue",
+    discoveryQueue.summary,
+  );
 
   const fetched = (
     await mapWithConcurrency(
@@ -3569,6 +3538,8 @@ export async function collectAutoTrackedWalletSnapshotRows(
           if (tracked.venue === "polymarket" && tracked.chain === "polygon") {
             const address = normalizeAddress(tracked.address, "polygon");
             if (!address) return null;
+            const discovery = discoveryQueue.results.get(tracked);
+            if (!discovery || discoveryQueue.errors.has(tracked)) return null;
             const balances = await fetchPolymarketAutoTrackedTokenBalances(
               client,
               {
@@ -3581,7 +3552,8 @@ export async function collectAutoTrackedWalletSnapshotRows(
                       tracked.venue,
                     ),
                   ),
-                discover: inputs.discoverPolymarketPositions,
+                discovery,
+                readBalances: inputs.readPolymarketBalances,
                 scopeTokens: inputs.scopePolymarketTokens,
               },
             );
@@ -3666,16 +3638,13 @@ export async function collectAutoTrackedWalletSnapshotRows(
   }
 
   const backfillStartedAt = Date.now();
-  await Promise.all([
-    backfillPolymarketUnifiedTokensForWalletIntel(
-      client,
-      tokenIdsForIndexByVenue.polymarket,
-    ),
-    backfillKalshiUnifiedTokensForWalletIntel(
-      client,
-      tokenIdsForIndexByVenue.kalshi,
-    ),
-  ]);
+  // Polymarket already has frozen ledger provenance from catalog scope. Marks
+  // resolve through that context; a second catalog-wide legacy backfill is
+  // redundant and cannot safely replace a current generation projection.
+  await backfillKalshiUnifiedTokensForWalletIntel(
+    client,
+    tokenIdsForIndexByVenue.kalshi,
+  );
   const backfillDurationMs = Date.now() - backfillStartedAt;
 
   const prePriceTokenIndexByVenue: Record<
@@ -3697,6 +3666,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
           ? await loadPolymarketWalletIntelTokenIndex(
               client,
               polymarketBalances,
+              { isolateBatchErrors: true },
             )
           : await loadTokenIndexEntriesForVenue(client, {
               venue,
@@ -3733,6 +3703,7 @@ export async function collectAutoTrackedWalletSnapshotRows(
                     ? walletIntelRefreshPolicy.freshPriceMaxAgeMs
                     : null,
                 now: priceFreshAsOf,
+                isolateBatchErrors: true,
               },
             )
           : await loadTokenIndexEntriesForVenue(client, {
@@ -3744,13 +3715,15 @@ export async function collectAutoTrackedWalletSnapshotRows(
                   : null,
               now: priceFreshAsOf,
             });
+      const knownTokenIds = new Set(inputs.tokenIdsByVenue[venue]);
       for (const entry of finalTokenIndexByVenue[venue].values()) {
         const tokenId = entry.tokenId;
         if (!inputs.tokenIndexByVenue[venue].has(tokenId)) {
           inputs.tokenIndexByVenue[venue].set(tokenId, entry);
         }
-        if (!inputs.tokenIdsByVenue[venue].includes(tokenId)) {
+        if (!knownTokenIds.has(tokenId)) {
           inputs.tokenIdsByVenue[venue].push(tokenId);
+          knownTokenIds.add(tokenId);
         }
       }
     }),

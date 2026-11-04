@@ -497,13 +497,14 @@ const slowFinish = {
   },
 };
 const finishBegan = performance.now();
-await assert.rejects(() =>
-  fetchPolymarketDataApiV2Page({
+assert.deepEqual(
+  await fetchPolymarketDataApiV2Page({
     ...options,
     admission: slowFinish,
     timeoutMs: 10,
     fetchImpl: (async () => page([], null)) as typeof fetch,
   }),
+  { data: [], nextCursor: null },
 );
 assert.ok(
   performance.now() - finishBegan < 100,

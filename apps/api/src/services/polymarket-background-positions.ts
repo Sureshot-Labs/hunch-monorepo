@@ -106,6 +106,7 @@ export type BackgroundPositionResult = {
   retryAfterMs: number | null;
   cfRay: string | null;
   responseFormat: string | null;
+  timeoutCause?: "slice_budget" | "page_deadline" | "admission" | null;
 };
 
 /** Only called by wallet-intel under its process-wide PG advisory lock. Redis is
@@ -138,6 +139,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
     retries = 0,
     cursorRestarts = 0;
   let lastError: unknown;
+  let timeoutCause: BackgroundPositionResult["timeoutCause"] = null;
   const params = polymarketDataApiV2PositionParams(owner);
   const scope = createHash("sha256")
     .update(JSON.stringify([new URL(input.baseUrl).origin, params]))
@@ -203,6 +205,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
       lastError instanceof PolymarketDataApiV2Error
         ? lastError.diagnostics.responseFormat
         : null,
+    timeoutCause,
   });
   if (!/^0x[a-f0-9]{40}$/.test(owner))
     return result("excluded", "invalid_owner");
@@ -362,13 +365,18 @@ export async function discoverBackgroundPolymarketPositions(input: {
       | undefined;
     for (let attempt = 0; attempt < cfg.maxAttempts; attempt++) {
       if (now() >= deadline) return defer("time_budget");
+      // Keep the page deadline independent from the remaining slice budget.
+      // AbortSignal.any propagates the actual winning reason, including while
+      // waiting for admission or consuming the response body.
+      const sliceSignal = AbortSignal.timeout(Math.max(1, deadline - now()));
       try {
         page = await fetchPolymarketDataApiV2Page({
           baseUrl: input.baseUrl,
           endpoint: "positions",
           params,
           cursor: state.cursor,
-          timeoutMs: Math.max(1, Math.min(cfg.pageTimeoutMs, deadline - now())),
+          timeoutMs: cfg.pageTimeoutMs,
+          signal: sliceSignal,
           parseRow: parsePolymarketDataApiV2Position,
           fetchImpl: input.fetchImpl,
           admission: input.admission,
@@ -376,9 +384,15 @@ export async function discoverBackgroundPolymarketPositions(input: {
         });
         delete state.retryDelay;
         lastError = undefined;
+        timeoutCause = null;
         break;
       } catch (error) {
         lastError = error;
+        timeoutCause = null;
+        if (sliceSignal.aborted && error === sliceSignal.reason) {
+          timeoutCause = "slice_budget";
+          return defer("time_budget");
+        }
         if (
           error instanceof PolymarketDataApiV2Error &&
           error.reason === "protocol_contract"
@@ -403,6 +417,7 @@ export async function discoverBackgroundPolymarketPositions(input: {
         const aborted =
           error instanceof Error &&
           ["AbortError", "TimeoutError"].includes(error.name);
+        if (aborted) timeoutCause = "page_deadline";
         const retryable =
           aborted ||
           (error instanceof PolymarketDataApiV2Error && error.retryable);
@@ -424,10 +439,13 @@ export async function discoverBackgroundPolymarketPositions(input: {
         if (
           error instanceof PolymarketDataApiV2Error &&
           error.diagnostics.source === "shared_limiter"
-        )
+        ) {
+          timeoutCause =
+            error.reason === "admission_deadline" ? "admission" : null;
           return defer(
             error.status === 429 ? "rate_limited" : "upstream_error",
           );
+        }
         if (!retryable || attempt + 1 >= cfg.maxAttempts || now() >= deadline)
           return defer(
             aborted
