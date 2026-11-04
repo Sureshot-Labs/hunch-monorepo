@@ -15,6 +15,7 @@ import { enforceGlobalRateLimit } from "./lib/global-rate-limit.js";
 import { flushPendingMarketRefreshes } from "./lib/market-refresh.js";
 import { isPgStatementTimeoutError } from "./lib/postgres-errors.js";
 import { isRecord } from "./lib/type-guards.js";
+import { resolveTrustedProxy } from "./lib/trusted-proxy.js";
 import { env } from "./env.js";
 import { pool } from "./db.js";
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
@@ -45,11 +46,7 @@ function sanitizeErrorEnvelope(
 }
 
 export async function buildApp() {
-  const trustProxy = env.trustProxy
-    ? env.trustProxyHops > 0
-      ? env.trustProxyHops
-      : true
-    : false;
+  const trustProxy = resolveTrustedProxy(env.trustProxy, env.trustProxyHops);
   const app = Fastify({
     logger: true,
     trustProxy,

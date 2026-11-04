@@ -1,5 +1,70 @@
 # October 2026 security update
 
+## November 4 local follow-up (not deployed)
+
+The public HTTP dependency follow-up keeps Node `24.22.1`, Bun `1.4.4`,
+nginx `1.30.6`, production infrastructure images, schedules and settings unchanged.
+The user explicitly deferred PostgreSQL/Timescale and Redis upgrades because
+those services are private. No commit, push or production restart is part of
+this follow-up.
+
+- Backend: Fastify `5.12.8`, Undici `6.29.1` / `7.30.1`, direct Zod v4
+  consumers `4.6.6`, and image-size `2.0.3`. Legacy Zod v3 consumers are not
+  silently migrated to v4. Existing financial SDK resolutions are preserved.
+- Frontend companion patch: Next `16.4.5`, React/ReactDOM `19.2.9`, preserving
+  sharp `0.35.5` and the deliberate lint baseline.
+- Admin companion patch: Seroval `1.6.11` through a major-compatible override.
+- Fastify removed numeric `trustProxy` support for security reasons. Hunch now
+  validates each trusted hop against loopback/private Docker address ranges and
+  the existing hop bound. Public and malformed peers cannot supply trusted
+  forwarded fields; signed Hunch header authentication is unchanged. This does
+  not authenticate sibling private containers and is specific to the existing
+  single-host private-proxy topology.
+
+Regression tests cover malformed-URL fallback isolation, case-insensitive
+header dependencies, forwarded-field provenance, IPv4/IPv6 proxy boundaries,
+constrained-array allocation, malformed ICNS termination and normal PNG parsing.
+Run `pnpm test:http-security` under Node. Bun can run the API test file directly;
+the separate npm Undici TLS-option tests require Node because Bun substitutes a
+native shim without MockAgent. TLS tests use mock dispatchers with networking
+disabled; they test callback preservation, not a live TLS-renegotiation exploit.
+The ICNS vector runs in a bounded child so a downgrade fails rather than hanging.
+
+Local verification completed: backend workspace build/typecheck/lint 47/47 and
+the full fast command passed; profile OpenAPI, content, trades-cursor and signed-IP
+contracts passed. Security regressions passed under Node (9) and Bun (7). Both
+Linux ARM64 Dockerfiles passed frozen installation and the actual workspace or
+Node/Turbopack build. Frontend passed 1,692 tests plus typecheck/lint; admin passed
+72 tests, build/typecheck/lint and an empty production dependency audit.
+The frontend image passed homepage, anonymous deposit HTML, static PNG and image
+optimizer HTTP 200 checks under both Node and Bun, using an isolated mock backend
+and a valid synthetic public app ID, not production credentials. This does not
+verify authenticated flows or replace post-release health checks. The existing
+frontend `AGENTS.md` duplicate-H1 markdownlint warning remains unchanged.
+
+The broad dependency audits are **not clean**: SDK/transitive and tooling
+advisories remain, including legacy parsers whose safe update requires an owner
+upgrade rather than forcing a breaking major override. Audit counts are not
+proof of public exploitability. In particular, Hardhat's Undici v5 is tooling,
+Swagger UI is disabled by default in production, and SDK-bundled server
+frameworks are not automatically Hunch server entrypoints. This patch does not
+claim to remediate every transitive dependency, host package, or bundled binary.
+The previously accepted Bun/c-ares residual below remains open; no newer patched
+stable Bun release was identified. Host containerd backport completeness also
+remains unverified; no host package was changed.
+
+Primary references:
+
+- [Next November security release](https://github.com/vercel/next.js/releases/tag/v16.4.5)
+- [Fastify proxy-hop advisory](https://github.com/fastify/fastify/security/advisories/GHSA-3m5p-2c4r-xxw2)
+- [Fastify latest security release](https://github.com/fastify/fastify/releases/tag/v5.12.8)
+- [Undici security release](https://github.com/nodejs/undici/releases/tag/v7.30.1)
+- [Zod allocation advisory and maintainer fix](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)
+- [Image parser advisory and maintainer fix](https://github.com/advisories/GHSA-w3rx-r6r6-pgpr)
+- [Seroval typed-array advisory](https://github.com/lxsmnsyc/seroval/security/advisories/GHSA-f86p-h4j2-7qgj)
+
+## October baseline and accepted residuals
+
 The initial release on 2026-10-22 updated Node, nginx and frontend dependencies
 while deferring Bun until a patched stable release existed. The follow-up pins
 Bun `1.4.4`, released later that day, in both backend and frontend Dockerfiles
