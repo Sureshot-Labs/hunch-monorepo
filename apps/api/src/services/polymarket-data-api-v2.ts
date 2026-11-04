@@ -136,15 +136,25 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
           inputs.timeoutMs,
         );
       } catch (error) {
-        if (!(error instanceof DataApiAdmissionError)) throw error;
+        // The page's own deadline can expire before acquire emits its lease
+        // deadline. No HTTP request was made: do not blame the upstream.
+        const admissionError =
+          error instanceof DataApiAdmissionError
+            ? error
+            : timeoutSignal.aborted &&
+                error === timeoutSignal.reason &&
+                !(inputs.signal?.aborted && error === inputs.signal.reason)
+              ? new DataApiAdmissionError(0, "admission_deadline")
+              : null;
+        if (!admissionError) throw error;
         throw new PolymarketDataApiV2Error(
-          error.reason === "shared_cooldown" ? 429 : 503,
-          error.reason,
+          admissionError.reason === "shared_cooldown" ? 429 : 503,
+          admissionError.reason,
           true,
           null,
-          error.retryAfterMs,
+          admissionError.retryAfterMs,
           null,
-          error.reason,
+          admissionError.reason,
           {
             source: "shared_limiter",
             cfRay: null,
@@ -173,14 +183,19 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
       if (response.status === 429 && admission && permit) {
         const limitedPermit = permit;
         permit = undefined;
-        const wait = await awaitDataApiTask(
-          admission.finish(limitedPermit, {
-            kind: "limited",
-            retryAfterMs: retryAfterMs ?? 0,
-          }),
-          signal,
-        );
-        retryAfterMs = Math.max(retryAfterMs ?? 0, wait);
+        const feedback = admission.finish(limitedPermit, {
+          kind: "limited",
+          retryAfterMs: retryAfterMs ?? 0,
+        });
+        try {
+          const wait = await awaitDataApiTask(feedback, signal);
+          retryAfterMs = Math.max(retryAfterMs ?? 0, wait);
+        } catch {
+          // Already received a real 429. Cleanup must not replace that fact
+          // (or its Retry-After) with a slice cancellation. The lease expires
+          // even if Redis is unavailable; late feedback is still observed.
+          void feedback.catch(() => {});
+        }
       }
       const payload: unknown = await response.json().catch(() => null);
       const error = isRecord(payload) ? payload : {};
@@ -229,8 +244,14 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
         kind: outcome,
         retryAfterMs: 0,
       });
-      if (signal.aborted) void completion.catch(() => {});
-      else await awaitDataApiTask(completion, signal);
+      // Finishing the limiter is cleanup, not request evidence. Never mask a
+      // known HTTP error or successful parsed page with a late Redis failure
+      // or cancellation. Late permit cleanup/lease expiry remain in force.
+      try {
+        await awaitDataApiTask(completion, signal);
+      } catch {
+        void completion.catch(() => {});
+      }
     }
   }
 }

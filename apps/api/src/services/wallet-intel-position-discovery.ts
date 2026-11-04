@@ -13,6 +13,7 @@ export async function discoverWalletIntelPositions(input: {
   owner: string;
   baseUrl: string;
   protocolAddresses: readonly string[];
+  walletBudgetMs?: number;
 }) {
   const redis = await getDedicatedRedis("wallet-position-discovery", {
     connectDeadlineMs: 1000,
@@ -47,7 +48,12 @@ export async function discoverWalletIntelPositions(input: {
   return discoverBackgroundPolymarketPositions({
     ...input,
     store,
-    config: loadBackgroundPositionConfig(),
+    config: {
+      ...loadBackgroundPositionConfig(),
+      ...(input.walletBudgetMs === undefined
+        ? {}
+        : { walletBudgetMs: input.walletBudgetMs }),
+    },
     admission: getDataApiAdmission(),
   });
 }

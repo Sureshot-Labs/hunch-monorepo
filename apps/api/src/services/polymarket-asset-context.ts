@@ -261,9 +261,36 @@ export function selectPolymarketSyncedOrderContext(
  * Missing legacy provenance stays on its original CTF read path, never PM by
  * uint256 layout heuristics. A positive PM balance requires a real binding.
  */
+export const POLYMARKET_LEDGER_MARKETS_BOUNDED_SQL = `
+ with wanted_tokens as materialized (select distinct unnest($1::text[]) as token_id)
+ select distinct market_row.id, market_row.venue, market_row.condition_id,
+   market_row.clob_token_ids, market_row.outcomes, market_row.metadata
+ from wanted_tokens wanted_row
+ join lateral (
+   select token_row.market_id from unified_tokens token_row
+   where token_row.token_id=wanted_row.token_id offset 0
+ ) token_match on true
+ join lateral (
+   select market_row.id,market_row.venue,market_row.condition_id,
+     market_row.clob_token_ids,market_row.outcomes,market_row.metadata
+   from unified_markets market_row
+   where market_row.id=token_match.market_id and market_row.venue='polymarket' offset 0
+ ) market_row on true`;
+
+export const POLYMARKET_LEDGER_POSITIONS_BOUNDED_SQL = `
+ with wanted_tokens as materialized (select distinct unnest($1::text[]) as token_id)
+ select distinct holding_row.token_id,holding_row.position_contract,holding_row.asset_context
+ from wanted_tokens wanted_row
+ join lateral (
+   select position_row.token_id,position_row.position_contract,position_row.asset_context
+   from positions position_row
+   where position_row.venue='polymarket' and position_row.token_id=wanted_row.token_id offset 0
+ ) holding_row on true`;
+
 export async function loadPolymarketHoldingLedgers(
   db: Pick<Pool, "query">,
   assetIds: readonly string[],
+  options: { boundedTokenLookups?: boolean } = {},
 ): Promise<PolymarketHoldingLedger[]> {
   const tokens = [
     ...new Set(
@@ -282,7 +309,9 @@ export async function loadPolymarketHoldingLedgers(
   );
   const { rows: currentMarkets } =
     await db.query<PolymarketBindingMarketSource>(
-      `select distinct market_row.id, market_row.venue, market_row.condition_id,
+      options.boundedTokenLookups
+        ? POLYMARKET_LEDGER_MARKETS_BOUNDED_SQL
+        : `select distinct market_row.id, market_row.venue, market_row.condition_id,
       market_row.clob_token_ids, market_row.outcomes, market_row.metadata
      from unified_markets market_row
      join unified_tokens token_row on token_row.market_id = market_row.id
@@ -294,7 +323,9 @@ export async function loadPolymarketHoldingLedgers(
     position_contract: string;
     asset_context: unknown;
   }>(
-    `select distinct token_id, position_contract, asset_context from positions
+    options.boundedTokenLookups
+      ? POLYMARKET_LEDGER_POSITIONS_BOUNDED_SQL
+      : `select distinct token_id, position_contract, asset_context from positions
      where venue = 'polymarket' and token_id = any($1::text[])`,
     [tokens],
   );
