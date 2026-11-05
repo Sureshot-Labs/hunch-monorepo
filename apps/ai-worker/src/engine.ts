@@ -131,6 +131,7 @@ export class EmbeddingEngine {
   private probing = false;
   private servingChecked = false;
   private cooldownErrors = new WeakSet<EmbeddingProviderError>();
+  private providerBatches = 0;
   private claimCursor = "0-0";
   private lastMaintenance = 0;
   private lastReport = 0;
@@ -523,12 +524,19 @@ redis.call('SET',KEYS[3],'1'); return 1`,
         slices.map(async (batch) => {
           let reservation: CostReservation | null = null;
           let response;
+          this.providerBatches++;
           try {
             response = await (this.options.provider ?? fetchEmbeddingBatch)({
               generation,
               texts: batch.map((x) => x.text),
               apiKey: this.options.apiKey,
               timeoutMs: policy.requestTimeoutMs,
+              onAttempt: (summary) => {
+                console.info("[ai-worker] provider attempt", {
+                  ...summary,
+                  concurrentBatches: this.providerBatches,
+                });
+              },
               beforeAttempt: async ({ attempt, estimatedCostUsd }) => {
                 const circuit = await this.store.get<number>(
                   `${CONTROL}circuit`,
@@ -580,6 +588,8 @@ redis.call('SET',KEYS[3],'1'); return 1`,
               }
             }
             throw error;
+          } finally {
+            this.providerBatches--;
           }
           const completed = reservation as CostReservation | null;
           if (!completed) throw new Error("embedding_missing_cost_reservation");

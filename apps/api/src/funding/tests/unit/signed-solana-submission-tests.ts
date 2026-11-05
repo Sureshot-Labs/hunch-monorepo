@@ -14,6 +14,7 @@ import {
 import {
   parseVerifiedSolanaSubmission,
   verifySignedSolanaFundingSubmission,
+  SignedSolanaSubmissionError,
 } from "../../execution/signed-solana-submission.js";
 import { relaySolanaActionMessage } from "../../../funding-providers/relay/solana-sponsorship.js";
 import {
@@ -77,10 +78,21 @@ const validate = (signedTransaction = encoded()) =>
     lookupTables: [],
   });
 assert.throws(() => validate(), /signature is invalid/);
+assert.throws(
+  () => validate(),
+  (error: unknown) =>
+    error instanceof SignedSolanaSubmissionError &&
+    error.reason === "signature_invalid",
+);
 transaction.sign([key]);
 assert.equal(validate().blockhash, SystemProgram.programId.toBase58());
 assert.ok(validate().signature.length > 60);
 assert.throws(() => validate(encoded() + "junk"));
+assert.throws(
+  () => validate("not base64"),
+  (error: unknown) =>
+    error instanceof SignedSolanaSubmissionError && error.reason === "encoding",
+);
 assert.throws(() =>
   verifySignedSolanaFundingSubmission({
     action,

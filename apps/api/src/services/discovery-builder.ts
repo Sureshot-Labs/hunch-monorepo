@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import type {
   DiscoveryItem,
   DiscoveryResearch,
@@ -90,6 +91,9 @@ export type DiscoveryBuildProgress = {
   smartParticipants?: Record<string, DiscoveryParticipant[]>;
   projectionRefreshedAt: string | null;
   ownerLookups?: { key: string; address: string; chain: string }[];
+  // Optional so existing Redis checkpoints remain readable. The normal batch
+  // stays 500; only a failed input range is bisected and checkpointed.
+  positionBatchSize?: number;
 };
 export type DiscoveryBuildStep = {
   progress: DiscoveryBuildProgress;
@@ -376,18 +380,45 @@ export class DiscoveryBuilder {
       return { progress };
     }
     if (progress.phase === "positions") {
+      const batchSize = Math.max(
+        1,
+        Math.min(500, progress.positionBatchSize ?? 500),
+      );
       const batch = progress.wallets.slice(
         progress.position,
-        progress.position + 500,
+        progress.position + batchSize,
       );
       if (batch.length) {
-        const input = (
-          await this.repo.query(DISCOVERY_SMART_INPUTS_SQL, [
-            batch.map((w) => w.walletId),
-            asOf,
-            scope.venues,
-          ])
-        )[0];
+        const started = this.clock();
+        let input: RawDiscoveryRow | undefined;
+        try {
+          input = (
+            await this.repo.query(DISCOVERY_SMART_INPUTS_SQL, [
+              batch.map((w) => w.walletId),
+              asOf,
+              scope.venues,
+            ])
+          )[0];
+        } catch (error) {
+          console.warn("[discovery] input batch failed", {
+            stage: "smart_positions",
+            wallets: batch.length,
+            elapsedMs: this.clock() - started,
+            code:
+              error && typeof error === "object" && "code" in error
+                ? String(error.code).slice(0, 20)
+                : "unknown",
+          });
+          if (!isPgStatementTimeoutError(error) || batch.length <= 1)
+            throw error;
+          progress.positionBatchSize = Math.max(
+            1,
+            Math.floor(batch.length / 2),
+          );
+          // No rows/cursor have changed: the service persists this smaller range
+          // before retrying. Completed wallets and the original as-of survive.
+          return { progress };
+        }
         for (const raw of Array.isArray(input?.positions)
           ? input.positions
           : []) {
@@ -421,6 +452,8 @@ export class DiscoveryBuilder {
             });
         }
       }
+      if (progress.positionBatchSize != null)
+        progress.positionBatchSize = Math.min(500, batchSize * 2);
       progress.position += batch.length;
       if (progress.position < progress.wallets.length) return { progress };
       progress.smart = aggregateSmartMoney(

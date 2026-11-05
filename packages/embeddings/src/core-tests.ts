@@ -952,6 +952,10 @@ test("provider errors retain only bounded safe metadata, never raw prompts or me
         rateLimit: undefined,
         rateRemaining: "0",
         rateReset: undefined,
+        transportStatus: 429,
+        errorType: undefined,
+        responseKind: "json",
+        edgeTrace: undefined,
       });
       assert.doesNotMatch(JSON.stringify(error), /private|secret/);
       return true;
@@ -970,4 +974,117 @@ test("provider errors retain only bounded safe metadata, never raw prompts or me
       error.status === 403 &&
       error.breaker,
   );
+});
+
+test("logical and HTTP rate limits retain the same safe diagnostics and nested headers", async () => {
+  for (const transport of [200, 429]) {
+    const observed: unknown[] = [];
+    let calls = 0;
+    await assert.rejects(
+      fetchEmbeddingBatch({
+        generation: qwen,
+        texts: ["private fixture input"],
+        apiKey: "fixture",
+        timeoutMs: 1000,
+        fetch: mockFetch(() => {
+          calls++;
+          return response(
+            {
+              error: {
+                code: 429,
+                message: "private error",
+                request_id: "req-fixture",
+                metadata: {
+                  provider_name: "Nebius",
+                  provider_code: 429,
+                  error_type: "rate_limit_exceeded",
+                  limit_source: "upstream_provider_shared_pool",
+                  raw: "private body",
+                  headers: {
+                    "Retry-After": "60",
+                    "X-RateLimit-Limit": "100",
+                    "X-RateLimit-Remaining": "0",
+                  },
+                },
+              },
+            },
+            transport,
+            { "cf-ray": "fixture-ARN" },
+          );
+        }),
+        onAttempt: (item) => observed.push(item),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof EmbeddingProviderError);
+        assert.equal(error.status, 429);
+        assert.equal(error.retryAfterMs, 60000);
+        assert.equal(error.diagnostics.transportStatus, transport);
+        assert.equal(error.diagnostics.provider, "Nebius");
+        assert.equal(error.diagnostics.providerCode, "429");
+        assert.equal(
+          error.diagnostics.limitSource,
+          "upstream_provider_shared_pool",
+        );
+        assert.equal(error.diagnostics.errorType, "rate_limit_exceeded");
+        assert.equal(error.diagnostics.requestId, "req-fixture");
+        assert.equal(error.diagnostics.rateRemaining, "0");
+        assert.equal(error.diagnostics.edgeTrace, "fixture-ARN");
+        assert.doesNotMatch(JSON.stringify(error), /private/);
+        return true;
+      },
+    );
+    assert.equal(calls, 1);
+    assert.equal(observed.length, 1);
+    assert.doesNotMatch(JSON.stringify(observed), /private/);
+  }
+});
+
+test("attempt telemetry cannot retry or fail a successful paid request", async () => {
+  let calls = 0;
+  const result = await fetchEmbeddingBatch({
+    generation: e5,
+    texts: ["one"],
+    apiKey: "fixture",
+    timeoutMs: 1000,
+    fetch: mockFetch(() => {
+      calls++;
+      return response({ data: [{ index: 0, embedding: vector }] });
+    }),
+    onAttempt: (summary) => {
+      assert.equal(summary.outcome, "success");
+      assert.equal(summary.items, 1);
+      assert.ok(summary.inputTokens > 0);
+      throw Error("fixture observer unavailable");
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.embeddings.length, 1);
+});
+
+test("non-JSON and oversized errors expose classification, never response contents", async () => {
+  for (const [body, kind] of [
+    ["private html body", "non_json"],
+    ["x".repeat(20000), "truncated"],
+  ]) {
+    await assert.rejects(
+      fetchEmbeddingBatch({
+        generation: e5,
+        texts: ["one"],
+        apiKey: "fixture",
+        timeoutMs: 1000,
+        fetch: async () =>
+          new Response(body, {
+            status: 429,
+            headers: { "x-request-id": "req-safe" },
+          }),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof EmbeddingProviderError);
+        assert.equal(error.diagnostics.responseKind, kind);
+        assert.equal(error.diagnostics.requestId, "req-safe");
+        assert.doesNotMatch(JSON.stringify(error), /private html|xxxx/);
+        return true;
+      },
+    );
+  }
 });
