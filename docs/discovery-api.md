@@ -253,3 +253,49 @@ node --import tsx apps/api/src/discovery-openapi-tests.ts --compare
 ```
 
 No production data, policies, schedules, model configuration or collection logic were changed by this patch's validation. Commit and deployment require a separate action.
+
+### Read-path recovery and change24h wake-ups
+
+Smart Money keeps the normal 500-wallet input batch and the original build
+timestamp. A PostgreSQL timeout checkpoints a smaller failed input range;
+completed ranges are not discarded or reread. Successful smaller ranges can
+grow back toward 500. A single-wallet failure remains retryable without
+publishing an incomplete portfolio or replacing the last complete public pool.
+Fallback positions use the exact wallet, venue and latest eligible snapshot.
+Qualification, owner-family netting, pagination and quote/slippage rules are
+unchanged.
+
+Category totals are aggregated before filtering the small result by allowed
+venues, using existing indexes. A single-flight last-good cache survives Redis
+failure; SQL failure is retried at the existing refresh cadence instead of on
+every HTTP read. Lifecycle revisions use separate last-good bodies.
+
+Migration 0295 adds statement triggers to the regular `unified_token_top_latest`
+table, not the Timescale raw hypertable. Accepted quote changes and journal
+wake-ups commit together. Unchanged heartbeat timestamps and rejected older
+ticks do not add price work. Market IDs are deduplicated within a statement;
+concurrent statements append independent records. Insert, update, clear,
+terminal and delete paths share this boundary.
+
+An ordinary change24h pass reads exact journal IDs and indexed expiration/close
+boundaries, then computes batches of at most 1000 markets with one canonical
+YES/NO lookup per market. The full safety rebuild and all probability validity
+rules remain in place. Old invalid cache entries outside the bounded catch-up
+window remain the responsibility of that existing full rebuild.
+
+The migration records a handoff marker after installing the triggers. Only the
+first successful ordinary refresh recovers pre-trigger raw writes within the
+existing catch-up window; the marker is acknowledged in the same transaction
+as both caches and journal IDs. Rollback or interruption retains the marker.
+There is no history scan in the migration itself, no new index, and no schedule,
+retention or compression change. The marker is operational pipeline state, not
+market history or a new protected reference.
+
+Embedding attempt logs contain counts, token totals, duration, concurrent batch
+count and bounded allowlisted provider diagnostics. HTTP status is distinct from
+an error code carried inside a successful HTTP envelope. Nested rate headers are
+also recognized. Inputs, signed payloads, credentials and raw provider bodies
+are not logged. Diagnostic observer failures cannot retry paid execution.
+Models, dimensions, financial limits and provider routing are unchanged; an
+external rate-limit cause must be established from a natural response, not
+assumed from missing historical metadata.

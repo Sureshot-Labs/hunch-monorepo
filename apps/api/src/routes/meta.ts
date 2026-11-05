@@ -9,6 +9,8 @@ import {
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
+import { DEFAULT_CATEGORY_COUNTS_SQL } from "../repos/meta-categories.js";
+import { DefaultCategoryCache } from "../services/default-category-cache.js";
 import {
   fetchFeedCategoryFacetRows,
   queryRowsWithLocalSettings,
@@ -46,8 +48,18 @@ const DEFAULT_CATEGORY_NAMES = [
   "mentions",
   "other",
 ] as const;
-const defaultCategoriesRefreshes = new Map<string, Promise<string>>();
-let lastDefaultCategoriesBody: string | null = null;
+const defaultCategoryCache = new DefaultCategoryCache(
+  DEFAULT_CATEGORIES_CACHE_TTL_SEC,
+  DEFAULT_CATEGORIES_STALE_TTL_SEC,
+  Date.now,
+  (error) =>
+    console.warn("[meta] category refresh failed", {
+      code:
+        error && typeof error === "object" && "code" in error
+          ? String(error.code).slice(0, 20)
+          : "unknown",
+    }),
+);
 
 function buildFallbackDefaultCategoriesBody(): string {
   return JSON.stringify({
@@ -64,19 +76,7 @@ function buildFallbackDefaultCategoriesBody(): string {
 async function computeDefaultCategoriesBody(venues: string[]): Promise<string> {
   const rows = await queryRowsWithLocalSettings<CategoryRow>(
     pool,
-    `
-      select
-        venue,
-        lower(category) as category,
-        count(*)::int as events
-      from unified_events
-      where status = 'ACTIVE'
-        and venue = any($1::text[])
-        and category is not null
-        and btrim(category) <> ''
-      group by venue, lower(category)
-      order by events desc, venue asc, category asc
-    `,
+    DEFAULT_CATEGORY_COUNTS_SQL,
     [venues],
     { statementTimeoutMs: env.feedFilterTimeoutMs },
   );
@@ -115,69 +115,13 @@ async function loadDefaultCategoriesBody(args: {
   body: string;
   cacheStatus: "disabled" | "fallback" | "hit" | "miss" | "stale";
 }> {
-  const cacheKey = `meta:categories:v2:${args.lifecycleRevision}`;
-  const staleCacheKey = `${cacheKey}:stale`;
-  const r = await getRedis();
-  if (r) {
-    const cached = await r.get(cacheKey);
-    if (cached) {
-      lastDefaultCategoriesBody = cached;
-      await r.set(staleCacheKey, cached, {
-        EX: DEFAULT_CATEGORIES_STALE_TTL_SEC,
-      });
-      return { body: cached, cacheStatus: "hit" };
-    }
-
-    const stale = await r.get(staleCacheKey);
-    if (stale) {
-      lastDefaultCategoriesBody = stale;
-      let pending = defaultCategoriesRefreshes.get(cacheKey);
-      if (!pending) {
-        pending = computeDefaultCategoriesBody(args.venues)
-          .then(async (body) => {
-            lastDefaultCategoriesBody = body;
-            await Promise.all([
-              r.set(cacheKey, body, { EX: DEFAULT_CATEGORIES_CACHE_TTL_SEC }),
-              r.set(staleCacheKey, body, {
-                EX: DEFAULT_CATEGORIES_STALE_TTL_SEC,
-              }),
-            ]);
-            return body;
-          })
-          .finally(() => defaultCategoriesRefreshes.delete(cacheKey));
-        defaultCategoriesRefreshes.set(cacheKey, pending);
-      }
-      void pending.catch(() => undefined);
-      return { body: stale, cacheStatus: "stale" };
-    }
-  }
-
-  let pending = defaultCategoriesRefreshes.get(cacheKey);
-  if (!pending) {
-    pending = computeDefaultCategoriesBody(args.venues).finally(() =>
-      defaultCategoriesRefreshes.delete(cacheKey),
-    );
-    defaultCategoriesRefreshes.set(cacheKey, pending);
-  }
-  try {
-    const body = await pending;
-    lastDefaultCategoriesBody = body;
-    if (r) {
-      await Promise.all([
-        r.set(cacheKey, body, { EX: DEFAULT_CATEGORIES_CACHE_TTL_SEC }),
-        r.set(staleCacheKey, body, {
-          EX: DEFAULT_CATEGORIES_STALE_TTL_SEC,
-        }),
-      ]);
-    }
-    return { body, cacheStatus: r ? "miss" : "disabled" };
-  } catch (error) {
-    if (!isPgStatementTimeoutError(error)) throw error;
-    return {
-      body: lastDefaultCategoriesBody ?? buildFallbackDefaultCategoriesBody(),
-      cacheStatus: "fallback",
-    };
-  }
+  return defaultCategoryCache.load(
+    `meta:categories:v2:${args.lifecycleRevision}`,
+    await getRedis().catch(() => null),
+    () => computeDefaultCategoriesBody(args.venues),
+    buildFallbackDefaultCategoriesBody,
+    isPgStatementTimeoutError,
+  );
 }
 
 function applyDefaultCategoryHeaders(

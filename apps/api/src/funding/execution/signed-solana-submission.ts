@@ -8,6 +8,33 @@ import type { SvmTransactionAction } from "../domain/types.js";
 import { relaySolanaActionMessage } from "../../funding-providers/relay/solana-sponsorship.js";
 import { matchesFundingMessageWithComputeBudget } from "./solana-compute-budget.js";
 
+export class SignedSolanaSubmissionError extends Error {
+  constructor(
+    readonly reason:
+      | "encoding"
+      | "size"
+      | "serialization"
+      | "signer_count"
+      | "missing_signature"
+      | "message_mismatch"
+      | "signature_invalid",
+  ) {
+    super(
+      {
+        encoding: "Invalid signed Solana transaction encoding",
+        size: "Invalid signed Solana transaction size",
+        serialization: "Invalid signed Solana transaction serialization",
+        signer_count: "Funding submission requires exactly one source signer",
+        missing_signature: "Funding signature is missing",
+        message_mismatch:
+          "Signed funding message does not match committed action",
+        signature_invalid: "Funding transaction signature is invalid",
+      }[reason],
+    );
+    this.name = "SignedSolanaSubmissionError";
+  }
+}
+
 /** Validates identity, not permission to broadcast. Caller must bind the owned
  * operation/attempt and atomically retain this identity before sending bytes.
  * No wallet secret or sponsorship is involved in external signed submissions.
@@ -22,21 +49,26 @@ export function verifySignedSolanaFundingSubmission(input: {
     input.signedTransaction.length > 1644 ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(input.signedTransaction)
   ) {
-    throw new Error("Invalid signed Solana transaction encoding");
+    throw new SignedSolanaSubmissionError("encoding");
   }
   const bytes = Buffer.from(input.signedTransaction, "base64");
   if (
     bytes.length > 1232 ||
     bytes.toString("base64") !== input.signedTransaction
   ) {
-    throw new Error("Invalid signed Solana transaction size");
+    throw new SignedSolanaSubmissionError("size");
   }
-  const transaction = VersionedTransaction.deserialize(bytes);
+  let transaction: VersionedTransaction;
+  try {
+    transaction = VersionedTransaction.deserialize(bytes);
+  } catch {
+    throw new SignedSolanaSubmissionError("serialization");
+  }
   if (transaction.signatures.length !== 1) {
-    throw new Error("Funding submission requires exactly one source signer");
+    throw new SignedSolanaSubmissionError("signer_count");
   }
   const signature = transaction.signatures[0];
-  if (!signature) throw new Error("Funding signature is missing");
+  if (!signature) throw new SignedSolanaSubmissionError("missing_signature");
   const expected = relaySolanaActionMessage(
     input.action,
     input.signer,
@@ -49,7 +81,7 @@ export function verifySignedSolanaFundingSubmission(input: {
       input.lookupTables,
     )
   ) {
-    throw new Error("Signed funding message does not match committed action");
+    throw new SignedSolanaSubmissionError("message_mismatch");
   }
   const publicKey = bs58.decode(input.signer);
   if (
@@ -68,7 +100,7 @@ export function verifySignedSolanaFundingSubmission(input: {
       signature,
     )
   ) {
-    throw new Error("Funding transaction signature is invalid");
+    throw new SignedSolanaSubmissionError("signature_invalid");
   }
   return {
     signature: bs58.encode(signature),

@@ -5,6 +5,7 @@ import {
   parseSolanaSigningContext,
   parseVerifiedSolanaSubmission,
   verifySignedSolanaFundingSubmission,
+  SignedSolanaSubmissionError,
   type SolanaSigningContext,
 } from "./signed-solana-submission.js";
 import { validatePolymarketFunderSelection } from "../../services/polymarket-funder.js";
@@ -833,7 +834,13 @@ export class FundingOperationActionRuntime {
           signedTransaction: input.signedTransaction,
           lookupTables,
         });
-      } catch {
+      } catch (error) {
+        console.warn("[funding] signed submission validation failed", {
+          reason:
+            error instanceof SignedSolanaSubmissionError
+              ? error.reason
+              : "invalid_message_structure",
+        });
         throw new FundingPersistenceError(
           "quote_mismatch",
           "signed Solana submission does not match the committed action",

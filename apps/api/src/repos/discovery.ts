@@ -113,8 +113,9 @@ export const DISCOVERY_SMART_INPUTS_SQL = `WITH requested_wallets AS MATERIALIZE
  WHERE latest.wallet_id=requested.wallet_id AND latest.venue=venue_row.venue
  AND latest.snapshot_at>=$2::timestamptz-interval '24 hours' AND latest.snapshot_at<=$2::timestamptz
  ORDER BY latest.snapshot_at DESC LIMIT 1) latest ON true
- JOIN wallet_position_snapshots snapshot_row ON snapshot_row.wallet_id=requested.wallet_id
- AND snapshot_row.venue=venue_row.venue AND snapshot_row.snapshot_at=latest.snapshot_at
+ JOIN LATERAL (SELECT snapshot_source.* FROM wallet_position_snapshots snapshot_source
+ WHERE snapshot_source.wallet_id=requested.wallet_id AND snapshot_source.venue=venue_row.venue
+ AND snapshot_source.snapshot_at=latest.snapshot_at OFFSET 0) snapshot_row ON true
  WHERE NOT EXISTS(SELECT 1 FROM valid_rollups r WHERE r.wallet_id=requested.wallet_id)
 ), net_changes AS MATERIALIZED (
  SELECT requested.wallet_id,activity_row.venue,activity_row.market_id,activity_row.outcome_side AS side,
@@ -233,16 +234,37 @@ export const DISCOVERY_ESTIMATE_INPUTS_SQL = `SELECT n.id AS note_id,
 
 export class DiscoveryRepository {
   constructor(readonly pool: Pick<Pool, "connect">) {}
-  query(
+  async query(
     sql: string,
     params: unknown[],
     timeout = 5000,
   ): Promise<RawDiscoveryRow[]> {
-    return discoveryReadOnly(
-      this.pool,
-      async (client) => (await client.query(sql, params)).rows,
-      timeout,
-    );
+    const started = Date.now();
+    try {
+      return await discoveryReadOnly(
+        this.pool,
+        async (client) => (await client.query(sql, params)).rows,
+        timeout,
+      );
+    } catch (error) {
+      console.warn("[discovery] SQL read failed", {
+        stage:
+          sql === DISCOVERY_SMART_INPUTS_SQL
+            ? "smart_inputs"
+            : sql === DISCOVERY_MARKET_QUOTES_SQL
+              ? "market_quotes"
+              : sql === DISCOVERY_MARKET_CARDS_SQL
+                ? "market_cards"
+                : "source",
+        batch: Array.isArray(params[0]) ? params[0].length : undefined,
+        elapsedMs: Date.now() - started,
+        code:
+          error && typeof error === "object" && "code" in error
+            ? String(error.code).slice(0, 20)
+            : "unknown",
+      });
+      throw error;
+    }
   }
   marketCards(ids: string[], light = false) {
     if (ids.length > 100) throw Error("discovery_batch_too_large");

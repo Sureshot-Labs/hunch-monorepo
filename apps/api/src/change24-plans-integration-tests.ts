@@ -39,11 +39,24 @@ try {
     insert into unified_token_top_latest(token_id,venue,ts,best_bid,best_ask) select token_id,'limitless',now(),0.5,0.5 from unified_market_tokens where market_id like 'plans:%';
     analyze unified_markets;analyze unified_market_tokens;analyze unified_token_top_latest;analyze unified_token_change_24h;
     set local statement_timeout='15s';set local lock_timeout='2s';`);
+  await db.query(`insert into unified_market_tokens(market_id,token_id,venue,outcome_side,updated_at)
+    values('plans:m1','plans:t1YES-new','limitless','YES',now()+interval '1 minute'),
+          ('plans:m2','plans:t2NO-null','limitless','NO',null),
+          ('plans:m3','plans:t3YES-tie','limitless','YES',now());
+    insert into unified_token_change_24h(token_id,avg_mid_24h)
+    values('plans:t1YES-new',0.4),('plans:t2NO-null',0.6),('plans:t3YES-tie',0.4);
+    insert into unified_token_top_latest(token_id,venue,ts,best_bid,best_ask)
+    values('plans:t1YES-new','limitless',now(),0.5,0.5),('plans:t2NO-null','limitless',now(),0.5,0.5),('plans:t3YES-tie','limitless',now(),0.5,0.5);`);
   const original = calculation("0241_incremental_market_event_change_24h.sql");
-  const bounded = calculation("0294_change24_append_journal.sql");
+  const bounded = calculation("0295_change24_quote_journal.sql");
   const cutoff = new Date().toISOString();
   const ids = Array.from({ length: 1000 }, (_, n) => "plans:m" + (n + 1));
-  for (const input of [[], ["missing:fixture"], ids]) {
+  for (const input of [
+    [],
+    ["missing:fixture"],
+    ["plans:m1", "plans:m1", "plans:m2", "plans:m3"],
+    ids,
+  ]) {
     const before = (await db.query(original, [input, cutoff])).rows.sort(
       (a, b) => a.market_id.localeCompare(b.market_id),
     );

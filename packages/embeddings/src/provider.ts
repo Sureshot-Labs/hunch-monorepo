@@ -45,6 +45,10 @@ export type EmbeddingErrorDiagnostics = {
   rateLimit?: string;
   rateRemaining?: string;
   rateReset?: string;
+  transportStatus?: number;
+  errorType?: string;
+  responseKind?: "json" | "non_json" | "truncated" | "unreadable";
+  edgeTrace?: string;
 };
 function diagnostic(value: unknown): string | undefined {
   return typeof value === "string" &&
@@ -53,10 +57,53 @@ function diagnostic(value: unknown): string | undefined {
     ? value
     : undefined;
 }
+function responseDiagnostics(
+  body: Record<string, unknown> | null,
+  response: Response,
+  responseKind: EmbeddingErrorDiagnostics["responseKind"],
+): { diagnostics: EmbeddingErrorDiagnostics; retryAfterMs: number } {
+  const error = object(body?.error);
+  const metadata = object(error?.metadata);
+  const nestedHeaders = object(metadata?.headers);
+  const header = (name: string): string | null => {
+    const direct = response.headers.get(name);
+    if (direct != null) return direct;
+    const nested = Object.entries(nestedHeaders ?? {}).find(
+      ([key]) => key.toLowerCase() === name,
+    )?.[1];
+    return typeof nested === "string" || typeof nested === "number"
+      ? String(nested)
+      : null;
+  };
+  return {
+    retryAfterMs: retryAfter(header("retry-after")),
+    diagnostics: {
+      provider: diagnostic(metadata?.provider_name),
+      providerCode: diagnostic(
+        String(metadata?.provider_code ?? metadata?.provider_error_code ?? ""),
+      ),
+      limitSource: diagnostic(metadata?.limit_source),
+      requestId: diagnostic(
+        header("x-request-id") ??
+          error?.request_id ??
+          body?.request_id ??
+          body?.id,
+      ),
+      rateLimit: diagnostic(header("x-ratelimit-limit")),
+      rateRemaining: diagnostic(header("x-ratelimit-remaining")),
+      rateReset: diagnostic(header("x-ratelimit-reset")),
+      transportStatus: response.status,
+      errorType: diagnostic(metadata?.error_type ?? error?.type),
+      responseKind,
+      edgeTrace: diagnostic(header("cf-ray")),
+    },
+  };
+}
 async function responseError(
   response: Response,
 ): Promise<EmbeddingProviderError> {
   let body: Record<string, unknown> | null = null;
+  let kind: EmbeddingErrorDiagnostics["responseKind"] = "unreadable";
   const reader = response.body?.getReader();
   if (reader) {
     try {
@@ -70,26 +117,26 @@ async function responseError(
         if (bytes > 16384) break;
         text += decoder.decode(next.value, { stream: true });
       }
-      if (bytes <= 16384) body = object(JSON.parse(text + decoder.decode()));
+      if (bytes > 16384) kind = "truncated";
+      else {
+        try {
+          body = object(JSON.parse(text + decoder.decode()));
+          kind = body ? "json" : "non_json";
+        } catch {
+          kind = "non_json";
+        }
+      }
     } catch {
       /* Unreadable metadata must never hide the real HTTP status. */
     } finally {
       await reader.cancel().catch(() => {});
     }
   }
-  const metadata = object(object(body?.error)?.metadata);
+  const normalized = responseDiagnostics(body, response, kind);
   return statusError(
     response.status,
-    retryAfter(response.headers.get("retry-after")),
-    {
-      provider: diagnostic(metadata?.provider_name),
-      providerCode: diagnostic(String(metadata?.provider_code ?? "")),
-      limitSource: diagnostic(metadata?.limit_source ?? metadata?.error_type),
-      requestId: diagnostic(response.headers.get("x-request-id")),
-      rateLimit: diagnostic(response.headers.get("x-ratelimit-limit")),
-      rateRemaining: diagnostic(response.headers.get("x-ratelimit-remaining")),
-      rateReset: diagnostic(response.headers.get("x-ratelimit-reset")),
-    },
+    normalized.retryAfterMs,
+    normalized.diagnostics,
   );
 }
 export type EmbeddingBatchResult = {
@@ -109,6 +156,17 @@ export type EmbeddingBatchOptions = {
     estimatedCostUsd: number;
   }) => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
+  // Metadata only. Observer failures must never retry or change paid execution.
+  onAttempt?: (summary: {
+    attempt: number;
+    items: number;
+    inputTokens: number;
+    elapsedMs: number;
+    outcome: "success" | "error";
+    status: number | null;
+    code?: string;
+    diagnostics: EmbeddingErrorDiagnostics;
+  }) => void;
 };
 function retryAfter(value: string | null): number {
   if (!value) return 0;
@@ -151,6 +209,7 @@ function decodeResponse(
   generation: EmbeddingGeneration,
   count: number,
   retryAfterMs = 0,
+  diagnostics: EmbeddingErrorDiagnostics = {},
 ): Omit<EmbeddingBatchResult, "attempts"> {
   const body = object(value);
   const bodyError = object(body?.error);
@@ -162,7 +221,7 @@ function decodeResponse(
       code >= 400 &&
       code <= 599
     )
-      throw statusError(code, retryAfterMs);
+      throw statusError(code, retryAfterMs, diagnostics);
     malformed();
   }
   // Equal dimensions do not imply equal vector spaces. An omitted model is
@@ -239,11 +298,36 @@ export async function fetchEmbeddingBatch(
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 4)
     throw new Error("Embedding retries must be between one and four attempts");
   const estimatedCostUsd = estimateEmbeddingCostUsd(texts, generation);
+  const inputTokens = texts.reduce(
+    (n, text) => n + countEmbeddingTokens(text, generation),
+    0,
+  );
   for (let attempt = 1; attempt <= attempts; attempt++) {
     // Budget/lease errors must escape immediately, not become provider retries.
     await options.beforeAttempt?.({ attempt, estimatedCostUsd });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+    const startedAt = Date.now();
+    let responseInfo: EmbeddingErrorDiagnostics = {};
+    const observe = (
+      outcome: "success" | "error",
+      attemptError?: EmbeddingProviderError,
+    ) => {
+      try {
+        options.onAttempt?.({
+          attempt,
+          items: texts.length,
+          inputTokens,
+          elapsedMs: Date.now() - startedAt,
+          outcome,
+          status: attemptError?.status ?? responseInfo.transportStatus ?? null,
+          code: attemptError?.code,
+          diagnostics: { ...responseInfo, ...attemptError?.diagnostics },
+        });
+      } catch {
+        /* Telemetry is never an execution or accounting dependency. */
+      }
+    };
     let error: EmbeddingProviderError;
     try {
       const response = await (options.fetch ?? fetch)(
@@ -268,15 +352,25 @@ export async function fetchEmbeddingBatch(
           }),
         },
       );
+      responseInfo = responseDiagnostics(
+        null,
+        response,
+        "unreadable",
+      ).diagnostics;
       if (!response.ok) {
         throw await responseError(response);
       }
+      const body: unknown = await response.json();
+      const normalized = responseDiagnostics(object(body), response, "json");
+      responseInfo = normalized.diagnostics;
       const decoded = decodeResponse(
-        await response.json(),
+        body,
         generation,
         texts.length,
-        retryAfter(response.headers.get("retry-after")),
+        normalized.retryAfterMs,
+        normalized.diagnostics,
       );
+      observe("success");
       return { ...decoded, attempts: attempt };
     } catch (caught) {
       error =
@@ -295,6 +389,7 @@ export async function fetchEmbeddingBatch(
     } finally {
       clearTimeout(timeout);
     }
+    observe("error", error);
     if (
       !error.retryable ||
       error.status === 429 ||
