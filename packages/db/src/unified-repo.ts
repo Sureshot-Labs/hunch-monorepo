@@ -207,6 +207,7 @@ export async function flushUnifiedBookTopLatestTouches(
           mid numeric,
           spread numeric
         )
+        order by token_id collate "C"
         on conflict (token_id) do update
           set venue = excluded.venue,
               ts = excluded.ts,
@@ -2368,6 +2369,7 @@ export async function writeResolvedTerminalTokenTops(
           venue text,
           price numeric
         )
+        order by token_id collate "C"
         on conflict (token_id) do update
           set venue = excluded.venue,
               ts = excluded.ts,
@@ -2390,6 +2392,7 @@ export async function writeResolvedTerminalTokenTops(
         set last_price = $2,
             updated_at_db = now()
         where id = $1
+          and last_price is distinct from $2::numeric
       `,
       [marketId, prices.yes],
     );
@@ -2519,6 +2522,7 @@ export async function writeUnifiedBookTops(
         mid numeric,
         spread numeric
       )
+      order by token_id collate "C"
       on conflict (token_id) do update
         set venue = excluded.venue,
             ts = excluded.ts,

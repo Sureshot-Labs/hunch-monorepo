@@ -5,6 +5,8 @@ import { parseAdminEmbeddingStatus } from "./admin-embeddings-status.js";
 test("scoped costs and separate live/reconciliation status survive the API parser", () => {
   const payload = {
     state: "active",
+    servingAvailable: true,
+    deferred: 4,
     reconciliation: {
       state: "paused",
       reason: "memory",

@@ -80,6 +80,9 @@ const emptyCoverage = () => ({
 const stateKey = (g: EmbeddingGeneration) => `${CONTROL}state:${g.id}`;
 const generationKey = (g: EmbeddingGeneration) =>
   `${CONTROL}generation:${g.id}`;
+const RETRIES = `${CONTROL}retry-due`;
+const retryMember = (g: EmbeddingGeneration, kind: EmbeddingKind, id: string) =>
+  JSON.stringify([g.id, kind, id]);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export type EngineOptions = {
   store: EmbeddingStore;
@@ -125,9 +128,13 @@ export class EmbeddingEngine {
   private policyAt = 0;
   private policyError: string | null = null;
   private retries = 0;
+  private probing = false;
+  private servingChecked = false;
+  private cooldownErrors = new WeakSet<EmbeddingProviderError>();
   private claimCursor = "0-0";
   private lastMaintenance = 0;
   private lastReport = 0;
+  private lastReportKey = "";
   private memoryPauses = new Map<string, MemoryAdmission>();
   private memorySamples = new Map<string, { at: number; bytes: number }>();
   private backgroundFailures = new Map<
@@ -428,6 +435,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
         await this.store.fenced("return redis.call('UNLINK',KEYS[2])", [
           `${CONTROL}failure:${generation.id}:${kind}:${source.id}`,
         ]);
+        await this.clearRetry(generation, kind, source.id);
         continue;
       }
       if (!cleanEmbeddingText(source.title)) {
@@ -455,6 +463,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
           (generation.legacy && version?.startsWith("intfloat/e5-large-v2@")))
       ) {
         await this.store.commit(generation, source, hash);
+        await this.clearRetry(generation, kind, source.id);
         verified++;
         verifiedId ??= source.id;
         continue;
@@ -485,14 +494,15 @@ redis.call('SET',KEYS[3],'1'); return 1`,
     )
       throw new Error("embedding_provider_cost_drift");
     const payable = missing.filter((item) => item.retryAt <= Date.now());
+    const concurrency = this.probing ? 1 : policy.concurrency;
     for (
       let offset = 0;
       offset < payable.length;
-      offset += policy.batchSize * policy.concurrency
+      offset += policy.batchSize * concurrency
     ) {
       const wave = payable.slice(
         offset,
-        offset + policy.batchSize * policy.concurrency,
+        offset + policy.batchSize * concurrency,
       );
       // Existing cache hits/TTL refreshes above never need new vector capacity.
       // Admission applies to live ingestion too, not only the background pass.
@@ -504,11 +514,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       const slices = [];
       for (
         let j = offset;
-        j <
-        Math.min(
-          payable.length,
-          offset + policy.batchSize * policy.concurrency,
-        );
+        j < Math.min(payable.length, offset + policy.batchSize * concurrency);
         j += policy.batchSize
       )
         slices.push(payable.slice(j, j + policy.batchSize));
@@ -524,6 +530,17 @@ redis.call('SET',KEYS[3],'1'); return 1`,
               apiKey: this.options.apiKey,
               timeoutMs: policy.requestTimeoutMs,
               beforeAttempt: async ({ attempt, estimatedCostUsd }) => {
+                const circuit = await this.store.get<number>(
+                  `${CONTROL}circuit`,
+                );
+                if (circuit && circuit > Date.now())
+                  throw new EmbeddingProviderError(
+                    "provider_circuit_open",
+                    null,
+                    true,
+                    false,
+                    circuit - Date.now(),
+                  );
                 if (attempt > 1) this.retries++;
                 if (reservation) {
                   await this.store.costs.settle(generation, reservation, null);
@@ -547,6 +564,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
             if (reservation)
               await this.store.costs.settle(generation, reservation, null);
             if (error instanceof EmbeddingProviderError && !error.breaker) {
+              if (error.retryable) await this.cooldown(error);
               // Record once per content revision, not on every stream delivery/restart.
               for (const item of batch) {
                 await this.recordFailure(
@@ -557,6 +575,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
                   error.code,
                   error.retryable ? 4 : 1,
                   error.retryAfterMs,
+                  error,
                 );
               }
             }
@@ -569,6 +588,16 @@ redis.call('SET',KEYS[3],'1'); return 1`,
             completed,
             response.usage.costUsd,
           );
+          if (
+            this.probing &&
+            !(
+              ((await this.store.get<number>(`${CONTROL}circuit`)) ?? 0) >
+              Date.now()
+            )
+          ) {
+            await this.store.put(`${CONTROL}provider-failures`, 0);
+            this.probing = false;
+          }
           const reserved = completed.amount;
           if (
             response.usage.costUsd != null &&
@@ -623,13 +652,41 @@ redis.call('SET',KEYS[3],'1'); return 1`,
             await this.store.fenced("return redis.call('UNLINK',KEYS[2])", [
               `${CONTROL}failure:${generation.id}:${kind}:${source.id}`,
             ]);
+            await this.clearRetry(generation, kind, source.id);
           }
         }),
       );
-      const failed = results.find(
+      const failedResults = results.filter(
         (r): r is PromiseRejectedResult => r.status === "rejected",
       );
-      if (failed) throw failed.reason;
+      const fatal = failedResults.find(
+        (r) =>
+          !(r.reason instanceof EmbeddingProviderError) || !r.reason.retryable,
+      );
+      if (fatal) throw fatal.reason;
+      const failed = failedResults[0];
+      if (failed) {
+        const error: unknown = failed.reason;
+        if (!(error instanceof EmbeddingProviderError) || !error.retryable)
+          throw error;
+        // The current wave was durably deferred above. Record untouched later
+        // waves too, before allowing their source messages to be acknowledged.
+        for (const item of payable.slice(
+          offset + policy.batchSize * concurrency,
+        )) {
+          await this.recordFailure(
+            generation,
+            kind,
+            item.source.id,
+            item.hash,
+            "provider_circuit_open",
+            0,
+            error.retryAfterMs,
+            error,
+          );
+        }
+        break;
+      }
     }
     return {
       eligible: sources.filter((s) => s.eligible).length,
@@ -646,20 +703,197 @@ redis.call('SET',KEYS[3],'1'); return 1`,
     code: string,
     attempts: number,
     retryAfterMs = 0,
+    error?: EmbeddingProviderError,
   ) {
     const key = `${CONTROL}failure:${generation.id}:${kind}:${id}`;
     const previous = await this.store.get<{ hash: string }>(key);
-    if (previous?.hash !== hash)
+    if (previous?.hash !== hash && !error?.retryable)
       await this.store.dead(kind, id, generation.id, code, attempts);
-    await this.store.put(key, {
+    const retryAt = error?.retryable
+      ? Math.max(
+          Date.now() + 1000,
+          (await this.store.get<number>(`${CONTROL}circuit`)) ?? 0,
+        )
+      : Date.now() + Math.max(6 * 3600000, retryAfterMs);
+    const value = {
       hash,
       code,
       at: Date.now(),
-      retryAt: Date.now() + Math.max(6 * 3600000, retryAfterMs),
+      retryAt,
+      version: 2,
+      retryable: error?.retryable ?? false,
+      status: error?.status ?? null,
+      diagnostics: error?.diagnostics,
+    };
+    // Recording the retry and its due index is atomic and lease-fenced. Stream
+    // acknowledgement cannot turn a Redis failure into silently lost work.
+    await this.store.fenced(
+      `redis.call('SET',KEYS[2],ARGV[2],'EX',604800)
+if ARGV[5]=='1' then redis.call('ZADD',KEYS[3],ARGV[3],ARGV[4])
+else redis.call('ZREM',KEYS[3],ARGV[4]) end
+return 1`,
+      [key, RETRIES],
+      [
+        JSON.stringify(value),
+        String(retryAt),
+        retryMember(generation, kind, id),
+        error?.retryable ? "1" : "0",
+      ],
+    );
+  }
+  private async clearRetry(
+    g: EmbeddingGeneration,
+    kind: EmbeddingKind,
+    id: string,
+  ) {
+    await this.store.fenced(
+      "redis.call('UNLINK',KEYS[2]); return redis.call('ZREM',KEYS[3],ARGV[2])",
+      [`${CONTROL}failure:${g.id}:${kind}:${id}`, RETRIES],
+      [retryMember(g, kind, id)],
+    );
+  }
+  private async cooldown(error: EmbeddingProviderError) {
+    if (this.cooldownErrors.has(error)) return;
+    this.cooldownErrors.add(error);
+    if (error.code === "provider_circuit_open") return;
+    const failures = Number(
+      await this.store.fenced("return redis.call('INCR',KEYS[2])", [
+        `${CONTROL}provider-failures`,
+      ]),
+    );
+    const delay = error.breaker
+      ? 300000
+      : Math.min(300000, 5000 * 2 ** Math.min(6, failures - 1)) *
+        (0.75 + Math.random() * 0.5);
+    const until = Date.now() + Math.max(delay, error.retryAfterMs);
+    await this.store.fenced(
+      `local current=tonumber(redis.call('GET',KEYS[2]) or '0')
+if tonumber(ARGV[2])>current then redis.call('SET',KEYS[2],ARGV[2]) end
+return 1`,
+      [`${CONTROL}circuit`],
+      [String(until)],
+    );
+    console.warn("[ai-worker] provider deferred", {
+      code: error.code,
+      status: error.status,
+      retryAfterMs: error.retryAfterMs,
+      ...error.diagnostics,
     });
-    await this.store.fenced("return redis.call('EXPIRE',KEYS[2],604800)", [
-      key,
-    ]);
+  }
+  private async retryDue(
+    active: EmbeddingGeneration,
+    desired: EmbeddingGeneration,
+    canBuild: boolean,
+  ) {
+    const due = (await this.store.redis.sendCommand([
+      "ZRANGEBYSCORE",
+      RETRIES,
+      "-inf",
+      String(Date.now()),
+      "LIMIT",
+      "0",
+      "32",
+    ])) as string[];
+    const batches = new Map<
+      string,
+      { generation: EmbeddingGeneration; kind: EmbeddingKind; ids: string[] }
+    >();
+    for (const member of due) {
+      const [generationId, kind, id] = JSON.parse(member) as [
+        string,
+        EmbeddingKind,
+        string,
+      ];
+      const generation = [active, desired].find((g) => g.id === generationId);
+      if (generation && (generation.id === active.id || canBuild)) {
+        const key = `${generationId}:${kind}`;
+        const batch = batches.get(key) ?? { generation, kind, ids: [] };
+        batch.ids.push(id);
+        batches.set(key, batch);
+      } else if (generation) {
+        // Admission of a third/retiring generation is a real compatibility guard.
+        // Keep its durable work, without starving serving-generation retries.
+        await this.store.fenced(
+          "return redis.call('ZADD',KEYS[2],ARGV[2],ARGV[3])",
+          [RETRIES],
+          [String(Date.now() + 1000), member],
+        );
+      }
+    }
+    for (const batch of batches.values())
+      await this.process(
+        batch.generation,
+        batch.kind,
+        batch.ids,
+        batch.generation.id !== active.id,
+      );
+    for (const member of due) {
+      const [generationId, kind, id] = JSON.parse(member) as [
+        string,
+        EmbeddingKind,
+        string,
+      ];
+      const generation = [active, desired].find((g) => g.id === generationId);
+      const failure = await this.store.get<{
+        retryable?: boolean;
+        retryAt?: number;
+      }>(`${CONTROL}failure:${generationId}:${kind}:${id}`);
+      if (!generation || !failure?.retryable)
+        await this.store.fenced(
+          "return redis.call('ZREM',KEYS[2],ARGV[2])",
+          [RETRIES],
+          [member],
+        );
+    }
+  }
+  private async adoptLegacyRetries(generation: EmbeddingGeneration) {
+    const cursorKey = `${CONTROL}retry-adoption:${generation.id}`;
+    const progress = (await this.store.get<{
+      cursor: string;
+      pending: string[];
+      done?: boolean;
+    }>(cursorKey)) ?? { cursor: "0", pending: [] };
+    if (progress.done) return;
+    const [cursor, keys] = progress.pending.length
+      ? [progress.cursor, progress.pending]
+      : ((await this.store.redis.sendCommand([
+          "SCAN",
+          progress.cursor,
+          "MATCH",
+          `${CONTROL}failure:${generation.id}:*`,
+          "COUNT",
+          "50",
+        ])) as [string, string[]]);
+    for (const key of keys.slice(0, 50)) {
+      const failure = await this.store.get<{
+        hash: string;
+        code: string;
+        version?: number;
+      }>(key);
+      if (!failure || failure.version || failure.code !== "http_error")
+        continue;
+      const suffix = key.slice(`${CONTROL}failure:${generation.id}:`.length);
+      const at = suffix.indexOf(":");
+      const kind = suffix.slice(0, at) as EmbeddingKind;
+      const id = suffix.slice(at + 1);
+      if ((kind !== "event" && kind !== "market") || !id) continue;
+      await this.recordFailure(
+        generation,
+        kind,
+        id,
+        failure.hash,
+        "legacy_http_error",
+        0,
+        0,
+        new EmbeddingProviderError("legacy_http_error", null, true, false),
+      );
+    }
+    // SCAN COUNT is a hint, so do not advance past an unprocessed returned tail.
+    await this.store.put(cursorKey, {
+      cursor,
+      pending: keys.slice(50),
+      done: cursor === "0" && keys.length <= 50,
+    });
   }
   private async processMessages(
     active: EmbeddingGeneration,
@@ -968,8 +1202,25 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
     reason: string | null,
     liveCompleted = false,
   ) {
-    if (Date.now() - this.lastReport < 10000) return;
+    const circuit = await this.store.get<number>(`${CONTROL}circuit`);
+    if (circuit && circuit > Date.now()) {
+      state = "paused";
+      reason = "provider_circuit_open";
+    }
+    const reportKey = JSON.stringify([
+      active.id,
+      desired?.id,
+      state,
+      reason,
+      liveCompleted,
+    ]);
+    if (
+      Date.now() - this.lastReport < 10000 &&
+      reportKey === this.lastReportKey
+    )
+      return;
     this.lastReport = Date.now();
+    this.lastReportKey = reportKey;
     const pass = desired ? await this.store.get<Pass>(stateKey(desired)) : null;
     const census =
       pass && !pass.countsReady
@@ -980,7 +1231,6 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
       STREAM,
       GROUP,
     ])) as unknown[];
-    const circuit = await this.store.get<number>(`${CONTROL}circuit`);
     const costs = desired
       ? await this.store.costs.read(desired, active.id === desired.id)
       : null;
@@ -1003,11 +1253,20 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
     const persistenceInfo = String(
       await this.store.redis.sendCommand(["INFO", "persistence"]),
     );
+    if (circuit && circuit > Date.now()) {
+      state = "paused";
+      reason = "provider_circuit_open";
+    }
     await this.store.put(`${CONTROL}status`, {
       updatedAt: new Date().toISOString(),
       activeGeneration: active.id,
       desiredGeneration: desired?.id ?? null,
-      state: active.id === desired?.id && liveCompleted ? "active" : state,
+      state:
+        active.id === desired?.id && liveCompleted && !reason
+          ? "active"
+          : state,
+      servingAvailable: this.servingChecked ? true : null,
+      deferred: Number(await this.store.redis.sendCommand(["ZCARD", RETRIES])),
       reconciliation: {
         state,
         reason,
@@ -1253,6 +1512,7 @@ return 0`,
     );
   }
   async tick() {
+    this.servingChecked = false;
     await this.store.renew();
     await this.refreshPolicy();
     const active = await readActiveGeneration(this.store.redis);
@@ -1284,6 +1544,7 @@ return 0`,
       // Maintain the serving generation even when admission of its replacement is paused.
       for (const kind of ["event", "market"] as const)
         await this.store.ensureIndex(active, kind);
+      this.servingChecked = true;
       // Retirement is local Redis housekeeping, not provider work: a credit or
       // network outage must not indefinitely retain an unused old generation.
       const canBuild = await this.generations(active, desired);
@@ -1295,12 +1556,30 @@ return 0`,
       }
       let hadMessages = false;
       try {
+        this.probing =
+          ((await this.store.get<number>(`${CONTROL}provider-failures`)) ?? 0) >
+          0;
+        await this.adoptLegacyRetries(active);
+        if (desired.id !== active.id) await this.adoptLegacyRetries(desired);
+        await this.retryDue(active, desired, canBuild);
         hadMessages = await this.processMessages(active, desired, canBuild);
         liveCompleted = true;
       } finally {
         // Live work gets the first DB slot; housekeeping still runs on provider
         // failure, without turning one timeout into a tight retry loop.
         await this.maintain(active);
+      }
+      if (
+        ((await this.store.get<number>(`${CONTROL}circuit`)) ?? 0) > Date.now()
+      ) {
+        await this.report(
+          active,
+          desired,
+          "paused",
+          "provider_circuit_open",
+          liveCompleted,
+        );
+        return;
       }
       if (active.id !== desired.id) {
         try {
@@ -1342,10 +1621,7 @@ return 0`,
         reason = `${reason}:${error.admission.generation}:${error.admission.blockedBy}`;
       if (error instanceof EmbeddingProviderError) {
         reason = `${error.code}${error.status ? `_${error.status}` : ""}`;
-        await this.store.put(
-          `${CONTROL}circuit`,
-          Date.now() + Math.max(300000, error.retryAfterMs),
-        );
+        await this.cooldown(error);
       }
       if (/lease_lost/.test(reason)) throw error;
       await this.report(

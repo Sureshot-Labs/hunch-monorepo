@@ -795,6 +795,18 @@ export async function queryBatchSummary(
         from unified_market_change_24h x
         join candidate_pool c on c.market_id = x.market_id
         union all
+        select 'unified_change24_market_journal' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
+        from unified_change24_market_journal x
+        join candidate_pool c on c.market_id = x.market_id
+        union all
+        select 'limitless_resolution_publications' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
+        from limitless_resolution_publications x
+        join candidate_pool c on c.market_id = x.market_id
+        union all
+        select 'unified_change24_event_journal' as label, count(distinct c.event_id)::text as markets, count(*)::text as rows
+        from unified_change24_event_journal x
+        join candidate_events c on c.event_id = x.event_id
+        union all
         select 'unified_market_trade_24h' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
         from unified_market_trade_24h x
         join candidate_pool c on c.market_id = x.market_id
@@ -1532,6 +1544,33 @@ async function executeDeletion(args: Args) {
     const marketDeleteCounts = await runMarketDeletes(client);
     const orphanEventCount = await materializeOrphanEvents(client);
     const eventDeleteCounts = await runEventDeletes(client);
+    // Deletion triggers can enqueue new wake-ups. Sweep only after those writes,
+    // and only for removed markets / truly orphaned events (not sibling events).
+    for (const [tableName, key, targetTable] of [
+      [
+        "unified_change24_market_journal",
+        "market_id",
+        "tmp_market_retention_removable_markets",
+      ],
+      [
+        "limitless_resolution_publications",
+        "market_id",
+        "tmp_market_retention_removable_markets",
+      ],
+      [
+        "unified_change24_event_journal",
+        "event_id",
+        "tmp_market_retention_orphan_events",
+      ],
+    ] as const) {
+      marketDeleteCounts.push(
+        await deleteAndCount(
+          client,
+          tableName,
+          `delete from ${tableName} queue_row using ${targetTable} removable_row where queue_row.${key} = removable_row.${key}`,
+        ),
+      );
+    }
     const postDeleteValidation = await queryPostDeleteValidation(client);
 
     await client.query("commit");
