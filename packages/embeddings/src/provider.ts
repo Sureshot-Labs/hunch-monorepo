@@ -31,10 +31,66 @@ export class EmbeddingProviderError extends Error {
     public readonly retryable: boolean,
     public readonly breaker: boolean,
     public readonly retryAfterMs = 0,
+    public readonly diagnostics: EmbeddingErrorDiagnostics = {},
   ) {
     super(`Embedding provider ${code}${status == null ? "" : ` (${status})`}`);
     this.name = "EmbeddingProviderError";
   }
+}
+export type EmbeddingErrorDiagnostics = {
+  provider?: string;
+  providerCode?: string;
+  limitSource?: string;
+  requestId?: string;
+  rateLimit?: string;
+  rateRemaining?: string;
+  rateReset?: string;
+};
+function diagnostic(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    /^[a-zA-Z0-9_. /:-]{1,100}$/.test(value) &&
+    !value.includes("://")
+    ? value
+    : undefined;
+}
+async function responseError(
+  response: Response,
+): Promise<EmbeddingProviderError> {
+  let body: Record<string, unknown> | null = null;
+  const reader = response.body?.getReader();
+  if (reader) {
+    try {
+      let text = "";
+      let bytes = 0;
+      const decoder = new TextDecoder();
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        bytes += next.value.byteLength;
+        if (bytes > 16384) break;
+        text += decoder.decode(next.value, { stream: true });
+      }
+      if (bytes <= 16384) body = object(JSON.parse(text + decoder.decode()));
+    } catch {
+      /* Unreadable metadata must never hide the real HTTP status. */
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+  }
+  const metadata = object(object(body?.error)?.metadata);
+  return statusError(
+    response.status,
+    retryAfter(response.headers.get("retry-after")),
+    {
+      provider: diagnostic(metadata?.provider_name),
+      providerCode: diagnostic(String(metadata?.provider_code ?? "")),
+      limitSource: diagnostic(metadata?.limit_source ?? metadata?.error_type),
+      requestId: diagnostic(response.headers.get("x-request-id")),
+      rateLimit: diagnostic(response.headers.get("x-ratelimit-limit")),
+      rateRemaining: diagnostic(response.headers.get("x-ratelimit-remaining")),
+      rateReset: diagnostic(response.headers.get("x-ratelimit-reset")),
+    },
+  );
 }
 export type EmbeddingBatchResult = {
   embeddings: number[][];
@@ -63,13 +119,18 @@ function retryAfter(value: string | null): number {
   // Long Retry-After suspends the attempt rather than sleeping unboundedly.
   return Number.isFinite(duration) ? Math.max(0, duration) : 0;
 }
-function statusError(status: number, retryAfterMs = 0): EmbeddingProviderError {
+function statusError(
+  status: number,
+  retryAfterMs = 0,
+  diagnostics: EmbeddingErrorDiagnostics = {},
+): EmbeddingProviderError {
   return new EmbeddingProviderError(
     "http_error",
     status,
     status === 408 || status === 429 || status >= 500,
     [401, 402, 403].includes(status),
     retryAfterMs,
+    diagnostics,
   );
 }
 function malformed(): never {
@@ -208,12 +269,7 @@ export async function fetchEmbeddingBatch(
         },
       );
       if (!response.ok) {
-        // Discard failures must not hide a 402/403 as a retryable network error.
-        await response.body?.cancel().catch(() => {});
-        throw statusError(
-          response.status,
-          retryAfter(response.headers.get("retry-after")),
-        );
+        throw await responseError(response);
       }
       const decoded = decodeResponse(
         await response.json(),
@@ -239,7 +295,12 @@ export async function fetchEmbeddingBatch(
     } finally {
       clearTimeout(timeout);
     }
-    if (!error.retryable || attempt === attempts || error.retryAfterMs > 30000)
+    if (
+      !error.retryable ||
+      error.status === 429 ||
+      attempt === attempts ||
+      error.retryAfterMs > 30000
+    )
       throw error;
     const sleepMs = Math.max(
       error.retryAfterMs,

@@ -1,4 +1,5 @@
 import PQueue from "p-queue";
+import type { PoolClient } from "pg";
 import { io, type Socket } from "socket.io-client";
 import { writeResolvedTerminalTokenTops, writeUnifiedBookTop } from "@hunch/db";
 import { createTopTickGate, publishMarketState } from "@hunch/infra";
@@ -400,18 +401,17 @@ async function publishResolvedTerminalTopTicks(input: {
   resolvedOutcome: LimitlessResolvedOutcome;
   yesTokenId: string | null;
 }): Promise<void> {
-  const result = await writeResolvedTerminalTokenTops(pool, {
-    marketId: input.marketId,
-    noTokenId: input.noTokenId,
-    observedAt: input.observedAt,
-    resolvedOutcome: input.resolvedOutcome,
-    yesTokenId: input.yesTokenId,
-  });
-  if (result.tokenPrices.length === 0) return;
+  // Persistence is committed before publishing. Repeated events still refresh
+  // Redis after an earlier publish failure, even if DB values already match.
+  const price = input.resolvedOutcome === "YES" ? 1 : 0;
+  const tokenPrices = [
+    { tokenId: input.yesTokenId, price },
+    { tokenId: input.noTokenId, price: 1 - price },
+  ].filter((row): row is { tokenId: string; price: number } => !!row.tokenId);
 
   const tsMs = input.observedAt.getTime();
   const multi = redis.multi();
-  for (const row of result.tokenPrices) {
+  for (const row of tokenPrices) {
     const tick = {
       token_id: row.tokenId,
       best_bid: row.price,
@@ -750,6 +750,7 @@ async function resolveMarketForResolution(
 }
 
 async function updateResolvedMarketRows(
+  db: Pick<PoolClient, "query">,
   ref: ResolvedMarketRef,
   resolvedOutcome: LimitlessResolvedOutcome,
   ts: Date,
@@ -759,7 +760,7 @@ async function updateResolvedMarketRows(
   const yesPrice = resolvedOutcome === "YES" ? 1 : 0;
   const noPrice = resolvedOutcome === "NO" ? 1 : 0;
 
-  await pool.query(
+  await db.query(
     `
       update unified_markets
       set status = 'SETTLED',
@@ -784,7 +785,7 @@ async function updateResolvedMarketRows(
     [ref.marketId, resolvedOutcome, yesPrice, ts, source],
   );
 
-  await pool.query(
+  await db.query(
     `
       update limitless_markets
       set status = 'RESOLVED',
@@ -842,37 +843,37 @@ export async function applyLimitlessResolvedMarketTop(
   }
 
   const ts = inputs.ts ?? new Date();
-  await publishResolvedTerminalTopTicks({
+  const publication = {
     marketId: ref.marketId,
+    venueMarketId: ref.venueMarketId,
     noTokenId: ref.tokenNo,
-    observedAt: ts,
-    resolvedOutcome,
     yesTokenId: ref.tokenYes,
-  });
-  await updateResolvedMarketRows(ref, resolvedOutcome, ts, inputs.source);
-
-  await publishMarketState({
-    redis,
-    venue: "limitless",
-    tokenId: ref.tokenYes,
-    market: ref.venueMarketId,
-    conditionId: null,
-    status: "SETTLED",
-    acceptingOrders: false,
+    observedAt: ts.toISOString(),
     resolvedOutcome,
-    tsMs: ts.getTime(),
-  });
-  await publishMarketState({
-    redis,
-    venue: "limitless",
-    tokenId: ref.tokenNo,
-    market: ref.venueMarketId,
-    conditionId: null,
-    status: "SETTLED",
-    acceptingOrders: false,
-    resolvedOutcome,
-    tsMs: ts.getTime(),
-  });
+  };
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    await writeResolvedTerminalTokenTops(db, {
+      marketId: ref.marketId,
+      noTokenId: ref.tokenNo,
+      yesTokenId: ref.tokenYes,
+      observedAt: ts,
+      resolvedOutcome,
+    });
+    await updateResolvedMarketRows(db, ref, resolvedOutcome, ts, inputs.source);
+    await db.query(
+      "insert into limitless_resolution_publications(market_id,payload) values($1,$2::jsonb)",
+      [ref.marketId, JSON.stringify(publication)],
+    );
+    await db.query("COMMIT");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
+  await flushLimitlessResolutionPublications();
 
   return {
     updated: true,
@@ -880,6 +881,62 @@ export async function applyLimitlessResolvedMarketTop(
     resolvedOutcome,
     tokensUpdated: 2,
   };
+}
+
+let resolutionPublicationRunning = false;
+export async function flushLimitlessResolutionPublications(): Promise<number> {
+  if (resolutionPublicationRunning) return 0;
+  resolutionPublicationRunning = true;
+  let published = 0;
+  try {
+    const { rows } = await pool.query<{
+      id: string;
+      status: string | null;
+      resolved_outcome: string | null;
+      payload: {
+        marketId: string;
+        venueMarketId: string;
+        noTokenId: string;
+        yesTokenId: string;
+        observedAt: string;
+        resolvedOutcome: LimitlessResolvedOutcome;
+      };
+    }>(`
+      select publication_row.id,publication_row.payload,market_row.status,market_row.resolved_outcome
+      from (select * from limitless_resolution_publications order by id limit 50) publication_row
+      left join unified_markets market_row on market_row.id=publication_row.market_id
+      order by publication_row.id`);
+    for (const row of rows) {
+      const p = row.payload;
+      // A removed market or superseded resolution must not resurrect old state.
+      if (
+        row.status === "SETTLED" &&
+        row.resolved_outcome === p.resolvedOutcome
+      ) {
+        const observedAt = new Date(p.observedAt);
+        await publishResolvedTerminalTopTicks({ ...p, observedAt });
+        for (const tokenId of [p.yesTokenId, p.noTokenId])
+          await publishMarketState({
+            redis,
+            venue: "limitless",
+            tokenId,
+            market: p.venueMarketId,
+            status: "SETTLED",
+            acceptingOrders: false,
+            resolvedOutcome: p.resolvedOutcome,
+            tsMs: observedAt.getTime(),
+          });
+        published++;
+      }
+      await pool.query(
+        "delete from limitless_resolution_publications where id=$1",
+        [row.id],
+      );
+    }
+    return published;
+  } finally {
+    resolutionPublicationRunning = false;
+  }
 }
 
 async function handleMarketResolved(

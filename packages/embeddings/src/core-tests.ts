@@ -789,21 +789,26 @@ test("malformed response has no partial publication and no silent provider retry
 test("429 respects Retry-After; long cooldown returns immediately to worker scheduler", async () => {
   let calls = 0;
   const waits: number[] = [];
-  await fetchEmbeddingBatch({
-    generation: e5,
-    texts: ["one"],
-    apiKey: "fixture",
-    timeoutMs: 1000,
-    fetch: mockFetch(() =>
-      ++calls === 1
-        ? response({}, 429, { "Retry-After": "2" })
-        : response({ data: [{ index: 0, embedding: vector }] }),
-    ),
-    sleep: async (milliseconds) => {
-      waits.push(milliseconds);
-    },
-  });
-  assert.deepEqual(waits, [2000]);
+  await assert.rejects(
+    fetchEmbeddingBatch({
+      generation: e5,
+      texts: ["one"],
+      apiKey: "fixture",
+      timeoutMs: 1000,
+      fetch: mockFetch(() =>
+        ++calls === 1
+          ? response({}, 429, { "Retry-After": "2" })
+          : response({ data: [{ index: 0, embedding: vector }] }),
+      ),
+      sleep: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+    }),
+    (error: unknown) =>
+      error instanceof EmbeddingProviderError && error.retryAfterMs === 2000,
+  );
+  assert.deepEqual(waits, []);
+  assert.equal(calls, 1);
   await assert.rejects(
     fetchEmbeddingBatch({
       generation: e5,
@@ -858,22 +863,28 @@ test("request timeout aborts and remains retryable; no HTTP for over-limit input
 test("HTTP 200 embedded provider errors retain Retry-After and access classification", async () => {
   let attempts = 0;
   const waits: number[] = [];
-  const success = await fetchEmbeddingBatch({
-    generation: e5,
-    texts: ["one"],
-    apiKey: "fixture",
-    timeoutMs: 1000,
-    fetch: mockFetch(() =>
-      ++attempts === 1
-        ? response({ error: { code: 429 } }, 200, { "Retry-After": "2" })
-        : response({ data: [{ index: 0, embedding: vector }] }),
-    ),
-    sleep: async (ms) => {
-      waits.push(ms);
-    },
-  });
-  assert.equal(success.attempts, 2);
-  assert.deepEqual(waits, [2000]);
+  await assert.rejects(
+    fetchEmbeddingBatch({
+      generation: e5,
+      texts: ["one"],
+      apiKey: "fixture",
+      timeoutMs: 1000,
+      fetch: mockFetch(() =>
+        ++attempts === 1
+          ? response({ error: { code: 429 } }, 200, { "Retry-After": "2" })
+          : response({ data: [{ index: 0, embedding: vector }] }),
+      ),
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    }),
+    (error: unknown) =>
+      error instanceof EmbeddingProviderError &&
+      error.status === 429 &&
+      error.retryAfterMs === 2000,
+  );
+  assert.equal(attempts, 1);
+  assert.deepEqual(waits, []);
   for (const status of [402, 429, 503]) {
     let calls = 0;
     await assert.rejects(
@@ -897,4 +908,66 @@ test("HTTP 200 embedded provider errors retain Retry-After and access classifica
     );
     assert.equal(calls, 1);
   }
+});
+
+test("provider errors retain only bounded safe metadata, never raw prompts or messages", async () => {
+  await assert.rejects(
+    fetchEmbeddingBatch({
+      generation: e5,
+      texts: ["private prompt"],
+      apiKey: "fixture",
+      timeoutMs: 1000,
+      fetch: mockFetch(() =>
+        response(
+          {
+            error: {
+              message: "secret message",
+              metadata: {
+                provider_name: "DeepInfra",
+                provider_code: "rate_limit",
+                limit_source: "upstream_provider",
+                raw: "private raw",
+                prompt: "private prompt",
+              },
+            },
+          },
+          429,
+          {
+            "x-request-id": "req-123",
+            "x-ratelimit-remaining": "0",
+            "Retry-After": "3",
+          },
+        ),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof EmbeddingProviderError);
+      assert.equal(error.status, 429);
+      assert.equal(error.retryAfterMs, 3000);
+      assert.deepEqual(error.diagnostics, {
+        provider: "DeepInfra",
+        providerCode: "rate_limit",
+        limitSource: "upstream_provider",
+        requestId: "req-123",
+        rateLimit: undefined,
+        rateRemaining: "0",
+        rateReset: undefined,
+      });
+      assert.doesNotMatch(JSON.stringify(error), /private|secret/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    fetchEmbeddingBatch({
+      generation: e5,
+      texts: ["one"],
+      apiKey: "fixture",
+      timeoutMs: 1000,
+      fetch: mockFetch(() => response({ padding: "x".repeat(20000) }, 403)),
+    }),
+    (error: unknown) =>
+      error instanceof EmbeddingProviderError &&
+      error.status === 403 &&
+      error.breaker,
+  );
 });

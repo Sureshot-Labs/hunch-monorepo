@@ -15,6 +15,7 @@ import {
   buildEmbeddingText,
   embeddingTextHash,
   estimateEmbeddingCostUsd,
+  EmbeddingProviderError,
   pinGeneration,
   acquireEmbeddingGenerationPin,
   type EmbeddingGeneration,
@@ -164,6 +165,17 @@ async function serve(selected: EmbeddingGeneration = generation) {
 }
 const enqueueMarket = () =>
   redis.xAdd(STREAM, "*", { entity_type: "market", entity_id: "market:a" });
+const retryQueue = `${CONTROL}retry-due`;
+async function releaseRetryCooldown() {
+  await store.put(`${CONTROL}circuit`, 0);
+  for (const member of await redis.zRange(retryQueue, 0, -1)) {
+    const [g, kind, id] = JSON.parse(member) as string[];
+    const key = `${CONTROL}failure:${g}:${kind}:${id}`;
+    const failure = await store.get<Record<string, unknown>>(key);
+    if (failure) await store.put(key, { ...failure, retryAt: 0 });
+    await redis.zAdd(retryQueue, { score: 0, value: member });
+  }
+}
 async function pendingCount() {
   return Number(
     ((await redis.sendCommand(["XPENDING", STREAM, GROUP])) as unknown[])[0],
@@ -252,6 +264,117 @@ test("canonical SQL eligibility, stable pages and terminal rows", async () => {
   assert.equal(sources[0].eventTitle, "Will Bitcoin exceed $100,000?");
   assert.equal(sources[0].marketType, "binary");
 });
+
+test("429 persists targeted retries without DLQ and recovers after restart with current content", async () => {
+  await serve();
+  await db.query(
+    "update unified_markets set title='Updated before rate limit' where id='market:a'",
+  );
+  await enqueueMarket();
+  const limited: Provider = async (options) => {
+    await options.beforeAttempt?.({ attempt: 1, estimatedCostUsd: 0.00001 });
+    throw new EmbeddingProviderError("http_error", 429, true, false, 120000, {
+      provider: "DeepInfra",
+    });
+  };
+  await engine(limited).tick();
+  assert.equal(await redis.xLen(DLQ), 0);
+  assert.equal(await redis.zCard(retryQueue), 1);
+  assert.equal(
+    await pendingCount(),
+    0,
+    "durable retry permits ACK without losing work",
+  );
+  const status = await store.get<{
+    state: string;
+    reason: string;
+    deferred: number;
+  }>(`${CONTROL}status`);
+  assert.equal(status?.state, "paused");
+  assert.equal(status.reason, "provider_circuit_open");
+  assert.equal(status.deferred, 1);
+  const failure = await store.get<{
+    retryAt: number;
+    at: number;
+    status: number;
+  }>(`${CONTROL}failure:${generation.id}:market:market:a`);
+  assert.equal(failure?.status, 429);
+  assert.ok(failure.retryAt - failure.at >= 119000);
+  assert.ok(failure.retryAt - failure.at < 6 * 3600000);
+  const oldCalls = providerCalls.length;
+  await engine().tick();
+  assert.equal(providerCalls.length, oldCalls, "cooldown forbids HTTP");
+  await db.query(
+    "update unified_markets set title='Changed while waiting' where id='market:a'",
+  );
+  await releaseRetryCooldown();
+  await engine().tick();
+  assert.equal(await redis.zCard(retryQueue), 0);
+  assert.equal(await pendingCount(), 0);
+  const source = (
+    await loadEmbeddingSources(db, "market", ["market:a"], ["polymarket"])
+  )[0];
+  assert.equal(
+    await redis.hGet(
+      embeddingKey(generation, "market", "market:a"),
+      "text_hash",
+    ),
+    embeddingTextHash(buildEmbeddingText(source, generation)),
+  );
+});
+
+test("legacy unknown http_error is adopted without a six-hour hold; permanent input errors remain DLQ", async () => {
+  await serve();
+  await db.query(
+    "update unified_markets set title='New legacy text' where id='market:a'",
+  );
+  const source = (
+    await loadEmbeddingSources(db, "market", ["market:a"], ["polymarket"])
+  )[0];
+  await store.put(`${CONTROL}failure:${generation.id}:market:market:a`, {
+    hash: embeddingTextHash(buildEmbeddingText(source, generation)),
+    code: "http_error",
+    retryAt: Date.now() + 6 * 3600000,
+  });
+  await engine().tick();
+  await releaseRetryCooldown();
+  await engine().tick();
+  assert.equal(await redis.zCard(retryQueue), 0);
+  assert.ok(providerCalls.length > 0);
+  await db.query(
+    "update unified_markets set title='Permanent rejected text' where id='market:a'",
+  );
+  await enqueueMarket();
+  const invalid: Provider = async (options) => {
+    await options.beforeAttempt?.({ attempt: 1, estimatedCostUsd: 0.00001 });
+    throw new EmbeddingProviderError("http_error", 400, false, false);
+  };
+  await engine(invalid).tick();
+  assert.equal(await redis.zCard(retryQueue), 0);
+  assert.equal(await redis.xLen(DLQ), 1);
+});
+
+test("failed durable retry write cannot acknowledge the source message", async () => {
+  await serve();
+  await db.query(
+    "update unified_markets set title='Redis failure text' where id='market:a'",
+  );
+  await enqueueMarket();
+  const original = store.fenced.bind(store);
+  store.fenced = async (script, keys = [], args) => {
+    if (keys.some((k) => k.includes("failure:")) && script.includes("ZADD"))
+      throw Error("fixture_retry_storage_unavailable");
+    return original(script, keys, args);
+  };
+  const limited: Provider = async (options) => {
+    await options.beforeAttempt?.({ attempt: 1, estimatedCostUsd: 0.00001 });
+    throw new EmbeddingProviderError("http_error", 429, true, false);
+  };
+  await engine(limited).tick();
+  assert.ok((await pendingCount()) > 0);
+  assert.equal(await redis.zCard(retryQueue), 0);
+  store.fenced = original;
+});
 test("memory sampling measures this generation, not unrelated Redis keys", async () => {
   await seedGeneration(generation);
   const before = await embeddingBytesPerItem(store, generation);
@@ -265,6 +388,140 @@ test("memory sampling measures this generation, not unrelated Redis keys", async
   );
   assert.ok((await embeddingBytesPerItem(store, generation)) > 100000);
 });
+
+test("mixed parallel transient and failed retry-storage siblings cannot ACK undurable work", async () => {
+  await serve();
+  await setPolicy("ai_embeddings", {
+    model: generation.model,
+    batchSize: 1,
+    concurrency: 4,
+  });
+  await db.query(`update unified_markets set title='Parallel changed' where id='market:a';
+    insert into unified_markets(id,event_id,venue,status,title,market_type)
+    select 'market:'||letter,'event:a','polymarket','ACTIVE','Parallel '||letter,'binary' from unnest(array['b','c','d']) letter`);
+  for (const id of ["a", "b", "c", "d"])
+    await redis.xAdd(STREAM, "*", {
+      entity_type: "market",
+      entity_id: "market:" + id,
+    });
+  const original = store.fenced.bind(store);
+  store.fenced = async (script, keys = [], args) => {
+    if (
+      keys.includes(`${CONTROL}failure:${generation.id}:market:market:b`) &&
+      script.includes("ZADD")
+    )
+      throw Error("fixture_sibling_retry_storage_failure");
+    return original(script, keys, args);
+  };
+  let calls = 0;
+  let release!: () => void;
+  const allStarted = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const limited: Provider = async (options) => {
+    await options.beforeAttempt?.({ attempt: 1, estimatedCostUsd: 0.00001 });
+    if (++calls === 4) release();
+    await allStarted;
+    throw new EmbeddingProviderError("http_error", 429, true, false);
+  };
+  await engine(limited).tick();
+  store.fenced = original;
+  assert.equal(calls, 4);
+  assert.equal(await pendingCount(), 4);
+  assert.equal(await redis.zCard(retryQueue), 3);
+});
+
+test("persisted cooldown recovery admits only one half-open batch at a time", async () => {
+  await serve();
+  await setPolicy("ai_embeddings", {
+    model: generation.model,
+    batchSize: 1,
+    concurrency: 4,
+  });
+  await db.query(`update unified_markets set title='Half-open changed' where id='market:a';
+    insert into unified_markets(id,event_id,venue,status,title,market_type)
+    select 'market:'||letter,'event:a','polymarket','ACTIVE','Half-open '||letter,'binary' from unnest(array['b','c','d']) letter`);
+  for (const source of await loadEmbeddingSources(
+    db,
+    "market",
+    ["market:a", "market:b", "market:c", "market:d"],
+    ["polymarket"],
+  )) {
+    await store.put(`${CONTROL}failure:${generation.id}:market:${source.id}`, {
+      hash: embeddingTextHash(buildEmbeddingText(source, generation)),
+      retryable: true,
+      retryAt: 0,
+      version: 2,
+    });
+    await redis.zAdd(retryQueue, {
+      score: 0,
+      value: JSON.stringify([generation.id, "market", source.id]),
+    });
+  }
+  await store.put(`${CONTROL}provider-failures`, 2);
+  await store.put(`${CONTROL}circuit`, 0);
+  let active = 0,
+    maxActive = 0;
+  const recovering: Provider = async (options) => {
+    active++;
+    maxActive = Math.max(maxActive, active);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return await provider(options);
+    } finally {
+      active--;
+    }
+  };
+  await engine(recovering).tick();
+  assert.equal(maxActive, 1);
+  assert.equal(await redis.zCard(retryQueue), 0);
+});
+
+test("due retries cannot build a third generation while an older generation is pinned", async () => {
+  await serve();
+  await seedGeneration(legacy);
+  await store.put(`${CONTROL}generations`, [legacy, generation]);
+  await pinGeneration(redis, legacy, "fixture:running-job", 300);
+  await setPolicy("ai_embeddings", { model: qwen.model });
+  await store.put(`${CONTROL}failure:${qwen.id}:market:market:a`, {
+    hash: "old",
+    retryable: true,
+    retryAt: 0,
+    version: 2,
+  });
+  await redis.zAdd(retryQueue, {
+    score: 0,
+    value: JSON.stringify([qwen.id, "market", "market:a"]),
+  });
+  await engine().tick();
+  assert.equal(providerCalls.length, 0);
+  assert.equal(await redis.exists(embeddingKey(qwen, "market", "market:a")), 0);
+  assert.equal(await redis.zCard(retryQueue), 1);
+});
+
+for (const status of [408, 503])
+  test(`background ${status} preserves targeted retry and reports paused`, async () => {
+    await serve();
+    await redis.del(embeddingKey(generation, "market", "market:a"));
+    await store.put(
+      checkpointKey(generation),
+      checkpoint("active", { startedAt: Date.now() - 7 * 3600000 }),
+    );
+    const failing: Provider = async (options) => {
+      await options.beforeAttempt?.({ attempt: 1, estimatedCostUsd: 0.00001 });
+      throw new EmbeddingProviderError("http_error", status, true, false);
+    };
+    const worker = engine(failing);
+    for (let i = 0; i < 12 && (await redis.zCard(retryQueue)) === 0; i++)
+      await worker.tick();
+    assert.equal(await redis.zCard(retryQueue), 1);
+    assert.equal(await redis.xLen(DLQ), 0);
+    const state = await store.get<{ state: string }>(`${CONTROL}status`);
+    assert.equal(state?.state, "paused");
+    await releaseRetryCooldown();
+    await engine().tick();
+    assert.equal(await redis.zCard(retryQueue), 0);
+  });
 test("old global-growth projection is discarded without restarting the pass or budget", async () => {
   await serve(generation);
   await store.reserve(generation, 0.4, 5);

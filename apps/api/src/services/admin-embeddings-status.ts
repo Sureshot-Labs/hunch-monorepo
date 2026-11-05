@@ -24,6 +24,8 @@ const statusSchema = z.object({
   activeGeneration: z.string().nullable().optional(),
   state: z.enum(["building", "verifying", "active", "paused", "failed"]),
   reason: z.string().nullable().optional(),
+  servingAvailable: z.boolean().nullable().optional(),
+  deferred: count.optional(),
   reconciliation: z
     .object({
       state: z.enum(["building", "verifying", "active", "paused", "failed"]),

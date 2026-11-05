@@ -18,6 +18,7 @@ import { ensureRedis, redis } from "./redis.js";
 import {
   diffLimitlessWsDemandEventStats,
   getLimitlessWsDemandEventStats,
+  flushLimitlessResolutionPublications,
   resubscribeMarketWSSubscriptions,
   startMarketWS,
   updateMarketWSSubscriptions,
@@ -308,6 +309,13 @@ async function periodicFullBootstrap() {
 }
 
 async function periodicWsRefresh() {
+  try {
+    await flushLimitlessResolutionPublications();
+  } catch (error) {
+    log.warn("Limitless terminal publication deferred", {
+      code: (error as { code?: string }).code ?? "redis_publication_failed",
+    });
+  }
   if (wsRefreshRunning) return;
   wsRefreshRunning = true;
   const startedAt = Date.now();
