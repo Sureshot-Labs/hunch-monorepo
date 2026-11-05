@@ -1,5 +1,11 @@
 #!/usr/bin/env tsx
 
+import { SVM_LIGHTHOUSE_PROGRAM_ID } from "../../execution/solana-wallet-assertions.js";
+import {
+  lighthouseVectors,
+  lighthouseMerkleGuard,
+} from "../fixtures/lighthouse.js";
+
 import assert from "node:assert/strict";
 import bs58 from "bs58";
 import { ethers } from "ethers";
@@ -2897,4 +2903,210 @@ for (const terminalStatus of ["mismatch", "reorged"] as const) {
 }
 console.log(
   "[funding-step-receipt-tests] exact EVM/Solana receipt matching, finality, failure, reorg, and persisted polling passed",
+);
+
+// Accepted wallet assertions must also survive canonical receipt attribution.
+const phantomAssertionReceipt = {
+  programId: SVM_LIGHTHOUSE_PROGRAM_ID,
+  accounts: [svmSigner],
+  dataHex: "0500050100",
+};
+const phantomReceipt = {
+  ...svmTransaction,
+  instructions: [
+    computeBudgetInstruction,
+    ...svmTransaction.instructions,
+    phantomAssertionReceipt,
+    phantomAssertionReceipt,
+    phantomAssertionReceipt,
+    phantomAssertionReceipt,
+  ],
+};
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: svmAction,
+    expectedSignerAddress: svmSigner,
+    transaction: phantomReceipt,
+    previous: null,
+  }).status,
+  "finalized",
+);
+for (const assertion of [
+  { ...phantomAssertionReceipt, dataHex: "000000" },
+  { ...phantomAssertionReceipt, dataHex: "010000" },
+  { ...phantomAssertionReceipt, dataHex: "120000" },
+  { ...phantomAssertionReceipt, dataHex: "0500z1" },
+  { ...phantomAssertionReceipt, dataHex: "0500" },
+  { ...phantomAssertionReceipt, dataHex: "0500000100" },
+  { ...phantomAssertionReceipt, dataHex: "0500050102" },
+  { ...phantomAssertionReceipt, accounts: [] },
+  { ...phantomAssertionReceipt, programId: "11111111111111111111111111111111" },
+]) {
+  assert.equal(
+    evaluateSvmActionReceipt({
+      action: svmAction,
+      expectedSignerAddress: svmSigner,
+      transaction: {
+        ...svmTransaction,
+        instructions: [...svmTransaction.instructions, assertion],
+      },
+      previous: null,
+    }).status,
+    "mismatch",
+  );
+}
+
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: svmAction,
+    expectedSignerAddress: svmSigner,
+    transaction: { ...phantomReceipt, failed: true },
+    previous: null,
+  }).status,
+  "failed",
+);
+const providerAssertion = {
+  programId: phantomAssertionReceipt.programId,
+  data: phantomAssertionReceipt.dataHex,
+  dataEncoding: "hex" as const,
+  accounts: [{ address: svmSigner, signer: false, writable: false }],
+};
+
+const committedGuardAction = {
+  ...svmAction,
+  instructions: [...svmAction.instructions, providerAssertion],
+};
+const receiptWithOriginalGuard = {
+  ...svmTransaction,
+  instructions: [
+    computeBudgetInstruction,
+    ...svmTransaction.instructions,
+    phantomAssertionReceipt,
+  ],
+};
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: committedGuardAction,
+    expectedSignerAddress: svmSigner,
+    transaction: receiptWithOriginalGuard,
+    previous: null,
+  }).status,
+  "finalized",
+);
+for (const guard of [
+  null,
+  { ...phantomAssertionReceipt, dataHex: "0500050000" },
+  { ...phantomAssertionReceipt, programId: "11111111111111111111111111111111" },
+]) {
+  assert.equal(
+    evaluateSvmActionReceipt({
+      action: committedGuardAction,
+      expectedSignerAddress: svmSigner,
+      transaction: {
+        ...receiptWithOriginalGuard,
+        instructions: [
+          computeBudgetInstruction,
+          ...svmTransaction.instructions,
+          ...(guard ? [guard] : []),
+        ],
+      },
+      previous: null,
+    }).status,
+    "mismatch",
+  );
+}
+
+for (const vector of lighthouseVectors) {
+  const guard = {
+    programId: SVM_LIGHTHOUSE_PROGRAM_ID,
+    accounts: Array.from({ length: vector.accountCount }, () => svmSigner),
+    dataHex: vector.data.toString("hex"),
+  };
+  assert.equal(
+    evaluateSvmActionReceipt({
+      action: svmAction,
+      expectedSignerAddress: svmSigner,
+      transaction: {
+        ...svmTransaction,
+        instructions: [...svmTransaction.instructions, guard],
+      },
+      previous: null,
+    }).status,
+    "finalized",
+    vector.label,
+  );
+}
+for (const accountCount of [3, 4, 8]) {
+  const guard = {
+    programId: SVM_LIGHTHOUSE_PROGRAM_ID,
+    accounts: Array.from({ length: accountCount }, () => svmSigner),
+    dataHex: lighthouseMerkleGuard.toString("hex"),
+  };
+  assert.equal(
+    evaluateSvmActionReceipt({
+      action: svmAction,
+      expectedSignerAddress: svmSigner,
+      transaction: {
+        ...svmTransaction,
+        instructions: [...svmTransaction.instructions, guard],
+      },
+      previous: null,
+    }).status,
+    "finalized",
+  );
+  assert.equal(
+    evaluateSvmActionReceipt({
+      action: svmAction,
+      expectedSignerAddress: svmSigner,
+      transaction: {
+        ...svmTransaction,
+        instructions: [
+          ...svmTransaction.instructions,
+          { ...guard, dataHex: guard.dataHex.slice(0, -2) },
+        ],
+      },
+      previous: null,
+    }).status,
+    "mismatch",
+  );
+}
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: {
+      ...svmAction,
+      instructions: [...svmAction.instructions, providerAssertion],
+    },
+    expectedSignerAddress: svmSigner,
+    transaction: {
+      ...svmTransaction,
+      instructions: [...svmTransaction.instructions, phantomAssertionReceipt],
+    },
+    previous: null,
+  }).status,
+  "finalized",
+);
+const providerBudget = {
+  programId: computeBudgetInstruction.programId,
+  data: computeBudgetInstruction.dataHex,
+  dataEncoding: "hex" as const,
+  accounts: [],
+};
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: {
+      ...svmAction,
+      instructions: [providerBudget, ...svmAction.instructions],
+    },
+    expectedSignerAddress: svmSigner,
+    transaction: {
+      ...svmTransaction,
+      instructions: [
+        computeBudgetInstruction,
+        ...svmTransaction.instructions,
+        phantomAssertionReceipt,
+      ],
+    },
+    previous: null,
+  }).status,
+  "finalized",
 );

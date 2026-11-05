@@ -1,6 +1,10 @@
 import { tx, type Pool } from "@hunch/infra";
 import { PublicKey } from "@solana/web3.js";
 import { fetchSolanaFinalizedBlockHeight } from "../../services/solana-rpc.js";
+import {
+  isReadOnlyLighthouseAssertion,
+  SVM_LIGHTHOUSE_PROGRAM_ID,
+} from "./solana-wallet-assertions.js";
 import { parseVerifiedSolanaSubmission } from "./signed-solana-submission.js";
 import bs58 from "bs58";
 import { parseSafeFundingTransactionReference } from "./safe-funding-submission-contract.js";
@@ -1131,6 +1135,20 @@ function isWalletInjectedSvmComputeBudgetInstruction(
   );
 }
 
+function isWalletInjectedSvmAssertionInstruction(
+  instruction: SvmReceiptInstruction,
+): boolean {
+  if (instruction.programId !== SVM_LIGHTHOUSE_PROGRAM_ID) return false;
+  const hex = instruction.dataHex.replace(/^0x/i, "");
+  if (hex.length > 1232 * 2 || !/^(?:[a-f0-9]{2}){2,}$/i.test(hex))
+    return false;
+  return isReadOnlyLighthouseAssertion({
+    programId: instruction.programId,
+    accountCount: instruction.accounts.length,
+    data: Buffer.from(hex, "hex"),
+  });
+}
+
 export function evaluateSvmActionReceipt(
   input: Readonly<{
     action: SvmTransactionAction;
@@ -1155,8 +1173,18 @@ export function evaluateSvmActionReceipt(
       evidence: evidence({ transactionObserved: false }),
     };
   }
+  const originalBudget = input.action.instructions.some(
+    (instruction) => instruction.programId === SVM_COMPUTE_BUDGET_PROGRAM_ID,
+  );
+  const originalAssertions = input.action.instructions.some(
+    (instruction) => instruction.programId === SVM_LIGHTHOUSE_PROGRAM_ID,
+  );
   const businessInstructions = input.transaction.instructions.filter(
-    (instruction) => !isWalletInjectedSvmComputeBudgetInstruction(instruction),
+    (instruction) =>
+      (originalBudget ||
+        !isWalletInjectedSvmComputeBudgetInstruction(instruction)) &&
+      (originalAssertions ||
+        !isWalletInjectedSvmAssertionInstruction(instruction)),
   );
   const instructionsMatch =
     businessInstructions.length === input.action.instructions.length &&

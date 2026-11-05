@@ -1,3 +1,4 @@
+import { SVM_LIGHTHOUSE_PROGRAM_ID } from "../../execution/solana-wallet-assertions.js";
 import assert from "node:assert/strict";
 import {
   Keypair,
@@ -6,6 +7,7 @@ import {
   PublicKey,
   SystemProgram,
   VersionedTransaction,
+  TransactionInstruction,
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddressSync,
@@ -229,4 +231,66 @@ assert.deepEqual(
     lastValidBlockHeight: 100,
   }),
   { ...nativeIdentity, version: 1, lastValidBlockHeight: 100 },
+);
+
+// Real Ed25519 signature validation keeps Phantom's four read-only guards intact.
+const phantomMessage = relaySolanaActionMessage(
+  nativeAction,
+  signer,
+  SystemProgram.programId.toBase58(),
+);
+phantomMessage.instructions.unshift(
+  ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 }),
+  ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }),
+);
+const phantomGuard = new TransactionInstruction({
+  programId: new PublicKey(SVM_LIGHTHOUSE_PROGRAM_ID),
+  keys: [{ pubkey: key.publicKey, isSigner: false, isWritable: false }],
+  data: Buffer.from([5, 0, 5, 1, 0]),
+});
+phantomMessage.instructions.push(
+  phantomGuard,
+  phantomGuard,
+  phantomGuard,
+  phantomGuard,
+);
+const phantomTransaction = new VersionedTransaction(
+  phantomMessage.compileToV0Message([lookupTable]),
+);
+phantomTransaction.sign([key]);
+const phantomInput = {
+  ...nativeInput,
+  signedTransaction: Buffer.from(phantomTransaction.serialize()).toString(
+    "base64",
+  ),
+};
+assert.ok(verifySignedSolanaFundingSubmission(phantomInput).signature);
+const mutatedGuardTransaction = VersionedTransaction.deserialize(
+  Buffer.from(phantomInput.signedTransaction, "base64"),
+);
+const lastGuard = mutatedGuardTransaction.message.compiledInstructions.at(-1);
+assert.ok(lastGuard);
+lastGuard.data[3] = 0; // Another valid IsSigner assertion, but not what was signed.
+assert.throws(
+  () =>
+    verifySignedSolanaFundingSubmission({
+      ...phantomInput,
+      signedTransaction: Buffer.from(
+        mutatedGuardTransaction.serialize(),
+      ).toString("base64"),
+    }),
+  (error) =>
+    error instanceof SignedSolanaSubmissionError &&
+    error.reason === "signature_invalid",
+);
+phantomTransaction.signatures[0][0] ^= 1;
+assert.throws(
+  () =>
+    verifySignedSolanaFundingSubmission({
+      ...phantomInput,
+      signedTransaction: Buffer.from(phantomTransaction.serialize()).toString(
+        "base64",
+      ),
+    }),
+  /signature is invalid/,
 );
