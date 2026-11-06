@@ -29,6 +29,9 @@ export {
 } from "./rpc-diagnostics.js";
 export {
   buildTopMarketsText,
+  buildEmbeddingEventTitles,
+  embeddingInputFingerprint,
+  embeddingEnqueueStateKey,
   enqueueEmbedItems,
   getEmbedStreamKey,
 } from "./ai-embed.js";

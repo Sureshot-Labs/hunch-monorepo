@@ -38,7 +38,7 @@ import {
   upsertMarketsConsistently,
 } from "./consistentUpserts.js";
 import {
-  buildTopMarketsText,
+  buildEmbeddingEventTitles,
   claimDuePriceRefreshTokens,
   clampHotTokenProbeLimit,
   enqueueEmbedItems,
@@ -493,11 +493,10 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
           list.push(row);
           marketsByEvent.set(row.event_id, list);
         }
-        const topMarketsByEvent = new Map<string, string>();
+        const topMarketsByEvent = new Map<string, string[]>();
         for (const row of unifiedEventRows) {
           const markets = marketsByEvent.get(row.id) ?? [];
-          const topMarkets = buildTopMarketsText(markets, row.title);
-          if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
+          topMarketsByEvent.set(row.id, buildEmbeddingEventTitles(markets));
         }
         const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
           entity_type: "event",

@@ -44,7 +44,7 @@ import {
   type UnifiedMarketRow,
 } from "@hunch/db";
 import {
-  buildTopMarketsText,
+  buildEmbeddingEventTitles,
   claimDueSortedSetQueueItems,
   claimDuePriceRefreshTokens,
   clampHotTokenProbeLimit,
@@ -1984,10 +1984,10 @@ async function processLimitlessMarket(
     }
   }
 
-  const topMarkets = buildTopMarketsText(eventMarkets, unifiedEventRow.title);
-  if (topMarkets) {
-    embedItems[0] = { ...embedItems[0], top_markets: topMarkets };
-  }
+  embedItems[0] = {
+    ...embedItems[0],
+    top_markets: buildEmbeddingEventTitles(eventMarkets),
+  };
 
   if (capabilities.publishLiveUpdates) {
     await publishLimitlessTerminalTops(eventMarkets);

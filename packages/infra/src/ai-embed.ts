@@ -1,4 +1,5 @@
 import type { RedisClientType } from "redis";
+import { createHash } from "node:crypto";
 
 type EmbedEntityType = "market" | "event";
 
@@ -10,7 +11,7 @@ export type EmbedQueueItem = {
   status?: string;
   market_title?: string;
   event_title?: string;
-  top_markets?: string;
+  top_markets?: string | string[];
   description?: string;
   category?: string;
   outcomes?: string;
@@ -109,6 +110,84 @@ export function buildTopMarketsText(
 
 const DEFAULT_STREAM_KEY = "ai:embed:queue:active";
 
+/** Stable candidate titles, not volume ranking. Canonical hydration bounds its
+ * own rendering; keep all candidates here so collation/subset changes cannot
+ * silently omit an event invalidation. */
+export function buildEmbeddingEventTitles(
+  markets: Array<{ title?: string | null; status?: string | null }>,
+): string[] {
+  return [
+    ...new Set(
+      markets
+        .filter((row) => row.status === "ACTIVE")
+        .map((row) => row.title)
+        .filter(
+          (title): title is string =>
+            typeof title === "string" && title.length > 0,
+        ),
+    ),
+  ].sort();
+}
+
+function text(value: string | undefined): string {
+  return value?.normalize("NFC").replace(/\s+/g, " ").trim() ?? "";
+}
+function list(value: string | string[] | undefined): string[] {
+  if (Array.isArray(value)) return value.map(text);
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((item) => typeof item === "string")
+    )
+      return parsed.map(text);
+  } catch {
+    /* Legacy producer text. */
+  }
+  return [text(value)];
+}
+export function embeddingInputFingerprint(item: EmbedQueueItem): string {
+  const status = item.status?.toUpperCase() ?? "";
+  // Terminal text is never embedded; one lifecycle notification still reaches
+  // canonical cleanup, without requeueing terminal markets for price refreshes.
+  const fields =
+    status && status !== "ACTIVE"
+      ? [item.entity_type, item.venue ?? "", status]
+      : [
+          item.entity_type,
+          item.venue ?? "",
+          status,
+          text(item.market_title),
+          text(item.event_title),
+          text(item.description),
+          text(item.category),
+          text(item.market_type),
+          list(item.outcomes),
+          [...new Set(list(item.top_markets))].sort(),
+        ];
+  return createHash("sha256").update(JSON.stringify(fields)).digest("hex");
+}
+export function embeddingEnqueueStateKey(
+  stream: string,
+  kind: EmbedEntityType,
+  id: string,
+): string {
+  return `ai:embed:enqueue:v2:${createHash("sha256")
+    .update(JSON.stringify([stream, kind, id]))
+    .digest("hex")}`;
+}
+export const EMBEDDING_ENQUEUE_LUA = `
+if redis.call('GET',KEYS[2])==ARGV[3] then
+ redis.call('HINCRBY',KEYS[4],'unchanged',1); return 0
+end
+if redis.call('XLEN',KEYS[1])>=200000 then
+ redis.call('INCR',KEYS[3]); redis.call('HINCRBY',KEYS[4],'overflow',1); return -1
+end
+redis.call('XADD',KEYS[1],'*','entity_type',ARGV[1],'entity_id',ARGV[2])
+redis.call('SET',KEYS[2],ARGV[3],'EX',604800)
+redis.call('HINCRBY',KEYS[4],'enqueued',1); return 1`;
+
 export function getEmbedStreamKey(): string {
   return process.env.AI_EMBED_STREAM_KEY || DEFAULT_STREAM_KEY;
 }
@@ -117,23 +196,46 @@ export async function enqueueEmbedItems(
   redis: RedisClientType,
   items: EmbedQueueItem[],
   streamKey = getEmbedStreamKey(),
-): Promise<void> {
-  if (!items.length) return;
-  const pipeline = redis.multi();
+): Promise<{
+  enqueued: number;
+  unchanged: number;
+  overflow: number;
+  deduplicated: number;
+}> {
+  const unique = new Map<string, { id: string; item: EmbedQueueItem }>();
   for (const item of items) {
     const id = item.entity_type === "market" ? item.market_id : item.event_id;
     if (!id) continue;
-    // The queue is a bounded invalidation log, not a second database of stale text.
-    // Overflow is recoverable by the worker's canonical DB reconciliation sweep.
-    pipeline.eval(
-      `if redis.call('XLEN',KEYS[1]) >= 200000 then
-      redis.call('INCR',KEYS[2]); return false end
-      return redis.call('XADD',KEYS[1],'*','entity_type',ARGV[1],'entity_id',ARGV[2])`,
-      {
-        keys: [streamKey, "ai:embed:control:reconcile"],
-        arguments: [item.entity_type, id],
-      },
-    );
+    unique.set(JSON.stringify([item.entity_type, id]), { id, item });
   }
-  await pipeline.exec();
+  const values = [...unique.values()];
+  const result = {
+    enqueued: 0,
+    unchanged: 0,
+    overflow: 0,
+    deduplicated: items.length - values.length,
+  };
+  // Bound EXEC duration for large catalog pages. The fingerprint and accepted
+  // notification are atomic; overflow/errors never mark missing work as seen.
+  for (let offset = 0; offset < values.length; offset += 200) {
+    const pipeline = redis.multi();
+    for (const { id, item } of values.slice(offset, offset + 200)) {
+      pipeline.eval(EMBEDDING_ENQUEUE_LUA, {
+        keys: [
+          streamKey,
+          embeddingEnqueueStateKey(streamKey, item.entity_type, id),
+          "ai:embed:control:reconcile",
+          `${streamKey}:enqueue:stats:v2`,
+        ],
+        arguments: [item.entity_type, id, embeddingInputFingerprint(item)],
+      });
+    }
+    for (const response of await pipeline.exec()) {
+      if (Number(response) === 1) result.enqueued++;
+      else if (Number(response) === 0) result.unchanged++;
+      else if (Number(response) === -1) result.overflow++;
+      else throw new Error("embedding_enqueue_result_invalid");
+    }
+  }
+  return result;
 }

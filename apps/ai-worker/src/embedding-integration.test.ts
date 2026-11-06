@@ -21,7 +21,7 @@ import {
   type EmbeddingGeneration,
 } from "@hunch/embeddings";
 import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
-import { enqueueEmbedItems } from "@hunch/infra";
+import { enqueueEmbedItems, embeddingEnqueueStateKey } from "@hunch/infra";
 import { EmbeddingEngine, initializeEmbeddingWorker } from "./engine.js";
 import { embeddingBytesPerItem } from "./memory.js";
 import {
@@ -229,6 +229,317 @@ after(async () => {
   await db.end();
 });
 
+test("producer atomically deduplicates identical states across concurrent refreshes and batches", async () => {
+  const item = {
+    entity_type: "market" as const,
+    market_id: "market:a",
+    status: "ACTIVE",
+    market_title: "Above $100,000",
+    description: "unchanged",
+  };
+  const results = await Promise.all(
+    Array.from({ length: 12 }, () =>
+      enqueueEmbedItems(redis, [item, { ...item, updated_at: Date.now() }]),
+    ),
+  );
+  assert.equal(await redis.xLen(STREAM), 1);
+  assert.equal(
+    results.reduce((sum, result) => sum + result.enqueued, 0),
+    1,
+  );
+  assert.equal(
+    results.reduce((sum, result) => sum + result.deduplicated, 0),
+    12,
+  );
+  assert.equal(
+    await redis.hGet(`${STREAM}:enqueue:stats:v2`, "unchanged"),
+    "11",
+  );
+  const state = embeddingEnqueueStateKey(STREAM, "market", "market:a");
+  assert.match((await redis.get(state)) ?? "", /^[a-f0-9]{64}$/);
+  assert.ok((await redis.ttl(state)) > 600000);
+  const stateBytes = Number(
+    await redis.sendCommand(["MEMORY", "USAGE", state]),
+  );
+  assert.ok(stateBytes > 0);
+  console.info("[embedding-enqueue-state fixture]", {
+    stateBytes,
+    ttlSeconds: await redis.ttl(state),
+  });
+  await enqueueEmbedItems(redis, [{ ...item, status: "CLOSED" }]);
+  await enqueueEmbedItems(redis, [
+    { ...item, status: "CLOSED", market_title: "terminal price refresh" },
+  ]);
+  await enqueueEmbedItems(redis, [item]);
+  assert.equal(
+    await redis.xLen(STREAM),
+    3,
+    "ACTIVE -> CLOSED -> ACTIVE cannot be mistaken for unchanged ABA",
+  );
+  await redis.expire(state, 0);
+  assert.equal(
+    (await enqueueEmbedItems(redis, [item])).enqueued,
+    1,
+    "expired fingerprint has an immediate repair path",
+  );
+  assert.equal(
+    (await enqueueEmbedItems(redis, [item], "fixture:separate-stream"))
+      .enqueued,
+    1,
+  );
+});
+test("producer failure never records an accepted fingerprint without its notification", async () => {
+  const stream = "fixture:wrong-type-stream";
+  const item = {
+    entity_type: "market" as const,
+    market_id: "market:a",
+    status: "CLOSED",
+  };
+  await redis.set(stream, "wrong type");
+  await assert.rejects(() => enqueueEmbedItems(redis, [item], stream));
+  assert.equal(
+    await redis.get(embeddingEnqueueStateKey(stream, "market", "market:a")),
+    null,
+  );
+  await redis.del(stream);
+  assert.equal((await enqueueEmbedItems(redis, [item], stream)).enqueued, 1);
+});
+test("large catalog batches deduplicate without blocking real subsequent text changes", async () => {
+  const items = Array.from({ length: 451 }, (_, i) => ({
+    entity_type: "market" as const,
+    market_id: `market:batch-${i}`,
+    status: "ACTIVE",
+    market_title: `Outcome ${i}`,
+  }));
+  assert.equal(
+    (await enqueueEmbedItems(redis, [...items, ...items])).enqueued,
+    451,
+  );
+  assert.equal((await enqueueEmbedItems(redis, items)).unchanged, 451);
+  assert.equal(
+    (
+      await enqueueEmbedItems(redis, [
+        { ...items[300], description: "new evidence" },
+      ])
+    ).enqueued,
+    1,
+  );
+  assert.equal(await redis.xLen(STREAM), 452);
+});
+test("batched metadata and fenced cache commits use bounded round trips and preserve terminal TTLs", async () => {
+  await store.ensureIndex(generation, "market");
+  const source = (
+    await loadEmbeddingSources(db, "market", ["market:a"], ["polymarket"])
+  )[0];
+  const sources = Array.from({ length: 205 }, (_, i) => ({
+    ...source,
+    id: `cache:${i}`,
+  }));
+  const hash = embeddingTextHash(buildEmbeddingText(source, generation));
+  await Promise.all(
+    sources.map((item) => store.commit(generation, item, hash, vector)),
+  );
+  await store.release();
+  const commands: string[] = [];
+  store = new EmbeddingStore({
+    get: redis.get.bind(redis),
+    sendCommand: async (args) => {
+      commands.push(String(args[0]));
+      return redis.sendCommand(args as string[]);
+    },
+  });
+  assert.equal(await store.acquire(), true);
+  commands.length = 0;
+  const metadata = await store.metadataMany(generation, sources);
+  assert.equal(metadata.length, 205);
+  assert.ok(metadata.every((row) => row[0] === hash && row[3] === 4096));
+  assert.equal(commands.filter((command) => command === "EVAL_RO").length, 3);
+  await redis.expire(embeddingKey(generation, "market", sources[0].id), 60);
+  const failure = `${CONTROL}failure:${generation.id}:market:${sources[0].id}`;
+  await redis.set(failure, "{}");
+  await redis.zAdd(retryQueue, {
+    score: 0,
+    value: JSON.stringify([generation.id, "market", sources[0].id]),
+  });
+  commands.length = 0;
+  await store.commitCachedMany(
+    generation,
+    sources.map((item, i) => ({
+      source: i === 204 ? { ...item, eligible: false, status: "CLOSED" } : item,
+      hash,
+    })),
+  );
+  assert.equal(commands.filter((command) => command === "EVAL").length, 3);
+  assert.ok(
+    (await redis.ttl(embeddingKey(generation, "market", sources[0].id))) >
+      170000,
+  );
+  assert.equal(await redis.get(failure), null);
+  assert.equal(await redis.zCard(retryQueue), 0);
+  assert.equal(
+    await redis.hGet(
+      embeddingKey(generation, "market", sources[204].id),
+      "status",
+    ),
+    "CLOSED",
+  );
+  assert.equal(providerCalls.length, 0);
+});
+test("cache replacement/expiry fails before any batch writes and recovers without weakening the hash guard", async () => {
+  await seedGeneration(generation);
+  const source = (
+    await loadEmbeddingSources(db, "market", ["market:a"], ["polymarket"])
+  )[0];
+  const second = { ...source, id: "market:second" };
+  const hash = embeddingTextHash(buildEmbeddingText(source, generation));
+  await store.commit(generation, second, hash, vector);
+  const firstKey = embeddingKey(generation, "market", source.id),
+    secondKey = embeddingKey(generation, "market", second.id);
+  await redis.expire(firstKey, 20);
+  await store.metadataMany(generation, [source, second]);
+  await redis.hDel(secondKey, "embedding");
+  await assert.rejects(
+    () =>
+      store.commitCachedMany(generation, [
+        { source, hash },
+        { source: second, hash },
+      ]),
+    /embedding_cache_changed/,
+  );
+  assert.ok(
+    (await redis.ttl(firstKey)) <= 20,
+    "first item was not touched before validating the whole batch",
+  );
+  await store.commit(generation, second, hash, vector);
+  await store.commitCachedMany(generation, [
+    { source, hash },
+    { source: second, hash },
+  ]);
+  assert.ok((await redis.ttl(firstKey)) > 170000);
+  await store.release();
+  const replacement = new EmbeddingStore(redis);
+  assert.equal(await replacement.acquire(), true);
+  await assert.rejects(
+    () => store.commitCachedMany(generation, [{ source, hash }]),
+    /lease_lost/,
+  );
+  store = replacement;
+  await store.commitCachedMany(generation, [{ source, hash }]);
+});
+test("closure arriving during model work remains queued and is processed canonically", async () => {
+  await serve();
+  await db.query(
+    "update unified_markets set title='Above $110,000' where id='market:a'",
+  );
+  const item = {
+    entity_type: "market" as const,
+    market_id: "market:a",
+    status: "ACTIVE",
+    market_title: "Above $110,000",
+  };
+  await enqueueEmbedItems(redis, [item]);
+  let closed = false;
+  const worker = engine(async (options) => {
+    if (!closed) {
+      closed = true;
+      await db.query(
+        "update unified_markets set status='CLOSED' where id='market:a'",
+      );
+      await enqueueEmbedItems(redis, [{ ...item, status: "CLOSED" }]);
+    }
+    return provider(options);
+  });
+  await worker.tick();
+  assert.equal(closed, true);
+  assert.equal(await redis.xLen(STREAM), 2);
+  assert.equal(
+    await redis.hGet(embeddingKey(generation, "market", "market:a"), "status"),
+    "CLOSED",
+  );
+  await worker.tick();
+  assert.equal(await pendingCount(), 0);
+  const groups = (await redis.sendCommand([
+    "XINFO",
+    "GROUPS",
+    STREAM,
+  ])) as unknown[][];
+  const group = Object.fromEntries(
+    Array.from({ length: groups[0].length / 2 }, (_, i) => [
+      String(groups[0][i * 2]),
+      groups[0][i * 2 + 1],
+    ]),
+  );
+  assert.equal(Number(group.lag), 0);
+  assert.equal(
+    providerCalls.length,
+    1,
+    "closing notification does not embed terminal text",
+  );
+});
+test("legacy cache batching rejects a vector from another model even after an earlier metadata read", async () => {
+  await seedGeneration(legacy);
+  const source = (
+    await loadEmbeddingSources(db, "market", ["market:a"], ["polymarket"])
+  )[0];
+  const hash = embeddingTextHash(buildEmbeddingText(source, legacy));
+  const key = embeddingKey(legacy, "market", source.id);
+  await store.metadataMany(legacy, [source]);
+  await redis.hSet(key, "embedding_version", qwen.id);
+  await assert.rejects(
+    () => store.commitCachedMany(legacy, [{ source, hash }]),
+    /embedding_cache_changed/,
+  );
+  await redis.hSet(
+    key,
+    "embedding_version",
+    "intfloat/e5-large-v2@legacy-fixture",
+  );
+  await store.commitCachedMany(legacy, [{ source, hash }]);
+  assert.equal(await redis.hGet(key, "embedding_version"), legacy.id);
+});
+for (const stage of ["metadata", "cached_commit"]) {
+  test(`Redis ${stage} failure leaves the stream pending and recovers by normal reclaim`, async () => {
+    await serve();
+    const id = await enqueueMarket();
+    const send = store.redis.sendCommand.bind(store.redis);
+    store.redis.sendCommand = async (args) => {
+      if (
+        stage === "metadata"
+          ? args[0] === "EVAL_RO"
+          : args[0] === "EVAL" &&
+            String(args[1]).includes("local items=cjson.decode")
+      )
+        throw new Error("fixture_redis_unavailable");
+      return send(args);
+    };
+    try {
+      await engine().tick();
+      assert.equal(await pendingCount(), 1);
+    } finally {
+      store.redis.sendCommand = send;
+    }
+    await redis.sendCommand([
+      "XCLAIM",
+      STREAM,
+      GROUP,
+      store.token,
+      "0",
+      id,
+      "IDLE",
+      "61000",
+    ]);
+    await engine().tick();
+    assert.equal(await pendingCount(), 0);
+    assert.equal(providerCalls.length, 0);
+    assert.equal(
+      await redis.hGet(
+        embeddingKey(generation, "market", "market:a"),
+        "status",
+      ),
+      "ACTIVE",
+    );
+  });
+}
 test("canonical SQL eligibility, stable pages and terminal rows", async () => {
   assert.deepEqual(await countEmbeddingSources(db, ["polymarket"]), {
     event: 1,
@@ -1693,6 +2004,37 @@ test("actual producer Lua caps the queue and marks overflow without deleting unr
     last,
   );
   assert.equal(await pendingCount(), 0);
+  const rejectedKey = embeddingEnqueueStateKey(
+    STREAM,
+    "market",
+    "market:overflow-one",
+  );
+  assert.equal(
+    await redis.get(rejectedKey),
+    null,
+    "overflow never marks unqueued work accepted",
+  );
+  assert.equal(
+    await redis.get(
+      embeddingEnqueueStateKey(STREAM, "event", "event:overflow-two"),
+    ),
+    null,
+  );
+  await redis.xDel(STREAM, first);
+  const recovered = await enqueueEmbedItems(redis, [
+    {
+      entity_type: "market",
+      market_id: "market:overflow-one",
+      market_title: "Must not enter the queue",
+    },
+  ]);
+  assert.equal(
+    recovered.enqueued,
+    1,
+    "the next normal attempt succeeds as soon as capacity recovers",
+  );
+  assert.notEqual(await redis.get(rejectedKey), null);
+  assert.equal(await redis.xLen(STREAM), 200000);
 });
 test("trim respects both unread and pending floors of a second consumer group", async () => {
   await redis.sendCommand([
