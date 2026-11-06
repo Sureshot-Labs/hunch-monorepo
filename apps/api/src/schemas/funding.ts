@@ -94,6 +94,7 @@ export const fundingPreparationPrepareRequestSchema =
       // durable idempotency boundary.
       operationId: opaqueIdSchema.optional(),
       expectedInspectionRevision: opaqueIdSchema,
+      admissionProtocolVersion: z.literal(1).optional(),
     })
     .strict();
 
@@ -688,7 +689,7 @@ const fundingPreparationRunResponseFields = {
           actionId: opaqueIdSchema,
           ordinal: z.number().int().min(0).max(63),
           actionFingerprint: z.string().trim().min(32).max(192),
-          action: normalizedActionSchema,
+          action: normalizedActionSchema.nullable(),
           state: fundingPreparationActionStateSchema,
           broadcastMayHaveOccurred: z.boolean(),
           transactionReference: z.string().trim().min(8).max(512).nullable(),
@@ -702,6 +703,7 @@ const fundingPreparationRunResponseFields = {
   expiresAt: z.string().datetime(),
   resolvedAt: z.string().datetime().nullable(),
   replayed: z.boolean(),
+  admissionProtocolVersion: z.literal(1).nullable().optional(),
 } as const;
 
 export const fundingPreparationPrepareResponseSchema = z
@@ -725,10 +727,36 @@ export const fundingPreparationActionParamsSchema = z
   })
   .strict();
 
+export const fundingPreparationAdmissionRequestSchema = z
+  .object({
+    requestKey: z.string().regex(/^[a-zA-Z0-9_-]{32,128}$/),
+  })
+  .strict();
+
+export const fundingPreparationAdmissionResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    runId: z.string().uuid(),
+    actionId: opaqueIdSchema,
+    admitted: z.boolean(),
+    requestKeyMatches: z.boolean(),
+    action: normalizedActionSchema.nullable(),
+    executionKey: z.string().min(8).max(320).nullable(),
+    delivery: z.enum(["client", "embedded"]),
+  })
+  .strict();
+
 export const fundingPreparationActionReportRequestSchema = z
   .object({
     outcome: z.enum(["submitted", "ambiguous", "failed", "cancelled"]),
     transactionReference: z.string().trim().min(8).max(512).nullable(),
+    admissionKey: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]{32,128}$/)
+      .optional(),
+    notStartedReason: z
+      .enum(["wallet_not_invoked", "wallet_rejected"])
+      .optional(),
     actualCosts: z
       .object({
         networkFeeRaw: rawAmountSchema.nullable(),
@@ -737,6 +765,17 @@ export const fundingPreparationActionReportRequestSchema = z
   })
   .strict()
   .superRefine((report, context) => {
+    if (
+      report.notStartedReason &&
+      !["cancelled", "failed"].includes(report.outcome)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["notStartedReason"],
+        message:
+          "non-execution evidence requires a cancelled or failed outcome",
+      });
+    }
     if (
       report.outcome === "submitted" &&
       report.transactionReference === null
@@ -929,6 +968,7 @@ export const fundingCapabilitiesResponseSchema = z
   .object({
     ok: z.literal(true),
     fundingApiVersion: z.literal(1),
+    preparationAdmissionVersion: z.literal(1).optional(),
     receiveSessionsVersion: z.literal(1),
     creationMode: z.enum(["off", "on"]),
     destinationVenues: z.array(canonicalIdSchema).max(64),

@@ -137,6 +137,7 @@ function fixture() {
     runtime: {
       capabilities: async () => ({
         fundingApiVersion: 1,
+        preparationAdmissionVersion: 1,
         receiveSessionsVersion: 1,
         creationMode: "on",
         destinationVenues: ["polymarket"],

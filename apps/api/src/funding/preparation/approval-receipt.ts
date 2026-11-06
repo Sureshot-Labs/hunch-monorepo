@@ -81,7 +81,8 @@ export async function readPreparationReceipt(
   };
 }
 
-/** null means another preparation kind. Unknown evidence never authorizes retry.
+/** null means no supported approval in this run. Mixed signature/approval runs
+ * still reconcile each supported approval independently. Unknown evidence never authorizes retry.
  * Historical approval execution is not current market/trading readiness. */
 export async function verifyPreparationApprovalReceipts(
   run: FundingPreparationRun,
@@ -107,7 +108,7 @@ export async function verifyPreparationApprovalReceipts(
       return null;
     }
   });
-  if (approvals.some((approval) => approval === null)) return null;
+  if (approvals.every((approval) => approval === null)) return null;
   const outcomes: PreparationApprovalOutcome[] = [];
   for (const approval of approvals) {
     if (!approval) continue;

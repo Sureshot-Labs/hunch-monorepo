@@ -15,7 +15,10 @@ import {
   buildAccountValueReadModel,
   type AccountValueReadModel,
 } from "../../account-value/runtime-service.js";
-import { stableOpaqueId } from "../../account-value/canonical.js";
+import {
+  stableOpaqueId,
+  stableWalletOpaqueId,
+} from "../../account-value/canonical.js";
 import {
   resolveTradeMarketByRef,
   resolveTradeMarketOutcomeIdentity,
@@ -28,6 +31,7 @@ import {
 import {
   commitFundingOperationInTransaction,
   createFundingQuote,
+  FundingPersistenceError,
   type FundingQuoteCommitScope,
 } from "../persistence/funding-operation-repository.js";
 import {
@@ -37,6 +41,7 @@ import {
 import { listFundingOperationStepsForUser } from "../persistence/funding-evidence-repository.js";
 import {
   createOrReplayFundingPreparationRun,
+  admitFundingPreparationAction,
   fetchFundingPreparationRun,
   reportFundingPreparationAction,
   resolveFundingPreparationRun,
@@ -314,6 +319,7 @@ export class FundingPlanningRuntime {
     const resolvedPolicy = await resolveFundingPolicy(this.db);
     return {
       fundingApiVersion: 1 as const,
+      preparationAdmissionVersion: 1 as const,
       receiveSessionsVersion: 1 as const,
       creationMode: resolvedPolicy.runtime.creationMode,
       destinationVenues: resolvedPolicy.runtime.venues
@@ -426,6 +432,7 @@ export class FundingPlanningRuntime {
       controllerWalletRef?: string | null;
       operationId?: string;
       expectedInspectionRevision: string;
+      admissionProtocolVersion?: 1;
     }>,
   ): Promise<FundingPreparationRun> {
     const resolvedMarket = request.marketContextId
@@ -444,19 +451,24 @@ export class FundingPlanningRuntime {
       userId,
       request: snapshot,
       expiresAt: new Date(Date.now() + PREPARATION_RUN_TTL_MS),
-      materialize: (runId) =>
-        this.preparationRuntime.prepareBindingOption({
-          accountId: userId,
-          venueBindingOptionId: snapshot.venueBindingOptionId,
-          purpose: snapshot.purpose,
-          marketContextId: snapshot.marketContextId,
-          marketClass: snapshot.marketClass,
-          positionActionRef: snapshot.positionActionRef,
-          compatibleVenueBindingOptionIds: [snapshot.venueBindingOptionId],
-          controllerWalletRef: snapshot.controllerWalletRef,
-          operationId: runId,
-          expectedInspectionRevision: snapshot.expectedInspectionRevision,
-        }),
+      admissionProtocolVersion: request.admissionProtocolVersion,
+      materialize: (runId, renewal) =>
+        this.preparationRuntime.prepareBindingOption(
+          {
+            accountId: userId,
+            venueBindingOptionId: snapshot.venueBindingOptionId,
+            purpose: snapshot.purpose,
+            marketContextId: snapshot.marketContextId,
+            marketClass: snapshot.marketClass,
+            positionActionRef: snapshot.positionActionRef,
+            compatibleVenueBindingOptionIds: [snapshot.venueBindingOptionId],
+            controllerWalletRef:
+              renewal?.controllerWalletRef ?? snapshot.controllerWalletRef,
+            operationId: runId,
+            expectedInspectionRevision: snapshot.expectedInspectionRevision,
+          },
+          renewal,
+        ),
     });
     return run.replayed ? this.reconcilePendingPreparationRun(run) : run;
   }
@@ -464,6 +476,90 @@ export class FundingPlanningRuntime {
   async preparationRun(userId: string, runId: string) {
     const run = await fetchFundingPreparationRun(this.db, { userId, runId });
     return run ? this.reconcilePendingPreparationRun(run) : null;
+  }
+
+  async admitPreparationAction(
+    userId: string,
+    input: Readonly<{ runId: string; actionId: string; requestKey: string }>,
+  ) {
+    let run = await fetchFundingPreparationRun(this.db, {
+      userId,
+      runId: input.runId,
+    });
+    if (!run?.controllerWalletRef)
+      throw new FundingPersistenceError(
+        "operation_not_found",
+        "funding preparation run was not found",
+      );
+    const prior = run.request.executionJournal?.admissions[input.actionId];
+    if (prior)
+      return admitFundingPreparationAction(this.db, {
+        ...input,
+        userId,
+        inspectionRevision: run.inspectionRevision,
+        controllerWalletRef: run.controllerWalletRef,
+        executionMode:
+          prior.delivery === "embedded" ? "privy_authorization" : "web_client",
+        signer: prior.signer,
+      });
+    run = await this.reconcilePendingPreparationRun(run);
+    const preparation = await this.refreshPreparationInspection(run);
+    if (preparation.inspectionRevision !== run.inspectionRevision)
+      throw new PreparationContractError(
+        "evidence_stale",
+        "Preparation requirements changed; inspect and prepare the remaining actions",
+      );
+    if (
+      preparation.executionMode !== "web_client" &&
+      preparation.executionMode !== "privy_authorization"
+    )
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "This wallet execution mode does not support preparation admission",
+      );
+    const wallet = (await AuthService.getUserWallets(userId)).find(
+      (candidate) => candidate.id === run.controllerWalletRef,
+    );
+    if (!wallet)
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Preparation controller is no longer available",
+      );
+    const attempt = run.actions.find(
+      (candidate) => candidate.actionId === input.actionId,
+    );
+    const action = attempt?.action;
+    const actor =
+      action &&
+      ("senderWalletId" in action
+        ? action.senderWalletId
+        : "signerWalletId" in action
+          ? action.signerWalletId
+          : "actorWalletId" in action
+            ? action.actorWalletId
+            : null);
+    if (
+      !action ||
+      (actor !== wallet.id &&
+        actor !==
+          stableWalletOpaqueId({
+            walletType: wallet.walletType,
+            networkId: action.networkId,
+            address: wallet.walletAddress,
+          }))
+    )
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "Preparation action does not belong to its exact controller",
+      );
+    return admitFundingPreparationAction(this.db, {
+      ...input,
+      userId,
+      inspectionRevision: preparation.inspectionRevision,
+      controllerWalletRef: wallet.id,
+      executionMode: preparation.executionMode,
+      signer: wallet.walletAddress,
+    });
   }
 
   reportPreparationAction(
@@ -555,7 +651,9 @@ export class FundingPlanningRuntime {
         if (resolved.status === "succeeded") {
           await this.refreshSuccessfulPreparationRun(resolved);
         }
-        return run.replayed ? { ...resolved, replayed: true } : resolved;
+        if (resolved.status === "succeeded" || !run.request.executionJournal)
+          return run.replayed ? { ...resolved, replayed: true } : resolved;
+        run = run.replayed ? { ...resolved, replayed: true } : resolved;
       }
     }
     // A preparation inspection is reusable for discovery, but it is not valid
@@ -564,6 +662,38 @@ export class FundingPlanningRuntime {
     // Re-read the authoritative venue/RPC state and resolve the existing run;
     // never materialize or submit a replacement action from this path.
     const preparation = await this.refreshPreparationInspection(run);
+    if (
+      run.request.executionJournal?.version === 1 &&
+      preparation.status !== "unavailable" &&
+      preparation.requiredActions.every(
+        (action) => action.kind !== "signature",
+      ) &&
+      run.actions.some(
+        (action) =>
+          action.action.kind === "signature" &&
+          ["submitted", "ambiguous"].includes(action.state),
+      )
+    ) {
+      run = await resolveFundingPreparationRun(this.db, {
+        userId: run.userId,
+        runId: run.runId,
+        expectedActions: run.actions,
+        signaturePostcondition: {
+          inspectionRevision: preparation.inspectionRevision,
+        },
+      });
+    }
+    if (
+      run.request.executionJournal?.version === 1 &&
+      run.actions.some(
+        (action) =>
+          action.action.kind !== "signature" &&
+          action.action.kind !== "external_handoff" &&
+          action.broadcastMayHaveOccurred &&
+          !["succeeded", "failed"].includes(action.state),
+      )
+    )
+      return run;
     const resolved = await resolveFundingPreparationRun(this.db, {
       userId: run.userId,
       runId: run.runId,
