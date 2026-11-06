@@ -1,5 +1,6 @@
 import {
   interpretLimitlessExactClientOrderStatus,
+  interpretLimitlessVerifiedBuyOrderStatus,
   limitlessStatusResults,
   type LimitlessExactClientOrderStatus,
   type LimitlessOrderStatusItem,
@@ -22,6 +23,39 @@ export type LimitlessOrderStatusLookup = Readonly<{
 
 function textOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Read-only verifier lookup: unlike the reconciliation map, keeps proven not_found. */
+export async function fetchLimitlessVerifiedBuyOrderStatus(
+  lookup: LimitlessOrderStatusLookup,
+): Promise<Record<string, unknown> | null> {
+  const orderId = textOrNull(lookup.orderId);
+  const clientOrderId = textOrNull(lookup.clientOrderId);
+  const items = [
+    ...(orderId ? [{ orderId }] : []),
+    ...(clientOrderId ? [{ clientOrderId }] : []),
+  ];
+  if (!items.length) return null;
+  const { extractLimitlessMessage, limitlessRequest } =
+    await import("./limitless-client.js");
+  const upstream = await limitlessRequest({
+    auth: "partner_hmac",
+    body: { items },
+    method: "POST",
+    requestPath: "/orders/status/batch",
+  });
+  if (!upstream.ok) {
+    const message = extractLimitlessMessage(upstream.payload);
+    throw new Error(
+      message
+        ? `Limitless order status batch failed (${upstream.status}): ${message}`
+        : `Limitless order status batch failed (${upstream.status}).`,
+    );
+  }
+  return interpretLimitlessVerifiedBuyOrderStatus(upstream.payload, {
+    orderId,
+    clientOrderId,
+  });
 }
 
 export async function fetchLimitlessExactClientOrderStatus(

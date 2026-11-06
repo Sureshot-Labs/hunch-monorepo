@@ -42,7 +42,9 @@ export function buildLimitlessClobSubmissionContext(
   };
 }
 
-function submittedPayloads(payload: Record<string, unknown>) {
+export function limitlessClobSubmittedPayloads(
+  payload: Record<string, unknown>,
+) {
   // The direct route nests client order extras under `order`; they cannot
   // supply the server-owned top-level _hunchLimitlessClob field.
   const result = [payload];
@@ -63,7 +65,7 @@ function submittedPayloads(payload: Record<string, unknown>) {
 export function limitlessClobSubmittedOrder(
   payload: Record<string, unknown>,
 ): Record<string, unknown> | null {
-  const submitted = submittedPayloads(payload).at(-1) ?? payload;
+  const submitted = limitlessClobSubmittedPayloads(payload).at(-1) ?? payload;
   const order = isRecord(submitted.order) ? submitted.order : submitted;
   return order.salt != null ? order : null;
 }
@@ -71,7 +73,7 @@ export function limitlessClobSubmittedOrder(
 export function limitlessClobFrozenContext(
   payload: Record<string, unknown>,
 ): unknown {
-  return submittedPayloads(payload).find((record) =>
+  return limitlessClobSubmittedPayloads(payload).find((record) =>
     Object.hasOwn(record, "_hunchLimitlessClob"),
   )?._hunchLimitlessClob;
 }
