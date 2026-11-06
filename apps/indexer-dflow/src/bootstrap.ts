@@ -2,7 +2,7 @@ import { chunkArray } from "@hunch/shared";
 import PQueue from "p-queue";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import {
-  buildTopMarketsText,
+  buildEmbeddingEventTitles,
   claimDuePriceRefreshTokens,
   clampHotTokenProbeLimit,
   enqueueEmbedItems,
@@ -2012,11 +2012,10 @@ async function processEvents(
         list.push(row);
         marketsByEvent.set(row.event_id, list);
       }
-      const topMarketsByEvent = new Map<string, string>();
+      const topMarketsByEvent = new Map<string, string[]>();
       for (const row of eventRowsForWrite) {
         const markets = marketsByEvent.get(row.id) ?? [];
-        const topMarkets = buildTopMarketsText(markets, row.title);
-        if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
+        topMarketsByEvent.set(row.id, buildEmbeddingEventTitles(markets));
       }
       const embedEvents: EmbedQueueItem[] = eventRowsForWrite.map((row) => ({
         entity_type: "event",

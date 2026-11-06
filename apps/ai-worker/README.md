@@ -125,6 +125,41 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
   IDs/error codes, not full market payloads. Approximate Redis stream trimming may
   temporarily exceed the count/time target while bounded cleanup catches up.
 
+## Catalog invalidations and cache batches
+
+The stream is an invalidation log, not a count of required model calls. Producers
+fingerprint embedding input text, lifecycle status and relevant metadata. Price,
+volume, liquidity, refresh timestamp and source labels do not invalidate vectors.
+Event child titles use a stable candidate set, not liquidity/volume ranking.
+Terminal content changes do not enqueue another cleanup, but every accepted
+ACTIVE/CLOSED/SETTLED/reopen transition can produce a notification.
+
+Within a catalog batch, the final input for each kind/ID wins. Across concurrent
+producers, Lua atomically appends a compact type/ID notification and remembers its
+fingerprint. A changed input arriving during processing appends another message;
+ACK never clears producer state or erases this later update. Old stream entries
+remain compatible. No title, description or prompt is stored in producer state.
+
+Fingerprint keys (`ai:embed:enqueue:v2:<digest>`) expire after seven days to bound
+memory. Expiry may cause one harmless recheck. Overflow or failed append does not
+mark an input accepted, so a normal retry remains possible; the existing canonical
+reconciliation marker also repairs overflow. A cold rollout accepts one initial
+notification per entity, without clearing the existing backlog or fingerprints.
+The TTL bounds age, not cardinality: memory also depends on distinct entities
+accepted over those seven days, independently of the stream's 200,000-entry cap.
+Measure representative key sizes and Redis headroom during rollout; do not treat
+an empty stream as proof that producer fingerprint memory has been reclaimed.
+Read-only counters are in `<stream>:enqueue:stats:v2`: `enqueued`, `unchanged`,
+`overflow`. Initial warm-up is not proof of steady-state throughput.
+
+The worker reads metadata and commits cache hits/terminal cleanup in batches of
+at most 100. Each write batch is lease-fenced and rechecks every cached vector's
+hash, dimension and compatible generation before writes. Retry cleanup is in the
+same Lua call; a failure leaves the stream pending for normal reclaim. CLOSED
+vectors retain only their existing bounded seed TTL; other terminal/missing rows
+are removed. Existing serving TTL maintenance, canonical pre-publication checks,
+provider retries, financial accounting and memory admission are unchanged.
+
 `ai:embed:control:status` is exposed through the existing admin Vector Index page.
 Check `updatedAt`: this is a worker snapshot, not a continuously measured proof of
 coverage. Redis index counts alone are not coverage. The CLI backfill command is

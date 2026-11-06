@@ -19,6 +19,30 @@ export const GROUP = process.env.AI_EMBED_GROUP || "ai-embedder";
 export const DLQ = "ai:embed:dead";
 const LEASE = `${CONTROL}lease`;
 const TTL = 172800;
+const CACHE_BATCH = 100;
+type EmbeddingMetadata = [string | null, string | null, string | null, number];
+export type CachedEmbeddingCommit = { source: EmbeddingSource; hash: string };
+const COMMIT_LUA = `
+local function cache_valid(key,hash,generation,legacy)
+ local version=redis.call('HGET',key,'embedding_version')
+ return redis.call('HSTRLEN',key,'embedding')==4096 and redis.call('HGET',key,'text_hash')==hash and (version==generation or (legacy=='1' and version and string.find(version,'^intfloat/e5%-large%-v2@')==1))
+end
+local function commit(key,eligible,status,venue,hash,generation,bytes,timestamp,legacy,market_type)
+ if eligible=='1' then
+  if string.len(bytes)>0 then
+   redis.call('HSET',key,'embedding',bytes,'text_hash',hash,'embedding_version',generation)
+  elseif not cache_valid(key,hash,generation,legacy) then
+   return redis.error_reply('embedding_cache_changed')
+  end
+  redis.call('HSET',key,'status','ACTIVE','venue',venue,'updated_at',timestamp,'embedding_version',generation,'market_type',market_type)
+  if redis.call('TTL',key)<86400 then redis.call('EXPIRE',key,172800) end
+ elseif status=='CLOSED' and redis.call('EXISTS',key)==1 then
+  if redis.call('HGET',key,'status')~='CLOSED' then redis.call('HSET',key,'status','CLOSED') end
+  local ttl=redis.call('TTL',key)
+  if ttl<0 or ttl>172800 then redis.call('EXPIRE',key,172800) end
+ else redis.call('UNLINK',key) end
+ return 1
+end`;
 export function record(value: unknown): Record<string, unknown> {
   const xs = value as unknown[];
   return Object.fromEntries(
@@ -93,12 +117,74 @@ export class EmbeddingStore {
       );
   }
   async metadata(generation: EmbeddingGeneration, source: EmbeddingSource) {
-    return (await this.redis.sendCommand([
-      "EVAL",
-      "local m=redis.call('HMGET',KEYS[1],'text_hash','embedding_version','status'); m[4]=redis.call('HSTRLEN',KEYS[1],'embedding'); return m",
-      "1",
-      embeddingKey(generation, source.kind, source.id),
-    ])) as [string | null, string | null, string | null, number];
+    return (await this.metadataMany(generation, [source]))[0];
+  }
+  async metadataMany(
+    generation: EmbeddingGeneration,
+    sources: EmbeddingSource[],
+  ): Promise<EmbeddingMetadata[]> {
+    const result: EmbeddingMetadata[] = [];
+    for (let offset = 0; offset < sources.length; offset += CACHE_BATCH) {
+      const keys = sources
+        .slice(offset, offset + CACHE_BATCH)
+        .map((source) => embeddingKey(generation, source.kind, source.id));
+      result.push(
+        ...((await this.redis.sendCommand([
+          "EVAL_RO",
+          "local out={};for i,key in ipairs(KEYS) do local m=redis.call('HMGET',key,'text_hash','embedding_version','status');m[4]=redis.call('HSTRLEN',key,'embedding');out[i]=m end;return out",
+          String(keys.length),
+          ...keys,
+        ])) as EmbeddingMetadata[]),
+      );
+    }
+    return result;
+  }
+  async commitCachedMany(
+    generation: EmbeddingGeneration,
+    items: CachedEmbeddingCommit[],
+  ) {
+    for (let offset = 0; offset < items.length; offset += CACHE_BATCH) {
+      const batch = items.slice(offset, offset + CACHE_BATCH);
+      const keys = batch.flatMap(({ source }) => [
+        embeddingKey(generation, source.kind, source.id),
+        `${CONTROL}failure:${generation.id}:${source.kind}:${source.id}`,
+      ]);
+      await this.fenced(
+        `${COMMIT_LUA}
+local items=cjson.decode(ARGV[2])
+-- Validate every cached vector before any writes. Never acknowledge an expired,
+-- replaced or incompatible vector based on earlier batched metadata alone.
+for i,item in ipairs(items) do
+ if item.eligible=='1' and not cache_valid(KEYS[2+(i-1)*2],item.hash,ARGV[3],ARGV[5]) then return redis.error_reply('embedding_cache_changed') end
+end
+for i,item in ipairs(items) do
+ commit(KEYS[2+(i-1)*2],item.eligible,item.status,item.venue,item.hash,ARGV[3],'',ARGV[4],ARGV[5],item.market_type)
+ redis.call('UNLINK',KEYS[3+(i-1)*2])
+ redis.call('ZREM',KEYS[#KEYS],item.retry_member)
+end
+return #items`,
+        [...keys, `${CONTROL}retry-due`],
+        [
+          JSON.stringify(
+            batch.map(({ source, hash }) => ({
+              eligible: source.eligible ? "1" : "0",
+              status: source.status,
+              venue: source.venue,
+              hash,
+              market_type: source.marketType ?? "",
+              retry_member: JSON.stringify([
+                generation.id,
+                source.kind,
+                source.id,
+              ]),
+            })),
+          ),
+          generation.id,
+          String(Date.now()),
+          generation.legacy ? "1" : "0",
+        ],
+      );
+    }
   }
   async commit(
     generation: EmbeddingGeneration,
@@ -110,22 +196,7 @@ export class EmbeddingStore {
       ? embeddingVectorBuffer(vector, generation)
       : Buffer.alloc(0);
     await this.fenced(
-      `
-local key=KEYS[2]
-if ARGV[2]=='1' then
- if string.len(ARGV[7])>0 then
-  redis.call('HSET',key,'embedding',ARGV[7],'text_hash',ARGV[5],'embedding_version',ARGV[6])
- elseif redis.call('HSTRLEN',key,'embedding')~=4096 or redis.call('HGET',key,'text_hash')~=ARGV[5] or (redis.call('HGET',key,'embedding_version')~=ARGV[6] and ARGV[9]~='1') then
-  return redis.error_reply('embedding_cache_changed')
- end
- redis.call('HSET',key,'status','ACTIVE','venue',ARGV[4],'updated_at',ARGV[8],'embedding_version',ARGV[6],'market_type',ARGV[10])
- if redis.call('TTL',key)<86400 then redis.call('EXPIRE',key,172800) end
-elseif ARGV[3]=='CLOSED' and redis.call('EXISTS',key)==1 then
- redis.call('HSET',key,'status','CLOSED')
- local ttl=redis.call('TTL',key)
- if ttl<0 or ttl>172800 then redis.call('EXPIRE',key,172800) end
-else redis.call('UNLINK',key) end
-return 1`,
+      `${COMMIT_LUA}\nreturn commit(KEYS[2],unpack(ARGV,2))`,
       [embeddingKey(generation, source.kind, source.id)],
       [
         source.eligible ? "1" : "0",

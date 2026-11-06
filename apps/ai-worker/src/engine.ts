@@ -41,6 +41,7 @@ import {
   EmbeddingStore,
   record,
   compareStreamId,
+  type CachedEmbeddingCommit,
 } from "./store.js";
 
 type Coverage = { eligible: number; verified: number; missing: number };
@@ -430,13 +431,20 @@ redis.call('SET',KEYS[3],'1'); return 1`,
     let repaired = 0;
     let verifiedId: string | undefined;
     let invalid = 0;
+    const cacheSources = sources.filter(
+      (source) => source.eligible && cleanEmbeddingText(source.title),
+    );
+    const cachedMetadata = await this.store.metadataMany(
+      generation,
+      cacheSources,
+    );
+    const metadataById = new Map(
+      cacheSources.map((source, index) => [source.id, cachedMetadata[index]]),
+    );
+    const cachedCommits: CachedEmbeddingCommit[] = [];
     for (const source of sources) {
       if (!source.eligible) {
-        await this.store.commit(generation, source, "");
-        await this.store.fenced("return redis.call('UNLINK',KEYS[2])", [
-          `${CONTROL}failure:${generation.id}:${kind}:${source.id}`,
-        ]);
-        await this.clearRetry(generation, kind, source.id);
+        cachedCommits.push({ source, hash: "" });
         continue;
       }
       if (!cleanEmbeddingText(source.title)) {
@@ -453,18 +461,16 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       }
       const text = buildEmbeddingText(source, generation),
         hash = embeddingTextHash(text);
-      const [previous, version, , bytes] = await this.store.metadata(
-        generation,
-        source,
-      );
+      const metadata = metadataById.get(source.id);
+      if (!metadata) throw new Error("embedding_cache_metadata_missing");
+      const [previous, version, , bytes] = metadata;
       if (
         bytes === generation.dimensions * 4 &&
         previous === hash &&
         (version === generation.id ||
           (generation.legacy && version?.startsWith("intfloat/e5-large-v2@")))
       ) {
-        await this.store.commit(generation, source, hash);
-        await this.clearRetry(generation, kind, source.id);
+        cachedCommits.push({ source, hash });
         verified++;
         verifiedId ??= source.id;
         continue;
@@ -480,6 +486,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
         retryAt: failure?.hash === hash ? (failure.retryAt ?? 0) : 0,
       });
     }
+    await this.store.commitCachedMany(generation, cachedCommits);
     if (verify)
       return {
         eligible: sources.filter((s) => s.eligible).length,
