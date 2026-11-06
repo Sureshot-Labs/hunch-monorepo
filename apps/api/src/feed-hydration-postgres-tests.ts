@@ -180,6 +180,7 @@ try {
       'book-crossed', 'book-inconsistent', 'book-no-only', 'book-old-top',
       'book-historical-null', 'book-historical-zero', 'book-historical-inconsistent',
       'book-cached-null', 'book-cached-old-version', 'book-cache-missing'
+      , 'book-current-zero', 'book-historical-no-only'
     ]) as fixture_book(market_id);
     insert into unified_markets(id, event_id, venue_market_id, title, venue, metadata, updated_at)
     values
@@ -220,7 +221,10 @@ try {
     values
       ('book-canonical', 'canonical-z', 'YES', '2026-09-24T12:00:00Z'),
       ('book-canonical', 'canonical-a', 'YES', '2026-09-24T12:00:00Z'),
-      ('book-canonical', 'canonical-0-null-date', 'YES', null);
+      ('book-canonical', 'canonical-0-null-date', 'YES', null),
+      ('book-canonical', 'canonical-no-z', 'NO', '2026-09-24T12:00:00Z'),
+      ('book-canonical', 'canonical-no-a', 'NO', '2026-09-24T12:00:00Z'),
+      ('book-canonical', 'canonical-no-null-date', 'NO', null);
     -- Exercise duplicate tokens across selected rows: token_set deduplication
     -- must not alter cardinality when replaced by token-keyed direct joins.
     update unified_market_tokens set token_id = 'canonical-a'
@@ -235,7 +239,10 @@ try {
     update unified_token_top_latest set best_bid = 0.69, best_ask = 0.71
     where token_id = 'canonical-a';
     update unified_token_top_latest set best_bid = 0.29, best_ask = 0.31
-    where token_id in ('book-canonical:no', 'book-shared:no', 'book-no-only:no');
+    where token_id in ('canonical-no-a', 'book-shared:no', 'book-no-only:no');
+    update unified_token_top_latest set best_bid = 0, best_ask = 0 where token_id = 'book-current-zero:yes';
+    update unified_token_top_latest set best_bid = 1, best_ask = 1 where token_id = 'book-current-zero:no';
+    delete from unified_token_change_24h where token_id = 'book-historical-no-only:yes';
     delete from unified_token_top_latest
     where token_id in ('book-missing-top:yes', 'book-missing-top:no', 'book-no-only:yes',
       'amm-stale:yes', 'amm-stale:no', 'amm-fresh:yes', 'amm-fresh:no', 'clob-stale:yes', 'clob-stale:no');
@@ -296,11 +303,13 @@ try {
       legacy,
       `${label}: explicit direct differs from legacy`,
     );
-    assert.equal(
-      new Set(direct.map((row) => row.market_uuid)).size,
-      direct.length,
-      `${label}: duplicate hydrated markets`,
-    );
+    if (new Set(eventIds).size === eventIds.length) {
+      assert.equal(
+        new Set(direct.map((row) => row.market_uuid)).size,
+        direct.length,
+        `${label}: duplicate hydrated markets`,
+      );
+    }
     equivalenceCases += 1;
     return defaultRows;
   }
@@ -339,6 +348,10 @@ try {
     300,
   );
   assert.equal(marketRow(baseline, "book-canonical").token_yes, "canonical-a");
+  assert.equal(
+    marketRow(baseline, "book-canonical").token_no,
+    "canonical-no-a",
+  );
   assert.equal(marketRow(baseline, "book-shared").token_yes, "canonical-a");
   assert.equal(marketRow(baseline, "book-no-map").token_yes, null);
   assert.equal(marketRow(baseline, "book-no-map").token_no, null);
@@ -346,6 +359,8 @@ try {
   assertApprox(marketRow(baseline, "book-shared").change_24h, 0.4);
   assertApprox(marketRow(baseline, "book-no-only").change_24h, 0.4);
   assertApprox(marketRow(baseline, "book-old-top").change_24h, 0.2);
+  assertApprox(marketRow(baseline, "book-current-zero").change_24h, -1);
+  assertApprox(marketRow(baseline, "book-historical-no-only").change_24h, 0.2);
   for (const marketId of [
     "book-no-map",
     "book-missing-top",
@@ -406,6 +421,7 @@ try {
   for (const selectedPage of [
     selectedEvents.slice(2, 4),
     [...selectedEvents].reverse(),
+    ["event-books", "event-books", "event-ties"],
     [],
     ["absent-event"],
   ]) {
@@ -563,6 +579,208 @@ try {
   }
   console.log(
     "ok - PostgreSQL 16 event prefixes preserve sparse, resumed, empty and tied pages",
+  );
+
+  // A full event page plus unrelated catalog rows checks the parameterized
+  // access paths, not just correctness on a tiny table that fits a seq scan.
+  await client.query(`
+    insert into unified_events(id, title) select 'batch-event-' || fixture_no, 'Batch event'
+      from generate_series(1, 100) fixture_series(fixture_no);
+    insert into unified_events(id, title) values ('unselected-event', 'Unselected');
+    insert into unified_markets(id, event_id, venue_market_id, title)
+      select 'batch-market-' || fixture_no, 'batch-event-' || (1 + (fixture_no - 1) / 10),
+        'batch-market-' || fixture_no, 'Selected market'
+      from generate_series(1, 1000) fixture_series(fixture_no);
+    insert into unified_markets(id, event_id, venue_market_id, title)
+      select 'unselected-' || fixture_no, 'unselected-event', 'unselected-' || fixture_no, 'Unselected market'
+      from generate_series(1, 60000) fixture_series(fixture_no);
+    insert into polymarket_markets(id) select venue_market_id from unified_markets
+      where id like 'batch-market-%' or id like 'unselected-%';
+    insert into unified_market_tokens(market_id, token_id, outcome_side)
+      select fixture_market.id, fixture_market.id || ':' || fixture_side.side_label, fixture_side.side_label
+      from unified_markets fixture_market cross join (values ('YES'), ('NO')) fixture_side(side_label)
+      where fixture_market.id like 'batch-market-%' or fixture_market.id like 'unselected-%';
+    insert into unified_token_top_latest(token_id, best_bid, best_ask)
+      select token_id, 0.5, 0.5 from unified_market_tokens
+      where market_id like 'batch-market-%' or market_id like 'unselected-%';
+    insert into unified_token_change_24h(token_id, avg_mid_24h)
+      select token_id, 0.5 from unified_market_tokens
+      where market_id like 'batch-market-%' or market_id like 'unselected-%';
+    analyze unified_events; analyze unified_markets; analyze polymarket_markets;
+    analyze unified_market_tokens; analyze unified_token_top_latest; analyze unified_token_change_24h;
+  `);
+  const batchEvents = Array.from(
+    { length: 100 },
+    (_, index) => `batch-event-${index + 1}`,
+  );
+  const smallPlanPages = [
+    batchEvents,
+    batchEvents.slice(0, 20),
+    batchEvents.slice(20, 40),
+    ["absent-event", "batch-event-100"],
+    [],
+  ];
+  const fanoutPage = ["unselected-event", ...batchEvents.slice(0, 99)];
+  const planCases = [
+    ...smallPlanPages.map((eventIds) => ({
+      eventIds,
+      input: baseInputs,
+      expectedRows: eventIds.filter((id) => id !== "absent-event").length * 10,
+      eligibleChildren:
+        eventIds.filter((id) => id !== "absent-event").length * 10,
+    })),
+    {
+      eventIds: ["unselected-event"],
+      input: baseInputs,
+      expectedRows: 100,
+      eligibleChildren: 60000,
+    },
+    {
+      eventIds: fanoutPage,
+      input: baseInputs,
+      expectedRows: 1090,
+      eligibleChildren: 60990,
+    },
+    {
+      eventIds: fanoutPage,
+      input: { ...baseInputs, q: "Unselected market" },
+      expectedRows: 1090,
+      eligibleChildren: 60990,
+    },
+  ];
+  const sqlLiteral = (value: unknown): string => {
+    if (value === null) return "null";
+    if (Array.isArray(value))
+      return `array[${value.map(sqlLiteral).join(",")}]::text[]`;
+    if (typeof value === "number") return String(value);
+    assert.equal(typeof value, "string");
+    return `'${String(value).replaceAll("'", "''")}'`;
+  };
+  await client.query("set work_mem = '32MB'");
+  await client.query("set jit = off");
+  for (const { eventIds, input, expectedRows, eligibleChildren } of planCases) {
+    await assertEquivalent("bounded catalog page", input, eventIds);
+    // Capture the exact application SQL, including the real cap/filter binds.
+    // Empty HTTP pages deliberately short-circuit; parse an empty SQL execution
+    // too by binding an empty array to the nonempty captured statement.
+    let capturedSql = "";
+    let capturedParams: unknown[] = [];
+    const captureQuery = async (sql: string, params: unknown[] = []) => {
+      if (sql.trim().startsWith("with ")) {
+        capturedSql = sql;
+        capturedParams = params;
+      }
+      return { rows: [] };
+    };
+    await fetchFeedMarkets(
+      {
+        connect: async () => ({ query: captureQuery, release() {} }),
+      } as unknown as InfraPool,
+      input,
+      eventIds.length ? eventIds : ["absent-event"],
+    );
+    capturedParams[0] = eventIds;
+    for (const planMode of ["force_custom_plan", "force_generic_plan"]) {
+      await client.query(`set plan_cache_mode = '${planMode}'`);
+      await client.query(
+        `prepare fixture_feed_hydration_plan as ${capturedSql}`,
+      );
+      try {
+        const explained = await client.query(
+          `explain (analyze, buffers, format json) execute fixture_feed_hydration_plan(${capturedParams.map(sqlLiteral).join(",")})`,
+        );
+        const plan = explained.rows[0]["QUERY PLAN"][0].Plan;
+        assert.equal(plan["Actual Rows"], expectedRows);
+        let marketRowsRead = 0;
+        let mappingLoops = 0;
+        let searchMatchRows = 0;
+        const inspect = (
+          node: Record<string, unknown>,
+          insideMarketBase = false,
+        ) => {
+          const isMarketBase =
+            insideMarketBase || node["Subplan Name"] === "CTE market_base";
+          if (node["Relation Name"] === "unified_markets" && isMarketBase)
+            marketRowsRead +=
+              (Number(node["Actual Rows"]) +
+                Number(node["Rows Removed by Filter"] ?? 0) +
+                Number(node["Rows Removed by Index Recheck"] ?? 0)) *
+              Number(node["Actual Loops"]);
+          if (node["Relation Name"] === "unified_market_tokens")
+            mappingLoops += Number(node["Actual Loops"]);
+          // Search classification has several independent, bounded consumers.
+          // Here guard the ranking join specifically against one complete
+          // matches scan per selected event, not those separate consumers.
+          if (node["CTE Name"] === "direct_market_matches" && isMarketBase)
+            searchMatchRows +=
+              (Number(node["Actual Rows"]) +
+                Number(node["Rows Removed by Filter"] ?? 0)) *
+              Number(node["Actual Loops"]);
+          if (node["Node Type"] === "Seq Scan") {
+            // The common-term search intentionally matches nearly the whole
+            // fixture. Its separate search CTE may correctly scan that scope
+            // once; it must not become a per-event catalog scan.
+            const isSearchScan =
+              input.q &&
+              !isMarketBase &&
+              node["Relation Name"] === "unified_markets";
+            if (isSearchScan && !node["Parallel Aware"])
+              assert.ok(
+                Number(node["Actual Loops"]) <= 1,
+                `Repeated search scan: ${JSON.stringify({ loops: node["Actual Loops"], rows: node["Actual Rows"], alias: node.Alias })}`,
+              );
+            assert.ok(
+              isSearchScan ||
+                ![
+                  "unified_markets",
+                  "unified_market_tokens",
+                  "unified_token_change_24h",
+                ].includes(String(node["Relation Name"])),
+              `${planMode}: unexpected catalog-wide scan of ${node["Relation Name"]}`,
+            );
+          }
+          for (const child of (node.Plans ?? []) as Record<string, unknown>[])
+            inspect(child, isMarketBase);
+        };
+        inspect(plan);
+        if (expectedRows > 0)
+          assert.ok(
+            marketRowsRead > 0,
+            "Expected parameterized market scan was not inspected",
+          );
+        assert.ok(
+          marketRowsRead <= eligibleChildren + eventIds.length,
+          `${planMode}: repeated market scans ${marketRowsRead} > ${eligibleChildren}`,
+        );
+        assert.ok(
+          mappingLoops <= expectedRows,
+          `${planMode}: mappings resolved before fanout cap: ${mappingLoops} > ${expectedRows}`,
+        );
+        if (input.q)
+          assert.ok(
+            searchMatchRows <= eligibleChildren,
+            `${planMode}: repeated full search CTE scans inside market_base: ${searchMatchRows} > ${eligibleChildren}`,
+          );
+        if (eligibleChildren >= 60000)
+          console.log(
+            JSON.stringify({
+              case: input.q ? "selected fanout search" : "selected fanout",
+              planMode,
+              rows: plan["Actual Rows"],
+              marketRowsRead,
+              mappingLoops,
+              searchMatchRows,
+              hitBlocks: plan["Shared Hit Blocks"],
+              readBlocks: plan["Shared Read Blocks"],
+            }),
+          );
+      } finally {
+        await client.query("deallocate fixture_feed_hydration_plan");
+      }
+    }
+  }
+  console.log(
+    `ok - ${equivalenceCases} PostgreSQL 16 hydration equivalence cases; ${planCases.length * 2} custom/generic full, resumed, sparse, empty and selected-fanout plans use bounded lookups`,
   );
 } finally {
   try {

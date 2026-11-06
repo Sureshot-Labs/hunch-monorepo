@@ -51,6 +51,7 @@ assert.deepEqual(
 assert.deepEqual(selectDiscoveryIds([{ ids: ["a"], share: 1 }], 0), []);
 
 import type { Pool } from "@hunch/infra";
+import { canonicalMarketTokenPairSql } from "./repos/canonical-market-token-sql.js";
 
 import {
   buildObservedCanonicalMarketProbabilityPredicateSql,
@@ -71,6 +72,40 @@ assert.match(observedMarket, /abs\(/i);
 assert.match(observedMarket, /1 -/i);
 assert.doesNotMatch(observedMarket, /m\.best_bid|m\.best_ask/i);
 console.log("ok - feed probability uses observed canonical token tops");
+
+assert.match(
+  canonicalMarketTokenPairSql("selected_market"),
+  /distinct on \(umt.outcome_side\)/,
+);
+assert.match(
+  canonicalMarketTokenPairSql("selected_market"),
+  /umt.updated_at desc nulls last, umt.token_id asc/,
+);
+assert.throws(
+  () => canonicalMarketTokenPairSql("m; drop table x"),
+  /Unsafe SQL alias/,
+);
+assert.throws(() => canonicalMarketTokenPairSql("m.id"), /Unsafe SQL alias/);
+await fetchFeedMarkets(
+  {
+    connect: async () => {
+      throw new Error("Empty page must not query");
+    },
+  } as unknown as Pool,
+  {
+    limit: 100,
+    offset: 0,
+    minVol: 0,
+    minLiquidity: 0,
+    view: "events",
+    sort: "trending_v2",
+    sortDir: "desc",
+    nowParam: "2026-09-21T12:00:00Z",
+    sevenDaysAgo: "2026-09-14T12:00:00Z",
+    sevenDaysFromNow: "2026-09-28T12:00:00Z",
+  },
+  [],
+);
 
 for (const directTokenLookup of [undefined, false, true]) {
   for (const cachedChange of [false, true]) {
@@ -102,17 +137,37 @@ for (const directTokenLookup of [undefined, false, true]) {
     assert.match(captured, /market_rank <= \$\d+/);
     assert.match(captured, /market_base as materialized/);
     if (directTokenLookup !== false) {
+      assert.match(captured, /event_base as materialized/);
+      assert.match(captured, /join event_base e on e.id = eo.event_id/);
+      assert.match(
+        captured,
+        /from \(select distinct event_id from event_order\) selected_event/,
+      );
+      assert.match(captured, /m.event_id = selected_event.event_id/);
+      assert.match(captured, /distinct on \(umt.outcome_side\)/);
       assert.doesNotMatch(captured, /latest_book as|book_24h as|token_set as/);
       assert.match(captured, /left join unified_token_top_latest yes_top/);
       assert.match(captured, /left join unified_token_top_latest no_top/);
       assert.equal(
         (
           captured.match(
-            /from unified_token_change_24h where avg_mid_24h is not null/g,
+            /from unified_token_change_24h\s+where token_id = m.resolved_token_(?:yes|no)/g,
           ) ?? []
         ).length,
         cachedChange ? 0 : 2,
       );
+      if (!cachedChange) {
+        assert.equal(
+          (
+            captured.match(
+              /and feed_current_probability.probability is not null/g,
+            ) ?? []
+          ).length,
+          2,
+        );
+        assert.match(captured, /feed_historical_probability.probability = 0/);
+        assert.doesNotMatch(captured, /unified_book_top\b/);
+      }
     } else {
       assert.match(captured, /latest_book as materialized/);
       if (!cachedChange) assert.match(captured, /book_24h as materialized/);

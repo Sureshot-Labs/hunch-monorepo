@@ -20,7 +20,10 @@ import {
 } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams } from "../server-types.js";
-import { canonicalMarketTokenIdSql } from "./canonical-market-token-sql.js";
+import {
+  canonicalMarketTokenIdSql,
+  canonicalMarketTokenPairSql,
+} from "./canonical-market-token-sql.js";
 
 export type FeedInputs = {
   limit: number;
@@ -3698,6 +3701,8 @@ export async function fetchFeedMarkets(
   eventIds: string[],
   options?: { useCachedChange24h?: boolean; directTokenLookup?: boolean },
 ): Promise<FeedMarketRow[]> {
+  if (eventIds.length === 0) return [];
+  const directTokenLookup = options?.directTokenLookup ?? true;
   const useCachedChange24h =
     inputs.sort === "change24h" && options?.useCachedChange24h === true;
   const { params, add } = createParamBuilder();
@@ -3989,6 +3994,13 @@ export async function fetchFeedMarkets(
       )
     `
     : "";
+  const rankedMarketWhere = directTokenLookup
+    ? marketWhere.map((predicate) =>
+        predicate === `m.event_id = ANY(${eventIdsParam}::text[])`
+          ? "m.event_id = selected_event.event_id"
+          : predicate,
+      )
+    : marketWhere;
   const rankedMarketSql = `
     select
       m.id, m.event_id, m.venue, m.venue_market_id, m.title, m.market_type,
@@ -4003,17 +4015,31 @@ export async function fetchFeedMarkets(
     left join polymarket_markets pm_filter
       on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
     ${directMarketJoin}
-    where ${marketWhere.join(" and ")}
+    where ${rankedMarketWhere.join(" and ")}
     ${directMarketFilter}
   `;
 
-  const marketBaseSql = `
+  const marketLimitParam = add(perEventMarketLimit);
+  const marketBaseSql = directTokenLookup
+    ? `
+    select selected_market.*,
+      canonical_pair.token_yes as resolved_token_yes,
+      canonical_pair.token_no as resolved_token_no
+    from (select distinct event_id from event_order) selected_event
+    cross join lateral (
+      select ranked_market.*
+      from (${rankedMarketSql}) ranked_market
+      where ranked_market.market_rank <= ${marketLimitParam}
+    ) selected_market
+    cross join lateral (${canonicalMarketTokenPairSql("selected_market")}) canonical_pair
+  `
+    : `
     select
       m.*,
       ${canonicalMarketTokenIdSql("m", "YES")} as resolved_token_yes,
       ${canonicalMarketTokenIdSql("m", "NO")} as resolved_token_no
     from (${rankedMarketSql}) m
-    where m.market_rank <= ${add(perEventMarketLimit)}
+    where m.market_rank <= ${marketLimitParam}
   `;
   const currentYesMidExpr = buildObservedCanonicalProbabilityFromTopSql({
     yesAlias: "yes_top",
@@ -4023,15 +4049,25 @@ export async function fetchFeedMarkets(
     yesAlias: "yes_24h",
     noAlias: "no_24h",
   });
+  // FROM joins otherwise read history even when CASE must return NULL for an
+  // unavailable current canonical probability. Fence each expression once and
+  // make that proven-NULL case skip only the unnecessary historical I/O.
+  const gateHistoricalLookup = directTokenLookup && !useCachedChange24h;
+  const currentProbability = gateHistoricalLookup
+    ? "feed_current_probability.probability"
+    : currentYesMidExpr;
+  const historicalProbability = gateHistoricalLookup
+    ? "feed_historical_probability.probability"
+    : historicalYesMidExpr;
   const change24hExpr = `
     case
-      when ${currentYesMidExpr} is null
-        or ${historicalYesMidExpr} is null
-        or ${historicalYesMidExpr} = 0
+      when ${currentProbability} is null
+        or ${historicalProbability} is null
+        or ${historicalProbability} = 0
         then null
       else
-        (${currentYesMidExpr} - ${historicalYesMidExpr})
-        / ${historicalYesMidExpr}
+        (${currentProbability} - ${historicalProbability})
+        / ${historicalProbability}
     end
   `;
 
@@ -4044,8 +4080,26 @@ export async function fetchFeedMarkets(
   const bookSnapshot = buildFeedBookSnapshotCtes({
     nowParam,
     include24h: !useCachedChange24h,
-    directTokenLookup: options?.directTokenLookup ?? true,
+    directTokenLookup,
   });
+  const historyJoins = gateHistoricalLookup
+    ? `
+    left join lateral (select ${currentYesMidExpr} as probability offset 0) feed_current_probability on true
+    ${["yes", "no"]
+      .map(
+        (side) => `left join lateral (
+      select avg_mid_24h as best_bid, avg_mid_24h as best_ask
+      from unified_token_change_24h
+      where token_id = m.resolved_token_${side}
+        and avg_mid_24h is not null
+        and feed_current_probability.probability is not null
+      offset 0
+    ) ${side}_24h on true`,
+      )
+      .join("\n")}
+    left join lateral (select ${historicalYesMidExpr} as probability offset 0) feed_historical_probability on true
+  `
+    : `${bookSnapshot.yes24hJoin}\n${bookSnapshot.no24hJoin}`;
   const limitlessAmmFallbackAllowedExpr = buildLimitlessAmmFallbackAllowedExpr(
     nowParam,
     "yes_top",
@@ -4064,6 +4118,17 @@ export async function fetchFeedMarkets(
   const withParts: string[] = [];
   if (directMarketSearchCtes.length) withParts.push(...directMarketSearchCtes);
   withParts.push(`event_order as (${eventOrderSql})`);
+  if (directTokenLookup) {
+    // A generic plan can underestimate market fanout and otherwise fetch the
+    // same event heap row once per child. Read each selected event only once.
+    withParts.push(`event_base as materialized (
+      select e.id, e.title, e.duration_minutes, e.category, e.start_date, e.end_date,
+        e.liquidity, e.open_interest, e.volume_total, e.volume_24h,
+        e.slug, e.image, e.icon, e.metadata
+      from (select distinct event_id from event_order) selected_event
+      join unified_events e on e.id = selected_event.event_id
+    )`);
+  }
   // Resolve canonical token IDs once per selected market. Direct price joins
   // otherwise inline this CTE and repeat the correlated mapping lookups.
   withParts.push(`market_base as materialized (${marketBaseSql})`);
@@ -4133,12 +4198,11 @@ export async function fetchFeedMarkets(
       m.updated_at as last_update,
       m.created_at as market_created_at
     from event_order eo
-    join unified_events e on e.id = eo.event_id
+    join ${directTokenLookup ? "event_base" : "unified_events"} e on e.id = eo.event_id
     join market_base m on m.event_id = e.id
     ${bookSnapshot.yesTopJoin}
-    ${bookSnapshot.yes24hJoin}
     ${bookSnapshot.noTopJoin}
-    ${bookSnapshot.no24hJoin}
+    ${historyJoins}
     ${change24hCacheJoin}
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
