@@ -600,6 +600,15 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
     }),
     inspectPreparation: async () => preparation(),
     prepare: async () => preparationRun(),
+    admitPreparationAction: async (_userId, input) => ({
+      runId: input.runId,
+      actionId: input.actionId,
+      admitted: false,
+      requestKeyMatches: false,
+      action: null,
+      executionKey: null,
+      delivery: "client",
+    }),
     preparationRun: async () => preparationRun(),
     reportPreparationAction: async () => ({
       ...preparationRun(),
@@ -1784,6 +1793,110 @@ await test("preparation creates a durable server run without a client operation 
     assert.equal(response.json().runId, preparationRun().runId);
     assert.equal(response.json().status, "action_required");
     assert.equal(response.json().actionAttempts.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("admission protocol hides execution payload and private journal from prepare and GET", async () => {
+  const base = preparationRun();
+  const protocolRun = {
+    ...base,
+    request: {
+      ...base.request,
+      executionJournal: { version: 1 as const, admissions: {} },
+    },
+  };
+  let requestedVersion: 1 | undefined;
+  const app = await buildApp({
+    prepare: async (_owner, input) => {
+      requestedVersion = input.admissionProtocolVersion;
+      return protocolRun;
+    },
+    preparationRun: async () => protocolRun,
+  });
+  try {
+    const prepared = await app.inject({
+      method: "POST",
+      url: "/funding/preparation/prepare",
+      payload: {
+        venueBindingOptionId: base.request.venueBindingOptionId,
+        purpose: "fund",
+        marketContextId: null,
+        marketClass: null,
+        expectedInspectionRevision: base.inspectionRevision,
+        admissionProtocolVersion: 1,
+      },
+    });
+    assert.equal(prepared.statusCode, 200);
+    assert.equal(requestedVersion, 1);
+    for (const response of [
+      prepared,
+      await app.inject({
+        method: "GET",
+        url: `/funding/preparation/runs/${base.runId}`,
+      }),
+    ]) {
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().admissionProtocolVersion, 1);
+      assert.deepEqual(response.json().actions, []);
+      assert.equal(response.json().actionAttempts[0]?.action, null);
+      assert.doesNotMatch(
+        response.body,
+        /executionJournal|keyHash|senderWalletId/,
+      );
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+await test("admission derives its owner from auth and rejects execution authority fields", async () => {
+  const base = preparationRun();
+  const action = preparedAction();
+  let observedOwner: string | null = null;
+  const app = await buildApp({
+    admitPreparationAction: async (owner, input) => {
+      observedOwner = owner;
+      return {
+        runId: input.runId,
+        actionId: input.actionId,
+        admitted: true,
+        requestKeyMatches: true,
+        action,
+        executionKey: "scoped_execution_12345678",
+        delivery: "client",
+      };
+    },
+  });
+  try {
+    const url = `/funding/preparation/runs/${base.runId}/actions/${action.actionId}/admit`;
+    const response = await app.inject({
+      method: "POST",
+      url,
+      payload: { requestKey: "a".repeat(32) },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedOwner, USER_ID);
+    assert.equal(response.json().action.actionId, action.actionId);
+    assert.doesNotMatch(response.body, /keyHash|"requestKey":/);
+    for (const extra of [
+      { userId: USER_ID },
+      { executionMode: "web_client" },
+      { signer: "0xattacker" },
+      { action },
+      { executionJournal: { version: 1 } },
+    ])
+      assert.equal(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            payload: { requestKey: "a".repeat(32), ...extra },
+          })
+        ).statusCode,
+        400,
+      );
   } finally {
     await app.close();
   }

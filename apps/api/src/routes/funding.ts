@@ -62,6 +62,7 @@ import {
 import type {
   FundingPreparationActionReport,
   FundingPreparationRun,
+  FundingPreparationAdmissionResult,
 } from "../funding/persistence/funding-preparation-run-repository.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import {
@@ -89,6 +90,8 @@ import {
   fundingPreparationInspectResponseSchema,
   fundingPreparationActionParamsSchema,
   fundingPreparationActionReportRequestSchema,
+  fundingPreparationAdmissionRequestSchema,
+  fundingPreparationAdmissionResponseSchema,
   fundingPreparationPrepareRequestSchema,
   fundingPreparationPrepareResponseSchema,
   fundingPreparationRunParamsSchema,
@@ -207,8 +210,13 @@ export type FundingRouteDependencies = Readonly<{
       controllerWalletRef?: string | null;
       operationId?: string;
       expectedInspectionRevision: string;
+      admissionProtocolVersion?: 1;
     }>,
   ): Promise<FundingPreparationRun>;
+  admitPreparationAction(
+    userId: string,
+    input: Readonly<{ runId: string; actionId: string; requestKey: string }>,
+  ): Promise<FundingPreparationAdmissionResult>;
   preparationRun(
     userId: string,
     runId: string,
@@ -376,16 +384,19 @@ function publicPreparationRun(run: FundingPreparationRun) {
       "funding preparation run is not materialized",
     );
   }
+  const requiresAdmission = run.request.executionJournal?.version === 1;
   return {
     runId: run.runId,
     status: run.status,
     inspectionRevision: run.inspectionRevision,
-    actions: run.actions.map((attempt) => attempt.action),
+    actions: requiresAdmission
+      ? []
+      : run.actions.map((attempt) => attempt.action),
     actionAttempts: run.actions.map((attempt) => ({
       actionId: attempt.actionId,
       ordinal: attempt.ordinal,
       actionFingerprint: attempt.actionFingerprint,
-      action: attempt.action,
+      action: requiresAdmission ? null : attempt.action,
       state: attempt.state,
       broadcastMayHaveOccurred: attempt.broadcastMayHaveOccurred,
       transactionReference: attempt.transactionReference,
@@ -396,6 +407,7 @@ function publicPreparationRun(run: FundingPreparationRun) {
     expiresAt: run.expiresAt.toISOString(),
     resolvedAt: run.resolvedAt?.toISOString() ?? null,
     replayed: run.replayed,
+    admissionProtocolVersion: requiresAdmission ? (1 as const) : null,
   };
 }
 
@@ -614,6 +626,41 @@ export function registerFundingRoutes(
       fundingApiErrorResponseSchema,
     ),
   };
+
+  z.post(
+    "/funding/preparation/runs/:runId/actions/:actionId/admit",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingPreparationActionParamsSchema,
+        body: fundingPreparationAdmissionRequestSchema,
+        response: { 200: fundingPreparationAdmissionResponseSchema, ...errors },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "preparation-admit",
+          logMessage: "Funding preparation admission failed",
+          publicError: "Wallet action could not be admitted",
+        },
+        async (userId) => {
+          const result = await dependencies.admitPreparationAction(userId, {
+            ...request.params,
+            requestKey: request.body.requestKey,
+          });
+          return reply.send(
+            fundingPreparationAdmissionResponseSchema.parse({
+              ok: true,
+              ...result,
+            }),
+          );
+        },
+      ),
+  );
 
   z.get(
     "/funding/capabilities",
@@ -1319,6 +1366,8 @@ export function registerFundingRoutes(
               outcome: request.body.outcome,
               transactionReference: request.body.transactionReference,
               networkFeeRaw: request.body.actualCosts.networkFeeRaw,
+              admissionKey: request.body.admissionKey,
+              notStartedReason: request.body.notStartedReason,
             },
           });
           return reply.send(
@@ -1645,8 +1694,10 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
     revokeWithdrawalDestination: (userId, recipientId) =>
       runtime.revokeWithdrawalDestination(userId, recipientId),
     inspectPreparation: (userId, request) =>
-      runtime.inspectPreparation(userId, request),
+      runtime.inspectPreparation(userId, request, { forceFresh: true }),
     prepare: (userId, request) => runtime.prepare(userId, request),
+    admitPreparationAction: (userId, input) =>
+      runtime.admitPreparationAction(userId, input),
     preparationRun: (userId, runId) => runtime.preparationRun(userId, runId),
     reportPreparationAction: (userId, input) =>
       runtime.reportPreparationAction(userId, input),

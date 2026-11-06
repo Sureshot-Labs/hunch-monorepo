@@ -32,6 +32,12 @@ import {
 } from "../funding/execution/embedded-funding-submission.js";
 import { pool } from "../db.js";
 import {
+  inspectEmbeddedPreparationAdmission,
+  beginPreparationProviderDispatch,
+  journalPreparationProviderAcceptance,
+  journalPreparationProviderRejection,
+} from "../funding/preparation/embedded-admission.js";
+import {
   admitEmbeddedPositionSubmission,
   beginEmbeddedPositionDispatch,
   journalEmbeddedPositionAcceptance,
@@ -2705,6 +2711,21 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             "Prepared previous-frontend sponsored withdrawal",
           );
         }
+        const preparationAdmission = await inspectEmbeddedPreparationAdmission(
+          pool,
+          user.id,
+          request.body.executionKey,
+          {
+            kind: "ethereum",
+            signer: context.signer,
+            ...request.body,
+          },
+        );
+        if (preparationAdmission?.acceptedReference)
+          throw new FundingPersistenceError(
+            "invalid_state_transition",
+            "This preparation is already submitted; read its status instead of signing again",
+          );
         const requests = prepareEmbeddedEthereumTransactionRequests({
           context,
           chainId: request.body.chainId,
@@ -2855,6 +2876,24 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             embeddedEvmResult(context.signer, request.body.chainId, reference),
           );
         }
+        const preparationSubmission = await inspectEmbeddedPreparationAdmission(
+          pool,
+          user.id,
+          request.body.executionKey,
+          {
+            kind: "ethereum",
+            signer: context.signer,
+            ...request.body,
+          },
+        );
+        if (preparationSubmission?.acceptedReference)
+          return reply.send(
+            embeddedEvmResult(
+              context.signer,
+              request.body.chainId,
+              preparationSubmission.acceptedReference,
+            ),
+          );
         const positionSubmission = await admitEmbeddedPositionSubmission(
           pool,
           user.id,
@@ -2891,7 +2930,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             ) +
             (positionSubmission
               ? `:position:${positionSubmission.operationId}:${positionSubmission.attemptNumber}`
-              : ""),
+              : preparationSubmission
+                ? `:preparation:${preparationSubmission.scope.admissionId}`
+                : ""),
           redis: await getRedis(),
           run: async () => {
             const requests = prepareEmbeddedEthereumTransactionRequests({
@@ -2903,7 +2944,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               executionMode: request.body.executionMode,
               transactions: request.body.transactions,
             });
-            if (positionSubmission) {
+            if (positionSubmission || preparationSubmission) {
               assertEmbeddedFundingAuthorizationSignatures(
                 requests,
                 request.body.signedRequests,
@@ -2913,6 +2954,16 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 user.id,
                 positionSubmission,
               );
+              await beginPreparationProviderDispatch(
+                pool,
+                user.id,
+                preparationSubmission?.scope ?? null,
+                {
+                  kind: "ethereum",
+                  signer: context.signer,
+                  ...request.body,
+                },
+              );
             }
             const execution = await executeEmbeddedEthereumTransactionRequests({
               chainId: request.body.chainId,
@@ -2920,6 +2971,13 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               returnOnAccepted: request.body.returnOnAccepted,
               signatures: request.body.signedRequests,
             }).catch(async (error: unknown) => {
+              await journalPreparationProviderRejection(
+                pool,
+                user.id,
+                preparationSubmission?.scope ?? null,
+                requests.length,
+                error,
+              );
               await journalEmbeddedPositionAuthorizationRejection(
                 pool,
                 user.id,
@@ -2933,6 +2991,12 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               pool,
               user.id,
               positionSubmission,
+              execution.transactionReferences,
+            );
+            await journalPreparationProviderAcceptance(
+              pool,
+              user.id,
+              preparationSubmission?.scope ?? null,
               execution.transactionReferences,
             );
             return {
@@ -2949,6 +3013,12 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           pool,
           user.id,
           positionSubmission,
+          result.transactionReferences,
+        );
+        await journalPreparationProviderAcceptance(
+          pool,
+          user.id,
+          preparationSubmission?.scope ?? null,
           result.transactionReferences,
         );
         if (!request.body.returnOnAccepted && result.confirmationPending) {

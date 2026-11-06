@@ -2120,13 +2120,19 @@ export class WalletPreparationRuntimeService {
         operationId: string;
         expectedInspectionRevision: string;
       }>,
+    options: Readonly<{ forceFresh?: boolean }> = {},
   ): Promise<
     Readonly<{
       actions: readonly NormalizedAction[];
       controllerWalletRef: string;
     }>
   > {
-    const candidates = await this.preparedDestinations(input);
+    const candidates = await this.preparedDestinations(
+      input,
+      null,
+      false,
+      options.forceFresh === true,
+    );
     const candidate = candidates.find(
       (entry) =>
         entry.frozen.bindingOption.venueBindingOptionId ===
