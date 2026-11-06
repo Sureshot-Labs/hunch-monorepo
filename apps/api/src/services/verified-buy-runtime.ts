@@ -11,7 +11,8 @@ import { repairUnrecordedCopies } from "./verified-copy-repair.js";
 import { EvidenceBudgetExhausted, repairVerifiedBuys } from "./verified-buy.js";
 import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import { fetchSolanaParsedTransaction } from "./solana-rpc.js";
-import { fetchLimitlessOrderStatusBatch } from "./limitless-order-status.js";
+import { fetchLimitlessVerifiedBuyOrderStatus } from "./limitless-order-status.js";
+import { readCanonicalFinalizedBuyReceipt } from "./verified-buy-evm-receipt.js";
 import { fetchKalshiNormalizedOrderStatus } from "./kalshi-executions.js";
 import { recoverCopyPurchaseLinks } from "./social-copy.js";
 import { AuthService } from "../auth.js";
@@ -57,28 +58,7 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
         );
         providers.set(chainId, provider);
       }
-      consume();
-      const receipt = await provider.getTransactionReceipt(hash);
-      if (!receipt) return null;
-      consume();
-      const finalized = await provider.getBlock("finalized");
-      if (!finalized || receipt.blockNumber > finalized.number) return null;
-      consume();
-      const block = await provider.getBlock(receipt.blockHash);
-      if (!block || block.hash !== receipt.blockHash) return null;
-      return {
-        receipt: {
-          hash: receipt.hash,
-          status: receipt.status,
-          logs: receipt.logs.map((log) => ({
-            address: log.address,
-            topics: [...log.topics],
-            data: log.data,
-            index: log.index,
-          })),
-        },
-        timestamp: new Date(block.timestamp * 1000).toISOString(),
-      };
+      return readCanonicalFinalizedBuyReceipt(provider, hash, consume);
     },
     readFinalizedSolanaTransaction: async (signature) => {
       consume();
@@ -92,17 +72,10 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
     },
     readLimitlessOrder: async ({ providerOrderId, clientOrderId }) => {
       consume();
-      const found = await fetchLimitlessOrderStatusBatch([
-        { orderId: providerOrderId, clientOrderId },
-      ]);
-      return (
-        (clientOrderId
-          ? found.get(`client:${clientOrderId}`)
-          : providerOrderId
-            ? found.get(providerOrderId)
-            : null
-        )?.payload ?? null
-      );
+      return fetchLimitlessVerifiedBuyOrderStatus({
+        orderId: providerOrderId,
+        clientOrderId,
+      });
     },
     readDflowOrder: async (signature) => {
       consume();

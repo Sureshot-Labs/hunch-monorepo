@@ -18,6 +18,7 @@ import {
   isLimitlessTerminalRejectedStatus,
 } from "./limitless-order-result.js";
 import { resolveLimitlessClobEvidenceIdentity } from "./limitless-clob-evidence-identity.js";
+import { resolveLimitlessReceiptFallback } from "./verified-buy-limitless-receipt.js";
 type Db = Pick<Pool, "query">;
 export type VerifiedBuyObserverDependencies = {
   maxEvidenceItems: number;
@@ -25,6 +26,7 @@ export type VerifiedBuyObserverDependencies = {
   limitlessPositionContract: string;
   limitlessExchangeAddress: string;
   solanaCollateralMint: string;
+  /** Configured-chain reader: return null unless the receipt's block is canonical and finalized. */
   readEvmReceipt: (
     chainId: number,
     hash: string,
@@ -306,6 +308,44 @@ export async function observeVerifiedBuySource(
         clientOrderId: row.client_order_id,
       }),
     );
+    if (
+      status.status === "not_found" &&
+      status.orderId === row.venue_order_id &&
+      (!row.client_order_id || status.clientOrderId === row.client_order_id)
+    ) {
+      const fallback = resolveLimitlessReceiptFallback({
+        payload,
+        providerOrderId: row.venue_order_id,
+        clientOrderId: row.client_order_id,
+        owner: row.wallet_address,
+        tokenId: tokenId.replace(/^limitless:/, ""),
+        marketMetadata: row.market_metadata,
+        legacyExchangeAddress: deps.limitlessExchangeAddress,
+      });
+      if (!fallback.ready) return pending(fallback.reason);
+      deps.assertEvidenceBudget?.(3);
+      const observed = await deps.readEvmReceipt(8453, fallback.txHash);
+      if (!observed) return pending("receipt_pending");
+      // A stale locator to a failed attempt is not a definitive rejection of
+      // this purchase while the provider itself reports absence. Retry safely.
+      const evidence = parseEvmClobBuyEvidence({
+        receipt: observed.receipt,
+        txHash: fallback.txHash,
+        owner: row.wallet_address,
+        orderHash: fallback.orderHash,
+        providerOrderId: fallback.providerOrderId,
+        exchangeAddress: fallback.exchangeAddress,
+        positionContract: deps.limitlessPositionContract,
+        tokenId: tokenId.replace(/^limitless:/, ""),
+        chainId: 8453,
+        instrument,
+        purchasedAt: observed.timestamp,
+      });
+      const facts = evidence && combinePurchaseEvidence([evidence]);
+      return facts
+        ? { state: "verified", facts }
+        : pending("receipt_exact_fill_unavailable");
+    }
     if (
       status.status !== "found" ||
       (row.client_order_id && status.clientOrderId !== row.client_order_id)
