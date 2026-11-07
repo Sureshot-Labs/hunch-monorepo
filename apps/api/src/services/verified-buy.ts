@@ -5,6 +5,7 @@ import {
   type PurchaseRef,
   type VerifiedBuyFacts,
 } from "../schemas/social-trade.js";
+import { verifiedBuyRetrySeconds } from "./verified-buy-retry.js";
 import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
 
 export type { PurchaseRef, VerifiedBuyFacts } from "../schemas/social-trade.js";
@@ -336,9 +337,14 @@ export async function repairVerifiedBuys(
               ? JSON.stringify(observation.facts)
               : null,
             observation.state === "verified" ? null : observation.reason,
-            observation.state === "verified"
-              ? input.verifiedRecheckSeconds
-              : input.retrySeconds,
+            verifiedBuyRetrySeconds({
+              state: observation.state,
+              reason:
+                observation.state === "verified" ? null : observation.reason,
+              attempts: claim.verified_buy_attempts,
+              retrySeconds: input.retrySeconds,
+              verifiedRecheckSeconds: input.verifiedRecheckSeconds,
+            }),
             claim.user_id,
             claim.verified_buy_lease_token,
           ],

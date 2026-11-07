@@ -96,7 +96,7 @@ export const DEFAULT_SOCIAL_POLICY: Readonly<SocialPolicy> = Object.freeze({
   repairEnabled: true,
   repairBatchSize: 50,
   repairConcurrency: 2,
-  repairIntervalSeconds: 30,
+  repairIntervalSeconds: 5,
   repairLeaseSeconds: 120,
   repairRetrySeconds: 30,
   repairMaxRetrySeconds: 3_600,
