@@ -1,12 +1,7 @@
-import {
-  compareSocialDecimal,
-  subtractSocialDecimal,
-} from "./social-primitives.js";
+import { compareSocialDecimal } from "./social-primitives.js";
 
-// One USD atom of six-decimal settlement collateral. This only admits the
-// publication minimum; executed quantities, snapshots and accounting stay exact.
-const PUBLICATION_ROUNDING_USD = "0.000001";
-
+// Publication eligibility follows the USD cents shown to users. Economic facts,
+// snapshots, transfers and accounting retain their original exact quantities.
 export function meetsPublicationMinimum(
   actual: string,
   minimum: string,
@@ -17,10 +12,11 @@ export function meetsPublicationMinimum(
   )
     return false;
   if (compareSocialDecimal(actual, minimum) >= 0) return true;
-  return (
-    compareSocialDecimal(
-      subtractSocialDecimal(minimum, actual),
-      PUBLICATION_ROUNDING_USD,
-    ) <= 0
-  );
+  const [whole, fraction = ""] = actual.split(".");
+  const cents =
+    BigInt(whole) * 100n +
+    BigInt((fraction + "00").slice(0, 2)) +
+    ((fraction[2] ?? "0") >= "5" ? 1n : 0n);
+  const displayed = `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
+  return compareSocialDecimal(displayed, minimum) >= 0;
 }
