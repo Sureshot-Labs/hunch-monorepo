@@ -143,9 +143,15 @@ and missing cache rows; it does not remain pinned to the old maximum UUID.
    is deliberately nontransactional because it builds concurrent indexes.
 2. Deploy the API/worker image. Provide `DATABASE_URL` in
    `/hunch/prod/native-onboarding-worker` (or the explicitly selected equivalent
-   secret bundle), then run the worker with the optional Compose
-   `native-onboarding` profile. The new service is not started implicitly by
-   an existing deployment. Ranking/fanout/retention work with
+   secret bundle). Set `HUNCH_NATIVE_ONBOARDING_WORKER_ENABLED=true` in the
+   production deployment env file to opt in to the `native-onboarding` profile.
+   The setting defaults to false and is separate from Apple delivery. Normal
+   server/prebuilt deployments then recreate the worker on the new backend image
+   and verify its progress. Default no-build recreation also includes it;
+   an explicit `SERVICES=api` or finance-only repair stays scoped to those services.
+   An explicit native-only recreation requires the persistent activation setting.
+   Setting it false stops only the owned native worker during a normal deployment;
+   it does not clear preferences, cache or queues. Ranking/fanout/retention work with
    `HUNCH_APNS_DELIVERY_ENABLED=false`; Apple keys are not required in this mode
    and it sends no Apple requests.
 3. In Apple Developer, enable Push Notifications for App ID `trade.hunch.app`
@@ -155,8 +161,11 @@ and missing cache rows; it does not remain pinned to the old maximum UUID.
    bundle, retaining `DATABASE_URL`. The private key stays server-side. PEM newlines may be real
    newlines or escaped `\n`; never put the key into the iOS bundle or Git.
 5. Set `HUNCH_APNS_DELIVERY_ENABLED=true` and start/restart
-   `native-onboarding-worker`. Misconfigured credentials fail activation or
-   produce machine error codes; they do not silently disable user choices.
+   `native-onboarding-worker`. Missing/invalid Apple configuration emits
+   `native_push_configuration_failed` and marks delivery unavailable, but leaves
+   statistics and source processing running. Correct the secret and recreate only
+   this worker to recover. Deployment readiness rejects an explicitly requested
+   but unavailable Apple delivery; it does not stop the running statistics loop.
 6. Ship the matching iOS build after API availability. Debug uses the
    development entitlement/sandbox; Release/TestFlight uses production. The
    app's bundle ID, signed entitlement and API device environment must agree.
@@ -177,6 +186,35 @@ independent. Never roll back by deleting account choices or pushing old jobs.
 After 0286, retain or restore a worker image that drains the append-only
 statistics signals; an older image cannot consume them. Stopping that worker
 preserves pending work for restart but pauses statistics updates.
+
+## Progress and rollout diagnostics
+
+`native_statistics_batch` reports claimed/updated/failed profiles, retry-store
+failures, lost leases, drained signals, policy scan progress and duration. Errors
+contain only a fixed stage and allowlisted machine/SQLSTATE code, never author
+identifiers, raw SQL, messages, device tokens or credentials. Individual failures
+retain the last-known cache and the existing one-minute retry. If storing that
+retry itself fails, the existing five-minute lease expiry permits recovery while
+other claimed profiles continue. Diagnostic-sink failures do not replay work.
+
+The read-only `native-onboarding-health.js` command checks that both background
+loops have recent progress and a successful query/pipeline phase, rather than
+merely repeating failed iterations; it performs no bootstrap, SQL, queue
+claim or Apple request. The small atomically replaced status file is container-local.
+It records aggregate failed/updated counts so a live process is not confused with
+complete data coverage. The ten-minute stale-progress limit is monitoring only
+(two existing statistics leases), not a publication gate or job cancellation.
+`--require-delivery` additionally requires a successfully initialized APNs client;
+this is not proof of Apple acceptance or physical-device display.
+
+Activate statistics first with Apple delivery false and compare representative
+suggestions with their current profile statistics. This mode still writes derived
+cache/cursors/queues and runs bounded service retention; it is not read-only.
+Before enabling Apple delivery, inventory the still-eligible queue and approve a
+test-account-only canary or isolated test deployment: the ordinary delivery claim
+is global, not recipient-targeted. Do not flip the flag as a canary against an
+unreviewed production backlog. No migration, new index, manual purchase, history
+cleanup or replay of old operations is required for this hardening.
 
 ## Verification
 

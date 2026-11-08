@@ -126,8 +126,8 @@
     "signal:post-copy:audit": "tsx src/signal-post-copy-audit.ts",
     "test:onboarding": "tsx src/test-runner.ts --unit onboarding-tests onboarding-route-tests",
     "test:onboarding:integration": "tsx src/test-runner.ts --integration onboarding-integration-tests onboarding-sql-scale-integration-tests",
-    "test:native-onboarding": "tsx src/test-runner.ts --unit native-notification-tests native-notification-route-tests",
-    "test:native-onboarding:integration": "tsx src/test-runner.ts --integration native-onboarding-integration-tests native-onboarding-race-integration-tests native-onboarding-locking-integration-tests native-trader-ranking-policy-integration-tests native-trader-seed-integration-tests native-trader-statistics-locking-integration-tests native-trader-pending-integration-tests native-onboarding-sql-scale-integration-tests"
+    "test:native-onboarding": "tsx src/test-runner.ts --unit native-notification-tests native-notification-route-tests native-notification-text-tests native-worker-runtime-tests native-onboarding-deploy-tests",
+    "test:native-onboarding:integration": "tsx src/test-runner.ts --integration native-onboarding-integration-tests native-onboarding-race-integration-tests native-onboarding-locking-integration-tests native-trader-ranking-policy-integration-tests native-trader-seed-integration-tests native-trader-statistics-locking-integration-tests native-trader-pending-integration-tests native-onboarding-sql-scale-integration-tests native-statistics-diagnostics-integration-tests native-worker-entrypoint-integration-tests"
   },
   "dependencies": {
     "@aws-sdk/client-cloudfront": "3.1099.0",

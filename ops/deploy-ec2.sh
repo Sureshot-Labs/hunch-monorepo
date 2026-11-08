@@ -43,6 +43,13 @@ application_services=(
   social-media-worker
   nginx
 )
+source "${APP_DIR}/ops/native-onboarding-deploy.sh"
+native_worker_enabled="$(native_onboarding_flag HUNCH_NATIVE_ONBOARDING_WORKER_ENABLED)"
+if [[ "${native_worker_enabled}" == true ]]; then
+  compose+=(--profile native-onboarding)
+  application_services+=(native-onboarding-worker)
+fi
+native_onboarding_preflight
 
 # Ensure external network for edge proxy exists (required by nginx).
 if ! docker network inspect hunch-edge >/dev/null 2>&1; then
@@ -76,6 +83,7 @@ fi
 
 # Replace only application containers. Postgres and Redis retain their process
 # state and do not reload their datasets during an ordinary backend deploy.
+native_onboarding_stop_disabled
 APP_DIR="${APP_DIR}" bash "${APP_DIR}/ops/market-matcher-deploy.sh" adopt
 "${compose[@]}" stop "${application_services[@]}" || true
 "${compose[@]}" rm -f "${application_services[@]}" || true
@@ -83,6 +91,7 @@ APP_DIR="${APP_DIR}" bash "${APP_DIR}/ops/market-matcher-deploy.sh" adopt
   "${application_services[@]}"
 
 bash "${APP_DIR}/ops/market-matcher-deploy.sh" verify
+native_onboarding_verify
 
 # Give the secret loader and worker entrypoint enough time to fail before we
 # accept the deployment. A container caught in a restart loop is not healthy.
