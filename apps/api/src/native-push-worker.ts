@@ -1,6 +1,8 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { createPgPool } from "@hunch/infra";
-import { APNsClient } from "./services/apns-client.js";
+import { createNativePushDelivery } from "./services/native-push-delivery-runtime.js";
+import { createNativeWorkerHealth } from "./services/native-onboarding-health.js";
+import { nativeWorkerErrorCode } from "./services/native-worker-diagnostics.js";
 import { deliverNativePushBatch } from "./services/native-push-queue.js";
 import {
   enqueueNativeBigMoves,
@@ -22,15 +24,25 @@ function required(name: string) {
   return value;
 }
 
-const apns =
-  process.env.HUNCH_APNS_DELIVERY_ENABLED === "true"
-    ? new APNsClient({
-        keyID: required("APNS_KEY_ID"),
-        teamID: required("APNS_TEAM_ID"),
-        privateKey: required("APNS_PRIVATE_KEY"),
-        bundleID: "trade.hunch.app",
-      })
-    : null;
+const delivery = createNativePushDelivery();
+const sendNativePush = delivery.send;
+const health = createNativeWorkerHealth(delivery.status, {
+  path: process.env.HUNCH_NATIVE_ONBOARDING_HEALTH_FILE,
+});
+console.log(
+  JSON.stringify({
+    event: "native_onboarding_worker_started",
+    delivery: delivery.status.state,
+  }),
+);
+if (delivery.status.state === "configuration_error")
+  console.error(
+    JSON.stringify({
+      event: "native_push_configuration_failed",
+      code: delivery.status.code,
+      recovery: "correct_configuration_and_restart_worker",
+    }),
+  );
 const db = createPgPool({
   connectionString: required("DATABASE_URL"),
   max: 10,
@@ -56,11 +68,11 @@ async function runPushCycle() {
       },
       rankings: () => publishSocialTraderRanking(db),
       retention: () => retainNativeOnboardingData(db),
-      delivery: apns
+      delivery: sendNativePush
         ? async () => {
             const counts = await deliverNativePushBatch({
               db,
-              send: apns.send,
+              send: sendNativePush,
             });
             if (Object.values(counts).some(Boolean))
               console.log(
@@ -69,6 +81,7 @@ async function runPushCycle() {
           }
         : undefined,
     });
+    health.pipeline(failures, sendNativePush ? 6 : 5);
     if (failures.length) {
       // Only fixed stage identifiers enter logs, never tokens, content, keys or URLs.
       console.error(
@@ -83,20 +96,43 @@ async function runPushCycle() {
   }
 }
 try {
+  let lastStatisticsLogAt = 0;
   await Promise.all([
     runPushCycle(),
     runSocialTraderStatisticsWorker({
       signal: abort.signal,
       seed: () => seedNextSocialTraderStatisticsBatch(db),
-      refresh: (batchSize) => refreshSocialTraderStatistics(db, batchSize),
-      onFailure: (stage) =>
+      refresh: (batchSize) =>
+        refreshSocialTraderStatistics(db, batchSize, (summary) => {
+          health.diagnostics(summary);
+          const now = Date.now();
+          if (
+            summary.claimed ||
+            summary.pendingDrained ||
+            summary.policyScanned ||
+            summary.errors.length ||
+            now - lastStatisticsLogAt >= 60_000
+          ) {
+            console.log(
+              JSON.stringify({ event: "native_statistics_batch", ...summary }),
+            );
+            lastStatisticsLogAt = now;
+          }
+        }),
+      onFailure: (stage, error) =>
         console.error(
-          JSON.stringify({ event: "native_statistics_cycle_failed", stage }),
+          JSON.stringify({
+            event: "native_statistics_cycle_failed",
+            stage,
+            code: nativeWorkerErrorCode(error),
+          }),
         ),
+      onIteration: ({ seedFailed, refreshFailed }) =>
+        health.statistics(refreshFailed, seedFailed),
     }),
   ]);
 } finally {
   abort.abort();
-  apns?.close();
+  delivery.close();
   await db.end();
 }

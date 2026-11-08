@@ -6,76 +6,151 @@ import { resolveLimitlessPositionContract } from "./limitless-protocol-config.js
 import type { DbQuery } from "../db.js";
 import { buildSocialTraderStatisticsRevision } from "./social-trader-statistics-policy.js";
 import { drainPendingSocialTraderStatistics } from "./social-trader-statistics-pending.js";
+import {
+  nativeWorkerErrorCode,
+  type NativeStatisticsDiagnostics,
+} from "./native-worker-diagnostics.js";
 
 /** Statistics use the profile's exact implementation and policy, away from list requests. */
-export async function refreshSocialTraderStatistics(db: Pool, batchSize = 50) {
-  const pending = await drainPendingSocialTraderStatistics(db);
-  const resolved = await resolveSocialPolicy(db);
-  const revision = buildSocialTraderStatisticsRevision(resolved.policy);
-  const promotion = await scheduleSocialTraderStatisticsPolicyRefresh(
-    db,
-    revision,
-  );
-  const lease = randomUUID();
-  const { rows } = await db.query<{ user_id: string; generation: string }>(
-    `with selected as (
+export async function refreshSocialTraderStatistics(
+  db: Pool,
+  batchSize = 50,
+  report?: (summary: NativeStatisticsDiagnostics) => void,
+) {
+  const started = performance.now();
+  const summary: NativeStatisticsDiagnostics = {
+    claimed: 0,
+    updated: 0,
+    failed: 0,
+    retryScheduled: 0,
+    retryStoreFailed: 0,
+    leaseLost: 0,
+    pendingDrained: 0,
+    policyScanned: 0,
+    completed: false,
+    durationMs: 0,
+    errors: [],
+  };
+  const errors = new Map<
+    string,
+    NativeStatisticsDiagnostics["errors"][number]
+  >();
+  const failure = (stage: string, error: unknown) => {
+    const code = nativeWorkerErrorCode(error);
+    const key = `${stage}:${code}`;
+    const entry = errors.get(key) ?? { stage, code, count: 0 };
+    entry.count++;
+    errors.set(key, entry);
+  };
+  let stage = "pending_drain";
+  try {
+    const pending = await drainPendingSocialTraderStatistics(db);
+    summary.pendingDrained = pending;
+    stage = "policy";
+    const resolved = await resolveSocialPolicy(db);
+    const revision = buildSocialTraderStatisticsRevision(resolved.policy);
+    stage = "promotion";
+    const promotion = await scheduleSocialTraderStatisticsPolicyRefresh(
+      db,
+      revision,
+    );
+    summary.policyScanned = promotion.scanned;
+    stage = "claim";
+    const lease = randomUUID();
+    const { rows } = await db.query<{ user_id: string; generation: string }>(
+      `with selected as (
     select user_id from social_trader_statistics where next_refresh_at<=now()
       and (lease_until is null or lease_until<now()) order by next_refresh_at,user_id limit $1 for update skip locked
   ) update social_trader_statistics s set lease_id=$2,lease_until=now()+interval '5 minutes'
     from selected where s.user_id=selected.user_id returning s.user_id,s.generation`,
-    [Math.min(50, batchSize), lease],
-  );
-  const service = new SocialService(db, undefined, {
-    limitlessPositionContract: resolveLimitlessPositionContract(),
-  });
-  async function refresh(row: (typeof rows)[number]) {
-    try {
-      const active = await db.query(
-        `update social_trader_statistics set lease_until=now()+interval '5 minutes' where user_id=$1 and lease_id=$2 and lease_until>now()
+      [Math.min(50, batchSize), lease],
+    );
+    summary.claimed = rows.length;
+    const service = new SocialService(db, undefined, {
+      limitlessPositionContract: resolveLimitlessPositionContract(),
+    });
+    async function refresh(row: (typeof rows)[number]) {
+      let rowStage = "lease";
+      try {
+        const active = await db.query(
+          `update social_trader_statistics set lease_until=now()+interval '5 minutes' where user_id=$1 and lease_id=$2 and lease_until>now()
          returning user_id,(select is_agent from users where id=$1) as is_agent`,
-        [row.user_id, lease],
-      );
-      if (!active.rows.length) return;
-      const statistics = await service.profileStatistics(
-        row.user_id,
-        resolved.policy,
-      );
-      const paperPerformance = active.rows[0]?.is_agent
-        ? await service.paperPerformance(row.user_id)
-        : undefined;
-      await db.query(
-        `update social_trader_statistics set policy_revision=$3,statistics=$4,wins=$5,losses=$6,win_rate=$7,computed_at=now(),
+          [row.user_id, lease],
+        );
+        if (!active.rows.length) {
+          summary.leaseLost++;
+          return;
+        }
+        rowStage = "profile";
+        const statistics = await service.profileStatistics(
+          row.user_id,
+          resolved.policy,
+        );
+        rowStage = "paper_performance";
+        const paperPerformance = active.rows[0]?.is_agent
+          ? await service.paperPerformance(row.user_id)
+          : undefined;
+        rowStage = "persist";
+        const stored = await db.query(
+          `update social_trader_statistics set policy_revision=$3,statistics=$4,wins=$5,losses=$6,win_rate=$7,computed_at=now(),
         next_refresh_at=case when generation=$8 and not exists(
           select 1 from social_trader_statistics_pending pending where pending.user_id=$1
         ) then now()+interval '15 minutes' else now() end,lease_id=null,lease_until=null
         where user_id=$1 and lease_id=$2`,
-        [
-          row.user_id,
-          lease,
-          revision,
-          JSON.stringify({
-            ...statistics,
-            ...(paperPerformance ? { paperPerformance } : {}),
-          }),
-          statistics.wins,
-          statistics.losses,
-          statistics.winRate,
-          row.generation,
-        ],
-      );
+          [
+            row.user_id,
+            lease,
+            revision,
+            JSON.stringify({
+              ...statistics,
+              ...(paperPerformance ? { paperPerformance } : {}),
+            }),
+            statistics.wins,
+            statistics.losses,
+            statistics.winRate,
+            row.generation,
+          ],
+        );
+        if (stored.rowCount) summary.updated++;
+        else summary.leaseLost++;
+      } catch (error) {
+        summary.failed++;
+        failure(rowStage, error);
+        try {
+          const retry = await db.query(
+            `update social_trader_statistics set lease_id=null,lease_until=null,next_refresh_at=now()+interval '1 minute' where user_id=$1 and lease_id=$2`,
+            [row.user_id, lease],
+          );
+          if (retry.rowCount) summary.retryScheduled++;
+          else summary.leaseLost++;
+        } catch (retryError) {
+          // The existing bounded lease expiry is the fallback recovery path.
+          // One failed retry store must not abandon other claimed profiles.
+          summary.retryStoreFailed++;
+          failure("retry_store", retryError);
+        }
+      }
+    }
+    // Bound database concurrency without serializing the entire backlog.
+    for (let index = 0; index < rows.length; index += 4)
+      await Promise.all(rows.slice(index, index + 4).map(refresh));
+    summary.completed = true;
+    return pending === 100 || promotion.scanned === promotion.batchSize
+      ? Math.max(rows.length, Math.min(50, batchSize))
+      : rows.length;
+  } catch (error) {
+    failure(stage, error);
+    throw error;
+  } finally {
+    summary.durationMs = Math.round(performance.now() - started);
+    summary.errors = [...errors.values()];
+    // Observability must not turn a successful cache update into a retry.
+    try {
+      report?.(summary);
     } catch {
-      await db.query(
-        `update social_trader_statistics set lease_id=null,lease_until=null,next_refresh_at=now()+interval '1 minute' where user_id=$1 and lease_id=$2`,
-        [row.user_id, lease],
-      );
+      /* Best effort diagnostic sink. */
     }
   }
-  // Bound database concurrency without serializing the entire backlog.
-  for (let index = 0; index < rows.length; index += 4)
-    await Promise.all(rows.slice(index, index + 4).map(refresh));
-  return pending === 100 || promotion.scanned === promotion.batchSize
-    ? Math.max(rows.length, Math.min(50, batchSize))
-    : rows.length;
 }
 
 /** Promote legacy/mismatched rows through a durable bounded primary-key scan.

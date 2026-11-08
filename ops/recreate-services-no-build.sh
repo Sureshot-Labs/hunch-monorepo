@@ -5,12 +5,15 @@ REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.51.155.185}"
 APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
 ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 PROJECT_NAME="${PROJECT_NAME:-hunch-monorepo}"
-SERVICES="${SERVICES:-api indexer-polymarket indexer-limitless indexer-dflow ai-worker market-matcher finance-worker signal-bot social-media-worker}"
+SERVICES_EXPLICIT="${SERVICES+x}"
+SERVICES="${SERVICES-api indexer-polymarket indexer-limitless indexer-dflow ai-worker market-matcher finance-worker signal-bot social-media-worker}"
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
 HUNCH_SOCIAL_MEDIA_WORKER_IMAGE="${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE:-}"
 RESTART_NGINX="${RESTART_NGINX:-1}"
 VERIFY="${VERIFY:-1}"
 API_HEALTH_URL="${API_HEALTH_URL:-http://127.0.0.1:3001/health}"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/native-onboarding-deploy.sh"
+native_helper_functions="$(declare -f native_onboarding_flag native_onboarding_enabled native_onboarding_owned_container native_onboarding_preflight native_onboarding_stop_disabled native_onboarding_verify)"
 
 REMOTE_CMD=$(cat <<'EOF'
 set -euo pipefail
@@ -28,11 +31,36 @@ if [ ! -r "${ENV_FILE}" ]; then
   exit 1
 fi
 
+manage_native_worker=0
+native_worker_enabled=false
+native_worker_selected=0
+IFS=$' \t\n' read -r -a selected_services <<<"${SERVICES//$'\n'/ }"
+if [[ "${#selected_services[@]}" == 0 ]]; then
+  echo "SERVICES must select at least one exact service; no services were changed." >&2
+  exit 1
+fi
+for service in "${selected_services[@]}"; do
+  if [[ ! "${service}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+    echo "SERVICES contains an invalid service name; no services were changed." >&2
+    exit 1
+  fi
+  if [[ "${service}" == native-onboarding-worker ]]; then native_worker_selected=1; fi
+done
+if [[ -z "${SERVICES_EXPLICIT:-}" || "${native_worker_selected}" == 1 ]]; then
+  manage_native_worker=1
+  native_worker_enabled="$(native_onboarding_flag HUNCH_NATIVE_ONBOARDING_WORKER_ENABLED)"
+  if [[ "${native_worker_enabled}" == true && -z "${SERVICES_EXPLICIT:-}" ]]; then
+    selected_services+=(native-onboarding-worker)
+  elif [[ "${native_worker_enabled}" != true && "${native_worker_selected}" == 1 ]]; then
+    echo "Set persistent HUNCH_NATIVE_ONBOARDING_WORKER_ENABLED=true before selecting the native worker." >&2
+    exit 1
+  fi
+fi
+
 compose() {
-  docker-compose --project-directory "${APP_DIR}" \
-    -f "${compose_file}" \
-    --env-file "${ENV_FILE}" \
-    "$@"
+  local compose_args=(docker-compose --project-directory "${APP_DIR}" -f "${compose_file}" --env-file "${ENV_FILE}")
+  if [[ "${native_worker_enabled}" == true ]]; then compose_args+=(--profile native-onboarding); fi
+  "${compose_args[@]}" "$@"
 }
 
 if ! docker network inspect hunch-edge >/dev/null 2>&1; then
@@ -74,7 +102,7 @@ find_backend_image() {
 social_media_worker_selected=0
 market_matcher_selected=0
 backend_service_selected=0
-for service in ${SERVICES}; do
+for service in "${selected_services[@]}"; do
   if [ "${service}" = "market-matcher" ]; then
     market_matcher_selected=1
   fi
@@ -88,6 +116,9 @@ done
 if [ "${backend_service_selected}" = "1" ]; then
   backend_image="$(find_backend_image)"
   echo "Using backend image: ${backend_image}"
+fi
+if [[ "${manage_native_worker}" == 1 ]]; then
+  native_onboarding_preflight "${backend_image:-}"
 fi
 
 if [ "${market_matcher_selected}" = "1" ]; then
@@ -144,7 +175,7 @@ if [ "${social_media_worker_selected}" = "1" ]; then
   docker tag "${social_media_worker_image}" "${PROJECT_NAME}_social-media-worker:latest"
 fi
 
-for service in ${SERVICES}; do
+for service in "${selected_services[@]}"; do
   if [ "${service}" = "social-media-worker" ]; then
     continue
   fi
@@ -155,7 +186,8 @@ if [ "${market_matcher_selected}" = "1" ]; then
   APP_DIR="${APP_DIR}" bash "${APP_DIR}/ops/market-matcher-deploy.sh" adopt
 fi
 
-for service in ${SERVICES}; do
+if [[ "${manage_native_worker}" == 1 ]]; then native_onboarding_stop_disabled; fi
+for service in "${selected_services[@]}"; do
   container="hunch-${service}"
   ids="$(docker ps -aq --filter "name=^/${container}$" || true)"
   if [ -n "${ids}" ]; then
@@ -169,8 +201,8 @@ for service in ${SERVICES}; do
   fi
 done
 
-echo "Starting services without build: ${SERVICES}"
-compose up -d --no-build --no-deps ${SERVICES}
+echo "Starting services without build: ${selected_services[*]}"
+compose up -d --no-build --no-deps "${selected_services[@]}"
 
 if [ "${social_media_worker_selected}" = "1" ]; then
   # Reject a process that starts briefly and then enters Docker's restart loop.
@@ -220,14 +252,17 @@ fi
 if [ "${market_matcher_selected}" = "1" ]; then
   bash "${APP_DIR}/ops/market-matcher-deploy.sh" verify
 fi
+# An optional delivery failure must not skip proxy DNS refresh or API recovery.
+if [[ "${manage_native_worker}" == 1 ]]; then native_onboarding_verify "${backend_image:-}"; fi
 
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' \
   | grep -E 'hunch-(api|indexer|ai-worker|market-matcher|finance-worker|signal-bot|social-media-worker|nginx|postgres|redis|web)' || true
 EOF
 )
+REMOTE_CMD="${native_helper_functions}"$'\n'"${REMOTE_CMD}"
 
 ssh "${REMOTE_HOST}" \
-  "APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' PROJECT_NAME='${PROJECT_NAME}' SERVICES='${SERVICES}' BACKEND_IMAGE='${BACKEND_IMAGE}' HUNCH_SOCIAL_MEDIA_WORKER_IMAGE='${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}' RESTART_NGINX='${RESTART_NGINX}' VERIFY='${VERIFY}' API_HEALTH_URL='${API_HEALTH_URL}' bash -s" \
+  "APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' PROJECT_NAME='${PROJECT_NAME}' SERVICES_EXPLICIT='${SERVICES_EXPLICIT}' SERVICES='${SERVICES}' BACKEND_IMAGE='${BACKEND_IMAGE}' HUNCH_SOCIAL_MEDIA_WORKER_IMAGE='${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}' RESTART_NGINX='${RESTART_NGINX}' VERIFY='${VERIFY}' API_HEALTH_URL='${API_HEALTH_URL}' bash -s" \
   <<<"${REMOTE_CMD}"
 
 echo "No-build service recreate complete."
