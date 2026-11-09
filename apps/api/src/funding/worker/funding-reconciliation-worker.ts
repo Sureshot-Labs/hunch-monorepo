@@ -570,8 +570,11 @@ export async function runFundingReconciliationJob(
   const evidencePollers = {
     ...(receiptDriver
       ? {
-          receiptPoll: (operationId: string, now: Date) =>
-            receiptDriver.pollOperation(pool, operationId, now),
+          receiptPoll: (
+            operationId: string,
+            now: Date,
+            pollOptions?: import("../reconciliation/funding-evidence-repair-state.js").FundingReceiptPollOptions,
+          ) => receiptDriver.pollOperation(pool, operationId, now, pollOptions),
         }
       : {}),
     ...(postconditionPoll ? { postconditionPoll } : {}),

@@ -1,4 +1,5 @@
 import { tx, type Pool } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "./funding-evidence-repair-fence.js";
 import { ethers } from "ethers";
 
 import { isRecord } from "../../lib/type-guards.js";
@@ -155,6 +156,7 @@ export async function reconcileRelayDestinationReceipts(
   });
   if (events.length === 0) return;
   await tx(pool, async (client) => {
+    await assertFundingEvidenceRepairFence(client, input.operationId);
     const matches = await classifyOwnedRouteCanonicalDestinationEvents(client, {
       events,
       userId: row.user_id,

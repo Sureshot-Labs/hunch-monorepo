@@ -27,11 +27,14 @@ import {
 import { socialSourceRefSchema } from "./schemas/social-trade.js";
 import { requireSameInstrument } from "./services/social-copy.js";
 import type { PreparedTrade } from "./services/trading-types.js";
+import { readLimitlessAmmMarketAddress } from "./services/limitless-amm-address.js";
 import {
   observeVerifiedBuySource,
   terminalZeroFill,
   type VerifiedBuyObserverDependencies,
   type VerifiedBuySourceRow,
+  type PolymarketFillCandidate,
+  type PolymarketFillObservation,
 } from "./services/verified-buy-observer.js";
 
 const owner = `0x${"1".repeat(40)}`,
@@ -467,9 +470,7 @@ function polymarketReceipt(receiptHash: string, notionalRaw = 10000000n) {
     ],
   };
 }
-type PolymarketFill = Awaited<
-  ReturnType<VerifiedBuyObserverDependencies["readPolymarketFills"]>
->[number];
+type PolymarketFill = PolymarketFillCandidate;
 const confirmedFill = (receiptHash: string): PolymarketFill => ({
   provider_tx_hash: receiptHash,
   provider_status: "CONFIRMED",
@@ -477,11 +478,19 @@ const confirmedFill = (receiptHash: string): PolymarketFill => ({
 async function observePolymarketFixture(
   fills: PolymarketFill[],
   receipts: Record<string, unknown>,
+  options: {
+    previousFacts?: unknown;
+    discovery?: PolymarketFillObservation;
+    maxEvidenceItems?: number;
+  } = {},
 ) {
   const receiptReads: string[] = [];
+  let providerReads = 0;
+  let fillSourceReads = 0;
   const db = {
     query: async (sql: string) => {
       assert.match(sql, /from order_fills/);
+      fillSourceReads++;
       return { rows: fills };
     },
   } as unknown as Pick<Pool, "query">;
@@ -503,9 +512,10 @@ async function observePolymarketFixture(
     market_metadata: {},
     input_mint: null,
     output_mint: null,
+    verified_buy_facts: options.previousFacts,
   };
   const deps: VerifiedBuyObserverDependencies = {
-    maxEvidenceItems: 10,
+    maxEvidenceItems: options.maxEvidenceItems ?? 10,
     limitlessPositionContract: position,
     limitlessExchangeAddress: exchange,
     solanaCollateralMint: "usd",
@@ -520,7 +530,10 @@ async function observePolymarketFixture(
         ? null
         : { receipt: receipts[receiptHash], timestamp: base.purchasedAt };
     },
-    readPolymarketFills: async () => fills,
+    readPolymarketFills: async () => {
+      providerReads++;
+      return options.discovery ?? { state: "fills", fills };
+    },
     readLimitlessOrder: async () => null,
     readDflowOrder: async () => null,
     readFinalizedSolanaTransaction: async () => null,
@@ -528,6 +541,8 @@ async function observePolymarketFixture(
   return {
     observation: await observeVerifiedBuySource(db, deps, row),
     receiptReads,
+    providerReads,
+    fillSourceReads,
   };
 }
 test("Polymarket successful fills survive another provider-failed attempt", async () => {
@@ -679,7 +694,7 @@ test("Polymarket incomplete partial-fill evidence stays pending alongside proven
           { provider_tx_hash: null, provider_status: "FAILED" },
           { provider_tx_hash: partialTxHash, provider_status: "MINED" },
         ],
-        {},
+        { [partialTxHash]: null },
       )
     ).observation,
     { state: "pending", reason: "provider_settlement_pending" },
@@ -707,7 +722,7 @@ test("provider confirmed status cannot override a finalized reverted receipt", a
       },
     }),
     readDflowOrder: async () => null,
-    readPolymarketFills: async () => [],
+    readPolymarketFills: async () => ({ state: "fills", fills: [] }),
     readFinalizedSolanaTransaction: async () => null,
   };
   const row: VerifiedBuySourceRow = {
@@ -851,7 +866,7 @@ test("Limitless status envelope proves zero fills; partial/missing evidence stay
     readEvmReceipt: async () => {
       throw new Error("Zero-fill must not read nonexistent receipt");
     },
-    readPolymarketFills: async () => [],
+    readPolymarketFills: async () => ({ state: "fills", fills: [] }),
     readDflowOrder: async () => null,
     readFinalizedSolanaTransaction: async () => null,
     readLimitlessOrder: async () => response("0"),
@@ -874,6 +889,244 @@ test("Limitless status envelope proves zero fills; partial/missing evidence stay
   assert.deepEqual(
     await observeVerifiedBuySource(db, deps, { ...row, venue: "kalshi" }),
     { state: "pending", reason: "dflow_evidence_unsupported" },
+  );
+});
+test("AMM address aliases preserve priority, checksum normalization and invalid-primary rejection", () => {
+  for (const alias of [
+    "address",
+    "marketAddress",
+    "market_address",
+    "ammAddress",
+    "amm_address",
+  ])
+    assert.equal(
+      readLimitlessAmmMarketAddress({ [alias]: ` ${owner} ` }),
+      owner,
+    );
+  assert.equal(
+    readLimitlessAmmMarketAddress({ address: owner, marketAddress: exchange }),
+    owner,
+  );
+  assert.equal(
+    readLimitlessAmmMarketAddress({
+      address: "invalid",
+      marketAddress: exchange,
+    }),
+    null,
+  );
+  for (const metadata of [null, [], {}, { address: 12 }, { address: " " }])
+    assert.equal(readLimitlessAmmMarketAddress(metadata), null);
+});
+test("Local MINED chain locators verify without provider CONFIRMED or rediscovery", async () => {
+  const result = await observePolymarketFixture(
+    [{ ...confirmedFill(txHash), provider_status: "MINED" }],
+    { [txHash]: polymarketReceipt(txHash) },
+    { discovery: { state: "not_found" } },
+  );
+  assert.equal(result.observation.state, "verified");
+  assert.equal(result.providerReads, 0);
+  assert.deepEqual(result.receiptReads, [txHash]);
+});
+test("Previous proof locators survive disappearing local/provider evidence, but are reverified", async () => {
+  const original = (
+    await observePolymarketFixture([confirmedFill(txHash)], {
+      [txHash]: polymarketReceipt(txHash),
+    })
+  ).observation;
+  assert.equal(original.state, "verified");
+  if (original.state !== "verified") throw Error("Expected initial proof");
+  for (const discovery of [
+    "unavailable",
+    "not_found",
+    "malformed",
+    "identity_conflict",
+    "terminal_zero_fill",
+  ] as const) {
+    const result = await observePolymarketFixture(
+      [],
+      { [txHash]: polymarketReceipt(txHash) },
+      { previousFacts: original.facts, discovery: { state: discovery } },
+    );
+    assert.equal(result.observation.state, "verified");
+    assert.equal(result.providerReads, 0);
+    assert.deepEqual(result.receiptReads, [txHash]);
+  }
+  assert.deepEqual(
+    (
+      await observePolymarketFixture(
+        [],
+        { [txHash]: null },
+        { previousFacts: original.facts },
+      )
+    ).observation,
+    { state: "pending", reason: "receipt_pending" },
+  );
+  assert.deepEqual(
+    (
+      await observePolymarketFixture(
+        [],
+        { [txHash]: { hash: txHash, status: 0, logs: [] } },
+        { previousFacts: original.facts },
+      )
+    ).observation,
+    { state: "revoked", reason: "finalized_receipt_failed" },
+  );
+  for (const changed of [
+    { canonicalPurchaseKey: original.facts.canonicalPurchaseKey + "other" },
+    { owner: exchange },
+    { instrument: { ...original.facts.instrument, generation: "other" } },
+    { evidenceIds: [`8453:${txHash}:0`] },
+    { evidenceIds: [`137:${txHash}:0suffix`] },
+    { evidenceIds: [`137:${txHash}:9007199254740993`] },
+  ]) {
+    const rejected = await observePolymarketFixture(
+      [],
+      {},
+      { previousFacts: { ...original.facts, ...changed } },
+    );
+    assert.deepEqual(rejected.observation, {
+      state: "pending",
+      reason: "previous_proof_identity_conflict",
+    });
+    assert.equal(rejected.providerReads, 0);
+  }
+});
+test("Known missing fill identity is not discarded; matching provider identity can recover it", async () => {
+  const known = {
+    ...confirmedFill(partialTxHash),
+    provider_tx_hash: null,
+    venue_trade_id: "additional",
+  };
+  const original = (
+    await observePolymarketFixture([confirmedFill(txHash)], {
+      [txHash]: polymarketReceipt(txHash),
+    })
+  ).observation;
+  if (original.state !== "verified") throw Error("Expected proof");
+  for (const discovery of [
+    { state: "unavailable" },
+    { state: "terminal_zero_fill" },
+    {
+      state: "fills",
+      fills: [{ ...confirmedFill(partialTxHash), venue_trade_id: "different" }],
+    },
+  ] as PolymarketFillObservation[]) {
+    assert.deepEqual(
+      (
+        await observePolymarketFixture(
+          [confirmedFill(txHash), { ...known }],
+          {
+            [txHash]: polymarketReceipt(txHash),
+            [partialTxHash]: polymarketReceipt(partialTxHash),
+          },
+          { previousFacts: original.facts, discovery },
+        )
+      ).observation,
+      { state: "pending", reason: "fill_transaction_identity_missing" },
+    );
+  }
+  const recovered = await observePolymarketFixture(
+    [confirmedFill(txHash), { ...known }],
+    {
+      [txHash]: polymarketReceipt(txHash),
+      [partialTxHash]: polymarketReceipt(partialTxHash),
+    },
+    {
+      discovery: {
+        state: "fills",
+        fills: [
+          { ...confirmedFill(partialTxHash), venue_trade_id: "additional" },
+        ],
+      },
+    },
+  );
+  assert.equal(recovered.observation.state, "verified");
+  if (recovered.observation.state === "verified")
+    assert.equal(recovered.observation.facts.grossNotionalUsd, "20");
+});
+test("Incomplete new identity cannot hide a freshly disproven prior snapshot fill", async () => {
+  const original = (
+    await observePolymarketFixture(
+      [confirmedFill(txHash), confirmedFill(partialTxHash)],
+      {
+        [txHash]: polymarketReceipt(txHash),
+        [partialTxHash]: polymarketReceipt(partialTxHash),
+      },
+    )
+  ).observation;
+  if (original.state !== "verified") throw Error("Expected initial proof");
+  const result = await observePolymarketFixture(
+    [
+      confirmedFill(txHash),
+      confirmedFill(partialTxHash),
+      {
+        provider_tx_hash: null,
+        provider_status: "MINED",
+        venue_trade_id: "unknown-new-fill",
+      },
+    ],
+    {
+      [txHash]: null,
+      [partialTxHash]: { hash: partialTxHash, status: 0, logs: [] },
+    },
+    { previousFacts: original.facts, discovery: { state: "unavailable" } },
+  );
+  assert.deepEqual(result.observation, {
+    state: "pending",
+    reason: "fill_transaction_identity_missing",
+    invalidatedEvidenceIds: [`137:${partialTxHash}:0`],
+  });
+  assert.deepEqual(
+    result.receiptReads,
+    [txHash, partialTxHash],
+    "an earlier unavailable receipt must not suppress a later canonical negative observation",
+  );
+});
+test("Many local fills in one tx are acquired once without a new row-count gate; unique tx overflow is explicit", async () => {
+  const fills = Array.from({ length: 25 }, (_, index) => ({
+    ...confirmedFill(txHash),
+    id: String(index).padStart(3, "0"),
+    venue_trade_id: `trade-${index}`,
+  }));
+  const result = await observePolymarketFixture(
+    fills,
+    { [txHash]: polymarketReceipt(txHash) },
+    { maxEvidenceItems: 2 },
+  );
+  assert.equal(result.observation.state, "verified");
+  assert.deepEqual(result.receiptReads, [txHash]);
+  assert.equal(result.providerReads, 0);
+  assert.equal(result.fillSourceReads, 1);
+  await assert.rejects(
+    observePolymarketFixture(
+      [confirmedFill(txHash), confirmedFill(partialTxHash)],
+      {},
+      { maxEvidenceItems: 1 },
+    ),
+    /Evidence request budget exhausted/,
+  );
+});
+test("Transport outcomes remain distinct and never become zero-fill proof", async () => {
+  for (const state of [
+    "unavailable",
+    "not_found",
+    "malformed",
+    "identity_conflict",
+  ] as const)
+    assert.deepEqual(
+      (await observePolymarketFixture([], {}, { discovery: { state } }))
+        .observation,
+      { state: "pending", reason: `provider_evidence_${state}` },
+    );
+  assert.deepEqual(
+    (
+      await observePolymarketFixture(
+        [],
+        {},
+        { discovery: { state: "terminal_zero_fill" } },
+      )
+    ).observation,
+    { state: "revoked", reason: "provider_terminal_zero_fill" },
   );
 });
 for (const [name, run] of tests) {

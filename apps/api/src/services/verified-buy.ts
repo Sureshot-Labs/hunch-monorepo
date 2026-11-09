@@ -5,6 +5,7 @@ import {
   type PurchaseRef,
   type VerifiedBuyFacts,
 } from "../schemas/social-trade.js";
+import { verifiedBuyRetrySeconds } from "./verified-buy-retry.js";
 import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
 
 export type { PurchaseRef, VerifiedBuyFacts } from "../schemas/social-trade.js";
@@ -63,7 +64,8 @@ export async function requestVerifiedBuyRefresh(
 ): Promise<boolean> {
   const result = await db.query(
     `update ${tableFor(input.purchaseRef)}
-    set verified_buy_due_at = now()
+    set verified_buy_due_at = now(),
+        verified_buy_lease_token = null, verified_buy_lease_until = null
     where id = $1 and user_id = $2 returning id`,
     [input.purchaseRef.id, input.userId],
   );
@@ -154,7 +156,12 @@ export function factsFromEvidence(
 
 export type PurchaseObservation =
   | { state: "verified"; facts: VerifiedBuyFacts }
-  | { state: "pending" | "revoked"; reason: string };
+  | {
+      state: "pending" | "revoked";
+      reason: string;
+      /** Fresh canonical failures of exact prior proof, not provider absence. */
+      invalidatedEvidenceIds?: string[];
+    };
 export type ClaimedPurchase = {
   purchaseRef: PurchaseRef;
   userId: string;
@@ -294,7 +301,7 @@ export async function repairVerifiedBuys(
         );
         const result = await db.query(
           `with stored_purchase as (update ${table}
-        set verified_buy_state = case when $2 = 'pending' and ($4 = 'observation_unavailable' or $4 like 'evidence_budget_exhausted:%') then verified_buy_state
+        set verified_buy_state = case when $2 = 'pending' and cardinality($8::text[])=0 and ($4 = 'observation_unavailable' or $4 like 'evidence_budget_exhausted:%') then verified_buy_state
                                      when $2 = 'pending' and verified_buy_state = 'revoked' then 'revoked' else $2 end,
             verified_buy_facts = case when $2 = 'verified' then $3::jsonb else verified_buy_facts end,
             verified_buy_reason = $4, verified_buy_revision = verified_buy_revision + 1,
@@ -304,18 +311,21 @@ export async function repairVerifiedBuys(
           and verified_buy_lease_until > now() returning id,verified_buy_state,verified_buy_facts),
         projected_theses as (
           update user_theses thesis_row set proof_invalidated_at=case
-            when stored_purchase.verified_buy_state='revoked'
-              or not ((thesis_row.buy_snapshot->'evidenceIds') <@ (stored_purchase.verified_buy_facts->'evidenceIds'))
+            when (thesis_row.buy_snapshot->'evidenceIds') ?| $8::text[]
+              or stored_purchase.verified_buy_state='revoked'
+              or (stored_purchase.verified_buy_state='verified' and not ((thesis_row.buy_snapshot->'evidenceIds') <@ (stored_purchase.verified_buy_facts->'evidenceIds')))
               then coalesce(thesis_row.proof_invalidated_at,now())
-            else null end
+            when stored_purchase.verified_buy_state='verified' then null
+            else thesis_row.proof_invalidated_at end
           from stored_purchase
           where thesis_row.author_id=$6 and (thesis_row.${referenceColumn}=stored_purchase.id
             or thesis_row.canonical_purchase_key=stored_purchase.verified_buy_facts->>'canonicalPurchaseKey')
-            and stored_purchase.verified_buy_state in ('revoked','verified')
+            and (stored_purchase.verified_buy_state in ('revoked','verified') or cardinality($8::text[])>0)
           returning thesis_row.id
         ), projected_copies as (
           update copy_attributions copy_row set
-            state=case when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
+            state=case when (copy_row.execution_facts->'evidenceIds') ?| $8::text[] then 'revoked'
+              when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
               then 'confirmed' else 'revoked' end,
             canonical_purchase_key=case when stored_purchase.verified_buy_state='verified'
               then stored_purchase.verified_buy_facts->>'canonicalPurchaseKey' else copy_row.canonical_purchase_key end,
@@ -326,7 +336,7 @@ export async function repairVerifiedBuys(
             confirmed_at=case when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
               then coalesce(copy_row.confirmed_at,now()) else copy_row.confirmed_at end,updated_at=now()
           from stored_purchase where copy_row.copier_user_id=$6 and copy_row.${referenceColumn}=stored_purchase.id
-            and (stored_purchase.verified_buy_state='revoked' or (stored_purchase.verified_buy_state='verified'
+            and ((copy_row.execution_facts->'evidenceIds') ?| $8::text[] or stored_purchase.verified_buy_state='revoked' or (stored_purchase.verified_buy_state='verified'
               and copy_row.instrument=stored_purchase.verified_buy_facts->'instrument')) returning copy_row.id
         ) select id from stored_purchase`,
           [
@@ -336,11 +346,19 @@ export async function repairVerifiedBuys(
               ? JSON.stringify(observation.facts)
               : null,
             observation.state === "verified" ? null : observation.reason,
-            observation.state === "verified"
-              ? input.verifiedRecheckSeconds
-              : input.retrySeconds,
+            verifiedBuyRetrySeconds({
+              state: observation.state,
+              reason:
+                observation.state === "verified" ? null : observation.reason,
+              attempts: claim.verified_buy_attempts,
+              retrySeconds: input.retrySeconds,
+              verifiedRecheckSeconds: input.verifiedRecheckSeconds,
+            }),
             claim.user_id,
             claim.verified_buy_lease_token,
+            observation.state === "verified"
+              ? []
+              : (observation.invalidatedEvidenceIds ?? []),
           ],
         );
         if (result.rows.length) {

@@ -6,20 +6,38 @@ import type {
   PurchaseObservation,
   VerifiedPurchaseEvidence,
 } from "./verified-buy.js";
-import { EvidenceBudgetExhausted } from "./verified-buy.js";
+import {
+  EvidenceBudgetExhausted,
+  observationFailureReason,
+} from "./verified-buy.js";
 import {
   combinePurchaseEvidence,
   parseEvmClobBuyEvidence,
   parseEvmAmmBuyEvidence,
 } from "./verified-buy-evidence.js";
-import type { VerifiedBuyFacts } from "../schemas/social-trade.js";
+import {
+  verifiedBuyFactsSchema,
+  type VerifiedBuyFacts,
+} from "../schemas/social-trade.js";
 import {
   parseLimitlessOrderResult,
   isLimitlessTerminalRejectedStatus,
 } from "./limitless-order-result.js";
 import { resolveLimitlessClobEvidenceIdentity } from "./limitless-clob-evidence-identity.js";
 import { resolveLimitlessReceiptFallback } from "./verified-buy-limitless-receipt.js";
+import { readLimitlessAmmMarketAddress } from "./limitless-amm-address.js";
 type Db = Pick<Pool, "query">;
+export type PolymarketFillCandidate = {
+  provider_tx_hash: string | null;
+  provider_status: string | null;
+  venue_trade_id?: string | null;
+  venue_fill_id?: string | null;
+  id?: string;
+};
+export type PolymarketFillObservation =
+  | { state: "fills"; fills: PolymarketFillCandidate[] }
+  | { state: "terminal_zero_fill" }
+  | { state: "unavailable" | "not_found" | "malformed" | "identity_conflict" };
 export type VerifiedBuyObserverDependencies = {
   maxEvidenceItems: number;
   assertEvidenceBudget?: (minimumReads: number) => void;
@@ -43,14 +61,16 @@ export type VerifiedBuyObserverDependencies = {
     signer: string;
     orderHash: string;
     tokenId: string;
-  }) => Promise<
-    Array<{ provider_tx_hash: string | null; provider_status: string | null }>
-  >;
+  }) => Promise<PolymarketFillObservation>;
 };
 
-const pending = (reason: string): PurchaseObservation => ({
+const pending = (
+  reason: string,
+  invalidatedEvidenceIds: string[] = [],
+): PurchaseObservation => ({
   state: "pending",
   reason,
+  ...(invalidatedEvidenceIds.length ? { invalidatedEvidenceIds } : {}),
 });
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -99,6 +119,7 @@ export type VerifiedBuySourceRow = {
   input_mint: string | null;
   output_mint: string | null;
   signer_address?: string | null;
+  verified_buy_facts?: unknown;
 };
 
 /** Only read paths are injected. This module has no API env/auth/executor imports. */
@@ -112,7 +133,7 @@ export function createVerifiedBuyObserver(
         ? await db.query<VerifiedBuySourceRow>(
             `select purchase_row.id, purchase_row.user_id, purchase_row.venue,
           purchase_row.wallet_address, purchase_row.signer_address,purchase_row.order_hash, purchase_row.venue_order_id,
-          purchase_row.token_id, purchase_row.side, purchase_row.order_payload,
+          purchase_row.token_id, purchase_row.side, purchase_row.order_payload, purchase_row.verified_buy_facts,
           coalesce(purchase_row.order_payload->>'clientOrderId',purchase_row.order_payload->'submitted'->>'clientOrderId',
             purchase_row.order_payload->'_hunchSubmitted'->>'clientOrderId') as client_order_id,
           null::text as tx_signature, token_row.market_id, token_row.side as outcome,
@@ -126,7 +147,7 @@ export function createVerifiedBuyObserver(
         : await db.query<VerifiedBuySourceRow>(
             `select purchase_row.id, purchase_row.user_id, purchase_row.venue,
           purchase_row.wallet_address, null::text as order_hash, purchase_row.venue_order_id,
-          token_row.token_id, purchase_row.side, null::jsonb as order_payload, null::text as client_order_id,
+          token_row.token_id, purchase_row.side, null::jsonb as order_payload, null::text as client_order_id, purchase_row.verified_buy_facts,
           purchase_row.tx_signature, purchase_row.unified_market_id as market_id, token_row.side as outcome,
           market_row.expiration_time, market_row.metadata as market_metadata,
           purchase_row.input_mint, purchase_row.output_mint
@@ -179,7 +200,7 @@ export async function observeVerifiedBuySource(
     !["polymarket", "limitless", "kalshi"].includes(row.venue)
   )
     return pending("instrument_binding_missing");
-  const instrument: VerifiedBuyFacts["instrument"] = {
+  let instrument: VerifiedBuyFacts["instrument"] = {
     venue: row.venue as VerifiedBuyFacts["instrument"]["venue"],
     marketId,
     tokenId,
@@ -192,66 +213,170 @@ export async function observeVerifiedBuySource(
     expiry: row.expiration_time?.toISOString() ?? null,
   };
   if (row.venue === "polymarket") {
-    if (!context || !row.order_hash)
-      return pending("frozen_order_binding_missing");
-    const fills = await db.query<{
-      provider_tx_hash: string | null;
-      provider_status: string | null;
-    }>(
-      `
-        select distinct provider_tx_hash, provider_status from order_fills where order_id = $1
-        order by provider_tx_hash limit $2`,
-      [row.id, deps.maxEvidenceItems + 1],
-    );
     if (
-      !fills.rows.length ||
-      fills.rows.some(
-        (fill) =>
-          !fill.provider_tx_hash ||
-          fill.provider_status?.toUpperCase() !== "CONFIRMED",
+      !context ||
+      context.assetId !== row.token_id ||
+      !row.order_hash ||
+      !/^0x[0-9a-f]{64}$/i.test(row.order_hash)
+    )
+      return pending("frozen_order_binding_missing");
+    const validHash = (value: string | null): value is string =>
+      value !== null && /^0x[0-9a-f]{64}$/i.test(value);
+    const previousHashes = new Set<string>();
+    const previousEvidenceByHash = new Map<string, string[]>();
+    if (row.verified_buy_facts != null) {
+      const parsed = verifiedBuyFactsSchema.safeParse(row.verified_buy_facts);
+      const expectedKey = `polymarket:${context.chainId}:${context.exchangeAddress.toLowerCase()}:${row.order_hash.toLowerCase()}`;
+      if (
+        !parsed.success ||
+        parsed.data.canonicalPurchaseKey !== expectedKey ||
+        parsed.data.owner.toLowerCase() !== row.wallet_address.toLowerCase() ||
+        (
+          ["venue", "marketId", "tokenId", "outcome", "generation"] as const
+        ).some((field) => parsed.data.instrument[field] !== instrument[field])
       )
-    ) {
-      fills.rows = await deps.readPolymarketFills({
+        return pending("previous_proof_identity_conflict");
+      for (const id of parsed.data.evidenceIds) {
+        const match = /^(\d+):(0x[0-9a-f]{64}):(0|[1-9]\d*)$/i.exec(id);
+        const evidenceHash = match?.[2];
+        if (
+          !match ||
+          !evidenceHash ||
+          match[1] !== String(context.chainId) ||
+          !Number.isSafeInteger(Number(match[3]))
+        )
+          return pending("previous_proof_identity_conflict");
+        previousHashes.add(evidenceHash.toLowerCase());
+        previousEvidenceByHash.set(evidenceHash.toLowerCase(), [
+          ...(previousEvidenceByHash.get(evidenceHash.toLowerCase()) ?? []),
+          id,
+        ]);
+      }
+      // Expiry is part of the frozen snapshot, not today's mutable market data.
+      instrument = parsed.data.instrument;
+    }
+    // Acquire this exact purchase's known source ONCE. A raw fill-count LIMIT
+    // would silently lose concrete candidates; repeated materialized pages cost
+    // O(N²/pageSize). Memory is O(this order's fill rows), never the global queue.
+    const source = await db.query<PolymarketFillCandidate>(
+      `select id, venue_fill_id, venue_trade_id, provider_tx_hash, provider_status
+       from order_fills where order_id=$1`,
+      [row.id],
+    );
+    const fills = source.rows.map((fill) => ({ ...fill }));
+    const knownHashes = new Set(previousHashes);
+    for (const fill of fills) {
+      if (
+        validHash(fill.provider_tx_hash) &&
+        fill.provider_status?.toUpperCase() !== "FAILED"
+      )
+        knownHashes.add(fill.provider_tx_hash.toLowerCase());
+      if (knownHashes.size > deps.maxEvidenceItems)
+        throw new EvidenceBudgetExhausted(
+          knownHashes.size,
+          deps.maxEvidenceItems,
+        );
+    }
+    let discovery: PolymarketFillObservation | null = null;
+    const unresolved = (fill: PolymarketFillCandidate) =>
+      fill.provider_status?.toUpperCase() !== "FAILED" &&
+      !validHash(fill.provider_tx_hash);
+    if ((!fills.length && !previousHashes.size) || fills.some(unresolved)) {
+      discovery = await deps.readPolymarketFills({
         userId: row.user_id,
         owner: row.wallet_address,
         signer: row.signer_address ?? row.wallet_address,
         orderHash: row.order_hash,
         tokenId,
       });
+      if (discovery.state === "fills") {
+        for (const remote of discovery.fills) {
+          // Only the same provider trade may fill a missing local identity.
+          const matching = remote.venue_trade_id
+            ? fills.filter(
+                (fill) => fill.venue_trade_id === remote.venue_trade_id,
+              )
+            : [];
+          for (const local of matching) {
+            if (
+              validHash(local.provider_tx_hash) &&
+              validHash(remote.provider_tx_hash) &&
+              local.provider_tx_hash.toLowerCase() !==
+                remote.provider_tx_hash.toLowerCase()
+            )
+              return pending("provider_order_identity_conflict");
+            if (
+              unresolved(local) &&
+              (validHash(remote.provider_tx_hash) ||
+                remote.provider_status?.toUpperCase() === "FAILED")
+            ) {
+              local.provider_tx_hash = remote.provider_tx_hash;
+              local.provider_status = remote.provider_status;
+            }
+          }
+          if (!matching.length) fills.push(remote);
+        }
+      }
     }
-    if (fills.rows.length > deps.maxEvidenceItems)
-      throw new EvidenceBudgetExhausted(
-        fills.rows.length,
-        deps.maxEvidenceItems,
-      );
-    if (fills.rows.length === 1 && fills.rows[0]?.provider_status === "NO_FILL")
-      return { state: "revoked", reason: "provider_terminal_zero_fill" };
     // A failed settlement attempt is not evidence against another actual fill
     // of the same order. Only surviving candidates contribute purchase proof.
-    const candidates = fills.rows.filter(
+    const candidates = fills.filter(
       (fill) => fill.provider_status?.toUpperCase() !== "FAILED",
     );
-    if (fills.rows.length && !candidates.length)
-      return { state: "revoked", reason: "provider_fill_failed" };
-    if (!candidates.length || candidates.some((fill) => !fill.provider_tx_hash))
-      return pending("fill_transaction_identity_missing");
-    if (
-      candidates.some(
-        (fill) => fill.provider_status?.toUpperCase() !== "CONFIRMED",
-      )
-    )
-      return pending("provider_settlement_pending");
+    const hasUnresolvedFill = candidates.some(unresolved);
     const parts: VerifiedPurchaseEvidence[] = [];
-    const hashes = new Set(
-      candidates.flatMap((fill) =>
-        fill.provider_tx_hash ? [fill.provider_tx_hash] : [],
+    const hashes = new Set([
+      ...previousHashes,
+      ...candidates.flatMap((fill) =>
+        validHash(fill.provider_tx_hash)
+          ? [fill.provider_tx_hash.toLowerCase()]
+          : [],
       ),
-    );
+    ]);
+    if (!hashes.size) {
+      if (hasUnresolvedFill)
+        return pending("fill_transaction_identity_missing");
+      if (fills.length && !candidates.length)
+        return { state: "revoked", reason: "provider_fill_failed" };
+      if (discovery?.state === "terminal_zero_fill")
+        return { state: "revoked", reason: "provider_terminal_zero_fill" };
+      if (discovery && discovery.state !== "fills")
+        return pending(`provider_evidence_${discovery.state}`);
+      return pending("fill_transaction_identity_missing");
+    }
+    if (hashes.size > deps.maxEvidenceItems)
+      throw new EvidenceBudgetExhausted(hashes.size, deps.maxEvidenceItems);
     deps.assertEvidenceBudget?.(hashes.size * 3);
+    const invalidatedEvidenceIds: string[] = [];
+    let incompleteReason: string | null = null;
     for (const hash of hashes) {
-      const observed = await deps.readEvmReceipt(context.chainId, hash);
-      if (!observed) return pending("receipt_pending");
-      if (failedReceipt(observed.receipt, hash)) continue;
+      let observed: Awaited<
+        ReturnType<VerifiedBuyObserverDependencies["readEvmReceipt"]>
+      >;
+      try {
+        observed = await deps.readEvmReceipt(context.chainId, hash);
+      } catch (error) {
+        incompleteReason = observationFailureReason(error);
+        if (error instanceof EvidenceBudgetExhausted) break;
+        continue;
+      }
+      if (!observed) {
+        incompleteReason ??= hasUnresolvedFill
+          ? "fill_transaction_identity_missing"
+          : !previousHashes.size &&
+              candidates.some(
+                (fill) => fill.provider_status?.toUpperCase() !== "CONFIRMED",
+              )
+            ? "provider_settlement_pending"
+            : "receipt_pending";
+        continue;
+      }
+      if (failedReceipt(observed.receipt, hash)) {
+        invalidatedEvidenceIds.push(
+          ...(previousEvidenceByHash.get(hash) ?? []),
+        );
+        continue;
+      }
       const evidence = parseEvmClobBuyEvidence({
         receipt: observed.receipt,
         txHash: hash,
@@ -264,9 +389,23 @@ export async function observeVerifiedBuySource(
         instrument,
         purchasedAt: observed.timestamp,
       });
-      if (!evidence) return pending("receipt_exact_fill_unavailable");
+      if (!evidence) {
+        incompleteReason ??= hasUnresolvedFill
+          ? "fill_transaction_identity_missing"
+          : "receipt_exact_fill_unavailable";
+        continue;
+      }
       parts.push(evidence);
     }
+    // Known incomplete identity prevents publishing totals, but must not prevent
+    // canonicality reads of already-known proof locators above.
+    if (incompleteReason)
+      return pending(incompleteReason, invalidatedEvidenceIds);
+    if (hasUnresolvedFill)
+      return pending(
+        "fill_transaction_identity_missing",
+        invalidatedEvidenceIds,
+      );
     if (!parts.length)
       return { state: "revoked", reason: "finalized_receipt_failed" };
     const facts = combinePurchaseEvidence(parts);
@@ -277,9 +416,10 @@ export async function observeVerifiedBuySource(
   if (row.venue === "limitless") {
     const ammMatch = row.venue_order_id?.match(/^amm:(0x[0-9a-f]{64}):/i);
     if (ammMatch?.[1]) {
-      const marketAddress =
-        text(root(row.market_metadata).marketAddress) ??
-        text(payload.marketAddress);
+      const marketAddress = readLimitlessAmmMarketAddress(
+        row.market_metadata,
+        payload.marketAddress,
+      );
       if (!marketAddress) return pending("amm_contract_missing");
       const observed = await deps.readEvmReceipt(8453, ammMatch[1]);
       if (!observed) return pending("receipt_pending");

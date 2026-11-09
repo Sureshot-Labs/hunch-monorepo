@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "../reconciliation/funding-evidence-repair-fence.js";
 
 import { isRecord } from "../../lib/type-guards.js";
 import type { PolymarketFundingPlan } from "../../services/polymarket-funding-router.js";
@@ -293,6 +294,7 @@ async function persistSatisfiedPostcondition(
     now: Date;
   }>,
 ): Promise<void> {
+  await assertFundingEvidenceRepairFence(client, input.target.operationId);
   // The receipt was inspected outside this transaction. Lock and re-derive
   // before making its postcondition durable so an old inspection cannot add
   // evidence after a concurrent terminal decision.

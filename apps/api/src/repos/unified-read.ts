@@ -137,11 +137,12 @@ function buildLimitlessAmmFallbackAllowedExpr(
   nowParam: string,
   yesAlias: string,
   noAlias: string,
+  tradeTypeExpr = "m.metadata->>'tradeType'",
 ): string {
   return `
     not (
       m.venue = 'limitless'
-      and coalesce(m.metadata->>'tradeType', 'clob') = 'amm'
+      and coalesce(${tradeTypeExpr}, 'clob') = 'amm'
       and coalesce(${yesAlias}.best_bid, ${yesAlias}.best_ask, ${noAlias}.best_bid, ${noAlias}.best_ask) is null
       and (m.updated_at is null or m.updated_at <= (${nowParam}::timestamptz - ${LIMITLESS_AMM_STALE_FALLBACK_INTERVAL}))
     )
@@ -4023,6 +4024,10 @@ export async function fetchFeedMarkets(
   const marketBaseSql = directTokenLookup
     ? `
     select selected_market.*,
+      metadata_fields."venueExchange" as metadata_venue_exchange,
+      metadata_fields."venueAdapter" as metadata_venue_adapter,
+      metadata_fields.address as metadata_address,
+      metadata_fields."tradeType" as metadata_trade_type,
       canonical_pair.token_yes as resolved_token_yes,
       canonical_pair.token_no as resolved_token_no
     from (select distinct event_id from event_order) selected_event
@@ -4032,6 +4037,17 @@ export async function fetchFeedMarkets(
       where ranked_market.market_rank <= ${marketLimitParam}
     ) selected_market
     cross join lateral (${canonicalMarketTokenPairSql("selected_market")}) canonical_pair
+    cross join lateral (
+      select selected_market.metadata || '{}'::jsonb as expanded_metadata
+      offset 0
+    ) metadata_expand
+    cross join lateral jsonb_to_record(
+      case
+        when jsonb_typeof(metadata_expand.expanded_metadata) = 'object'
+          then metadata_expand.expanded_metadata
+        else '{}'::jsonb
+      end
+    ) as metadata_fields("venueExchange" text, "venueAdapter" text, address text, "tradeType" text)
   `
     : `
     select
@@ -4104,6 +4120,7 @@ export async function fetchFeedMarkets(
     nowParam,
     "yes_top",
     "no_top",
+    directTokenLookup ? "m.metadata_trade_type" : undefined,
   );
   const marketBestBidExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_bid else null end`;
   const marketBestAskExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_ask else null end`;
@@ -4115,6 +4132,24 @@ export async function fetchFeedMarkets(
        and cached_change.calculation_version = 2
     `
     : "";
+  const marketVenueExchangeExpr = directTokenLookup
+    ? "m.metadata_venue_exchange"
+    : "m.metadata->>'venueExchange'";
+  const marketVenueAdapterExpr = directTokenLookup
+    ? "m.metadata_venue_adapter"
+    : "m.metadata->>'venueAdapter'";
+  const marketAddressExpr = directTokenLookup
+    ? "m.metadata_address"
+    : "m.metadata->>'address'";
+  const marketTradeTypeExpr = directTokenLookup
+    ? "m.metadata_trade_type"
+    : "m.metadata->>'tradeType'";
+  const eventVenueExchangeExpr = directTokenLookup
+    ? "e.event_venue_exchange"
+    : "e.metadata->>'venueExchange'";
+  const eventVenueAdapterExpr = directTokenLookup
+    ? "e.event_venue_adapter"
+    : "e.metadata->>'venueAdapter'";
   const withParts: string[] = [];
   if (directMarketSearchCtes.length) withParts.push(...directMarketSearchCtes);
   withParts.push(`event_order as (${eventOrderSql})`);
@@ -4124,13 +4159,18 @@ export async function fetchFeedMarkets(
     withParts.push(`event_base as materialized (
       select e.id, e.title, e.duration_minutes, e.category, e.start_date, e.end_date,
         e.liquidity, e.open_interest, e.volume_total, e.volume_24h,
-        e.slug, e.image, e.icon, e.metadata
+        e.slug, e.image, e.icon,
+        e.metadata->>'venueExchange' as event_venue_exchange,
+        e.metadata->>'venueAdapter' as event_venue_adapter
       from (select distinct event_id from event_order) selected_event
       join unified_events e on e.id = selected_event.event_id
     )`);
   }
   // Resolve canonical token IDs once per selected market. Direct price joins
   // otherwise inline this CTE and repeat the correlated mapping lookups.
+  // The fenced JSON concatenation detoasts metadata once, then extracts only
+  // four scalars before materialization; never store the expanded JSON blob.
+  // Preserve the original metadata payload and ->> NULLs for non-object JSON.
   withParts.push(`market_base as materialized (${marketBaseSql})`);
   withParts.push(...bookSnapshot.ctes);
   const withClause = `with ${withParts.join(",\n")}`;
@@ -4191,10 +4231,10 @@ export async function fetchFeedMarkets(
       m.image as market_image,
       m.icon as market_icon,
       m.metadata as market_metadata,
-      coalesce(m.metadata->>'venueExchange', e.metadata->>'venueExchange') as venue_exchange,
-      coalesce(m.metadata->>'venueAdapter', e.metadata->>'venueAdapter') as venue_adapter,
-      m.metadata->>'address' as market_address,
-      m.metadata->>'tradeType' as trade_type,
+      coalesce(${marketVenueExchangeExpr}, ${eventVenueExchangeExpr}) as venue_exchange,
+      coalesce(${marketVenueAdapterExpr}, ${eventVenueAdapterExpr}) as venue_adapter,
+      ${marketAddressExpr} as market_address,
+      ${marketTradeTypeExpr} as trade_type,
       m.updated_at as last_update,
       m.created_at as market_created_at
     from event_order eo

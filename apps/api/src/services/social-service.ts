@@ -18,7 +18,6 @@ import {
   type VerifiedBuyFacts,
 } from "./verified-buy.js";
 import {
-  compareSocialDecimal,
   decodeSocialCursor,
   divideSocialDecimal,
   encodeSocialCursor,
@@ -36,6 +35,7 @@ import {
   SOCIAL_PUBLIC_THESIS as publicThesis,
   SOCIAL_VALID_ROOT_JOIN,
 } from "./social-visibility.js";
+import { meetsPublicationMinimum } from "./social-publication-minimum.js";
 import { buildSocialInstrument } from "./social-instrument.js";
 import {
   verifiedBuyFactsSchema,
@@ -847,10 +847,10 @@ export class SocialService {
     else if (!resolved.policy.enabled || !resolved.policy.publicationsEnabled)
       reason = "publications_disabled";
     else if (
-      compareSocialDecimal(
+      !meetsPublicationMinimum(
         facts.grossNotionalUsd,
         resolved.policy.minimumNotionalUsd,
-      ) < 0
+      )
     )
       reason = "below_minimum";
     else if (!accepting(await this.purchaseMarket(this.db, facts)))
@@ -916,10 +916,10 @@ export class SocialService {
       if (existing.rows[0])
         throw new SocialError("purchase_already_published", 409);
       if (
-        compareSocialDecimal(
+        !meetsPublicationMinimum(
           facts.grossNotionalUsd,
           policy.minimumNotionalUsd,
-        ) < 0
+        )
       )
         throw new SocialError("below_minimum", 409);
       const selectedMarket = await this.purchaseMarket(db, facts, true);

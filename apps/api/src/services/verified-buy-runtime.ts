@@ -5,7 +5,6 @@ import { resolveSocialPolicy } from "./social-policy.js";
 import {
   createVerifiedBuyObserver,
   type VerifiedBuyObserverDependencies,
-  terminalZeroFill,
 } from "./verified-buy-observer.js";
 import { repairUnrecordedCopies } from "./verified-copy-repair.js";
 import { EvidenceBudgetExhausted, repairVerifiedBuys } from "./verified-buy.js";
@@ -17,6 +16,7 @@ import { fetchKalshiNormalizedOrderStatus } from "./kalshi-executions.js";
 import { recoverCopyPurchaseLinks } from "./social-copy.js";
 import { AuthService } from "../auth.js";
 import { createVerifiedRepairLaneRunner } from "./verified-repair-lanes.js";
+import { readPolymarketFillCandidates } from "./verified-buy-polymarket-provider.js";
 import {
   fetchPolymarketOrderByHash,
   fetchPolymarketTrades,
@@ -94,7 +94,7 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
         orderHash,
       );
       if (!saved?.apiKey || !saved.apiSecret || !saved.apiPassphrase)
-        throw new Error("Provider credential unavailable");
+        return { state: "unavailable" };
       const common = {
         baseUrl: env.polymarketClobBase,
         timeoutMs: env.polygonRpcTimeoutMs,
@@ -105,59 +105,18 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
           apiPassphrase: saved.apiPassphrase,
         },
       };
-      consume();
-      const order = await fetchPolymarketOrderByHash({ ...common, orderHash });
-      if (
-        !order.ok ||
-        !order.order ||
-        order.order.id?.toLowerCase() !== orderHash.toLowerCase() ||
-        order.order.makerAddress?.toLowerCase() !== owner.toLowerCase() ||
-        order.order.assetId !== tokenId ||
-        order.order.side?.toUpperCase() !== "BUY"
-      )
-        return [];
-      if (
-        terminalZeroFill({
-          status: order.order.status,
-          filledQuantity: order.order.sizeMatched,
-          evidenceCount: order.order.associateTrades.length,
-        })
-      )
-        return [{ provider_tx_hash: null, provider_status: "NO_FILL" }];
-      if (
-        order.order.associateTrades.length > policy.repairProviderRequestBudget
-      )
-        throw new EvidenceBudgetExhausted(
-          order.order.associateTrades.length,
-          policy.repairProviderRequestBudget,
-        );
-      const result: Array<{
-        provider_tx_hash: string | null;
-        provider_status: string | null;
-      }> = [];
-      for (const id of order.order.associateTrades) {
-        consume();
-        const trades = await fetchPolymarketTrades({
-          ...common,
-          query: { id },
-        });
-        if (!trades.ok) throw new Error("Provider observation unavailable");
-        const trade = trades.trades.find(
-          (item) =>
-            item.id === id &&
-            (item.takerOrderId?.toLowerCase() === orderHash.toLowerCase() ||
-              item.makerOrders.some(
-                (maker) =>
-                  maker.orderId?.toLowerCase() === orderHash.toLowerCase(),
-              )),
-        );
-        if (!trade) throw new Error("Provider trade identity mismatch");
-        result.push({
-          provider_tx_hash: trade.transactionHash,
-          provider_status: trade.status,
-        });
-      }
-      return result;
+      return readPolymarketFillCandidates({
+        owner,
+        orderHash,
+        tokenId,
+        consume,
+        assertBudget: (needed) => {
+          if (needed > budget)
+            throw new EvidenceBudgetExhausted(needed, budget);
+        },
+        readOrder: () => fetchPolymarketOrderByHash({ ...common, orderHash }),
+        readTrades: (id) => fetchPolymarketTrades({ ...common, query: { id } }),
+      });
     },
   };
   const observer = createVerifiedBuyObserver(pool, dependencies);

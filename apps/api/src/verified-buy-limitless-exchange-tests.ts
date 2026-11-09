@@ -151,7 +151,7 @@ async function observe(
     },
     readFinalizedSolanaTransaction: async () => null,
     readDflowOrder: async () => null,
-    readPolymarketFills: async () => [],
+    readPolymarketFills: async () => ({ state: "fills", fills: [] }),
   };
   const db = {
     query: async () => {

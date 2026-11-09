@@ -148,6 +148,48 @@ for (const directTokenLookup of [undefined, false, true]) {
       assert.doesNotMatch(captured, /latest_book as|book_24h as|token_set as/);
       assert.match(captured, /left join unified_token_top_latest yes_top/);
       assert.match(captured, /left join unified_token_top_latest no_top/);
+      assert.equal(captured.match(/jsonb_to_record\(/g)?.length, 1);
+      assert.equal(
+        captured.match(/selected_market\.metadata \|\| '\{\}'::jsonb/g)?.length,
+        1,
+      );
+      assert.match(
+        captured,
+        /as expanded_metadata\s+offset 0\s*\) metadata_expand/,
+      );
+      assert.match(
+        captured,
+        /when jsonb_typeof\(metadata_expand\.expanded_metadata\) = 'object'\s+then metadata_expand\.expanded_metadata\s+else '\{\}'::jsonb/,
+      );
+      const materializedMarketProjection = captured.match(
+        /market_base as materialized\s*\(\s*select ([\s\S]*?)\s+from \(select distinct event_id/,
+      )?.[1];
+      assert.ok(materializedMarketProjection);
+      assert.doesNotMatch(
+        materializedMarketProjection,
+        /expanded_metadata|metadata_expand\.\*/,
+      );
+      assert.match(
+        captured,
+        /e\.metadata->>'venueExchange' as event_venue_exchange/,
+      );
+      assert.match(
+        captured,
+        /e\.metadata->>'venueAdapter' as event_venue_adapter/,
+      );
+      assert.match(
+        captured,
+        /coalesce\(m\.metadata_venue_exchange, e\.event_venue_exchange\) as venue_exchange/,
+      );
+      assert.match(
+        captured,
+        /coalesce\(m\.metadata_trade_type, 'clob'\) = 'amm'/,
+      );
+      assert.match(captured, /m\.metadata as market_metadata/);
+      assert.doesNotMatch(
+        captured,
+        /m\.metadata->>'(?:venueExchange|venueAdapter|address|tradeType)'/,
+      );
       assert.equal(
         (
           captured.match(
@@ -171,6 +213,12 @@ for (const directTokenLookup of [undefined, false, true]) {
     } else {
       assert.match(captured, /latest_book as materialized/);
       if (!cachedChange) assert.match(captured, /book_24h as materialized/);
+      assert.doesNotMatch(captured, /metadata_expand|jsonb_to_record/);
+      assert.match(
+        captured,
+        /coalesce\(m\.metadata->>'tradeType', 'clob'\) = 'amm'/,
+      );
+      assert.match(captured, /m\.metadata->>'address' as market_address/);
     }
     if (cachedChange) {
       assert.doesNotMatch(

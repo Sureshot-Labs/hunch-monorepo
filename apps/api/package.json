@@ -55,6 +55,7 @@
     "rewards:wallets:generate": "tsx src/rewards-wallets-generate.ts",
     "rewards:migration:preflight": "tsx src/rewards-migration-preflight.ts",
     "funding:migration:preflight": "tsx src/funding-migration-preflight.ts",
+    "funding:evidence:repair": "tsx src/funding-evidence-repair.ts",
     "funding:authorization:grant": "tsx src/funding-authorization-admin.ts",
     "funding:authorization:revoke": "tsx src/funding-authorization-admin.ts --revoke",
     "privy:policy:router-usdce-approval": "tsx src/privy-policy-router-usdce-approval.ts",

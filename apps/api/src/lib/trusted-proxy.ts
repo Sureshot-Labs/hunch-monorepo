@@ -18,8 +18,9 @@ privateProxyAddresses.addSubnet("fc00::", 7, "ipv6");
 // numeric hop count because it alone cannot validate the connecting peer.
 export function resolveTrustedProxy(enabled: boolean, hops: number) {
   if (!enabled) return false;
-  return (address: string, hop: number): boolean => {
+  return (address: unknown, hop: number): boolean => {
     if (
+      typeof address !== "string" ||
       !Number.isInteger(hops) ||
       !Number.isInteger(hop) ||
       hop < 0 ||

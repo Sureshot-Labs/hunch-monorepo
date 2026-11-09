@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 // @integration
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import type { Pool as InfraPool } from "@hunch/infra";
 import type { FeedInputs, FeedMarketRow } from "./repos/unified-read.js";
 import {
@@ -313,6 +314,186 @@ try {
     equivalenceCases += 1;
     return defaultRows;
   }
+
+  const metadataCases = [
+    { name: "sql-null", payload: null },
+    { name: "json-null", payload: "null", eventPayload: "null" },
+    {
+      name: "array",
+      payload: '[{"venueExchange":"not-an-object"}]',
+      eventPayload: "[]",
+    },
+    { name: "string", payload: '"scalar"', eventPayload: '"scalar"' },
+    { name: "number", payload: "7", eventPayload: "7" },
+    { name: "boolean", payload: "true", eventPayload: "false" },
+    { name: "empty-object", payload: "{}" },
+    {
+      name: "strings-and-case",
+      payload: JSON.stringify({
+        venueExchange: "market exchange",
+        venueexchange: "wrong case",
+        venueAdapter: "",
+        address: 'Unicode \u2603 and \\"quotes\\"',
+        tradeType: "amm",
+      }),
+    },
+    {
+      name: "typed-values",
+      payload: JSON.stringify({
+        venueExchange: [1, "x"],
+        venueAdapter: false,
+        address: { nested: [1, true] },
+        tradeType: 17,
+      }),
+    },
+    {
+      name: "null-fields",
+      payload: JSON.stringify({
+        venueExchange: null,
+        venueAdapter: null,
+        address: null,
+        tradeType: null,
+      }),
+    },
+  ];
+  const metadataEventIds = metadataCases.map(({ name }) => `metadata-${name}`);
+  for (const [fixtureIndex, fixture] of metadataCases.entries()) {
+    const fixtureId = metadataEventIds[fixtureIndex];
+    await client.query(
+      "insert into unified_events(id, title, metadata) values ($1, $1, $2::jsonb)",
+      [
+        fixtureId,
+        fixture.eventPayload ??
+          JSON.stringify({
+            venueExchange: "event exchange",
+            venueAdapter: "event adapter",
+          }),
+      ],
+    );
+    await client.query(
+      `insert into unified_markets(id, event_id, venue_market_id, title, metadata)
+        values ($1, $1, $1, $1, $2::jsonb)`,
+      [fixtureId, fixture.payload],
+    );
+  }
+  const largeMetadataFixtures = [
+    {
+      id: "metadata-large-compressed",
+      padding: "compressible metadata fixture ".repeat(4000),
+    },
+    {
+      id: "metadata-large-external",
+      padding: Array.from({ length: 2048 }, (_, fixtureIndex) =>
+        createHash("md5").update(String(fixtureIndex)).digest("hex"),
+      ).join(""),
+    },
+  ];
+  const largeMetadataEventIds = largeMetadataFixtures.map(({ id }) => id);
+  for (const fixture of largeMetadataFixtures) {
+    await client.query(
+      "insert into unified_events(id, title, metadata) values ($1, $1, $2::jsonb)",
+      [
+        fixture.id,
+        JSON.stringify({
+          venueExchange: "large event exchange",
+          venueAdapter: "large event adapter",
+          padding: fixture.padding,
+        }),
+      ],
+    );
+    await client.query(
+      `insert into unified_markets(id, event_id, venue_market_id, title, metadata)
+        select $1 || ':' || fixture_no, $1, $1 || ':' || fixture_no,
+          'Large metadata child', $2::jsonb
+        from generate_series(1, 105) fixture_children(fixture_no)`,
+      [
+        fixture.id,
+        JSON.stringify({
+          address: "large market address",
+          tradeType: "clob",
+          padding: fixture.padding,
+        }),
+      ],
+    );
+  }
+  await client.query(
+    `insert into polymarket_markets(id) select venue_market_id
+      from unified_markets where event_id = any($1::text[])`,
+    [[...metadataEventIds, ...largeMetadataEventIds]],
+  );
+  const metadataStorage = await client.query<{
+    event_id: string;
+    logical_bytes: number;
+    stored_bytes: number;
+    compressed: boolean;
+  }>(
+    `select event_id, max(octet_length(metadata::text)) as logical_bytes,
+      max(pg_column_size(metadata)) as stored_bytes,
+      bool_and(pg_column_compression(metadata) is not null) as compressed
+      from unified_markets where event_id = any($1::text[]) group by event_id`,
+    [largeMetadataEventIds],
+  );
+  assert.ok(metadataStorage.rows.every((row) => row.logical_bytes > 32_000));
+  assert.equal(
+    metadataStorage.rows.find(
+      (row) => row.event_id === "metadata-large-compressed",
+    )?.compressed,
+    true,
+  );
+  assert.ok(
+    Number(
+      metadataStorage.rows.find(
+        (row) => row.event_id === "metadata-large-external",
+      )?.stored_bytes,
+    ) > 8192,
+    "The external metadata fixture must exceed one heap page",
+  );
+  const toastStorage = await client.query<{ has_external_values: boolean }>(
+    `select pg_relation_size(reltoastrelid) > 0 as has_external_values
+      from pg_class where oid = 'unified_markets'::regclass`,
+  );
+  assert.equal(toastStorage.rows[0].has_external_values, true);
+  const metadataRows = await assertEquivalent(
+    "all metadata JSON types and event fallback",
+    baseInputs,
+    metadataEventIds,
+  );
+  for (const [fixtureIndex, fixture] of metadataCases.entries()) {
+    const actual = marketRow(metadataRows, metadataEventIds[fixtureIndex]);
+    assert.deepEqual(
+      actual.market_metadata,
+      fixture.payload === null ? null : JSON.parse(fixture.payload),
+      "Public metadata must remain the original JSON value",
+    );
+  }
+  for (const page of [
+    largeMetadataEventIds,
+    largeMetadataEventIds.slice(1),
+    [],
+  ]) {
+    const rows = await assertEquivalent(
+      "large compressed/external metadata selected and resumed page",
+      { ...baseInputs, offset: 100 },
+      page,
+    );
+    assert.equal(rows.length, page.length * 100);
+    for (const row of rows) {
+      const fixture = largeMetadataFixtures.find(
+        ({ id }) => id === row.event_id,
+      );
+      assert.ok(fixture);
+      assert.deepEqual(row.market_metadata, {
+        address: "large market address",
+        tradeType: "clob",
+        padding: fixture.padding,
+      });
+      assert.equal(row.venue_exchange, "large event exchange");
+      assert.equal(row.venue_adapter, "large event adapter");
+    }
+  }
+  await client.query(
+    "analyze unified_events; analyze unified_markets; analyze polymarket_markets",
+  );
 
   const baseline = await assertEquivalent(
     "trending full selected page",
@@ -630,6 +811,18 @@ try {
         eventIds.filter((id) => id !== "absent-event").length * 10,
     })),
     {
+      eventIds: [...batchEvents.slice(0, 98), ...largeMetadataEventIds],
+      input: baseInputs,
+      expectedRows: 1180,
+      eligibleChildren: 1190,
+    },
+    {
+      eventIds: batchEvents,
+      input: { ...baseInputs, minLiquidity: 1000 },
+      expectedRows: 0,
+      eligibleChildren: 1000,
+    },
+    {
       eventIds: ["unselected-event"],
       input: baseInputs,
       expectedRows: 100,
@@ -687,12 +880,13 @@ try {
       );
       try {
         const explained = await client.query(
-          `explain (analyze, buffers, format json) execute fixture_feed_hydration_plan(${capturedParams.map(sqlLiteral).join(",")})`,
+          `explain (analyze, buffers, verbose, format json) execute fixture_feed_hydration_plan(${capturedParams.map(sqlLiteral).join(",")})`,
         );
         const plan = explained.rows[0]["QUERY PLAN"][0].Plan;
         assert.equal(plan["Actual Rows"], expectedRows);
         let marketRowsRead = 0;
         let mappingLoops = 0;
+        let metadataExtractionLoops = 0;
         let searchMatchRows = 0;
         const inspect = (
           node: Record<string, unknown>,
@@ -708,6 +902,21 @@ try {
               Number(node["Actual Loops"]);
           if (node["Relation Name"] === "unified_market_tokens")
             mappingLoops += Number(node["Actual Loops"]);
+          if (node["Function Name"] === "jsonb_to_record") {
+            metadataExtractionLoops += Number(node["Actual Loops"]);
+            assert.equal(
+              Number(node["Shared Hit Blocks"]) +
+                Number(node["Shared Read Blocks"]),
+              0,
+              "Metadata extraction must consume the already expanded JSON, not reread TOAST",
+            );
+          }
+          if (node["Subplan Name"] === "CTE market_base")
+            assert.doesNotMatch(
+              JSON.stringify(node.Output),
+              /expanded_metadata/,
+              "The materialized market rows must not store expanded metadata",
+            );
           // Search classification has several independent, bounded consumers.
           // Here guard the ranking join specifically against one complete
           // matches scan per selected event, not those separate consumers.
@@ -756,6 +965,11 @@ try {
           mappingLoops <= expectedRows,
           `${planMode}: mappings resolved before fanout cap: ${mappingLoops} > ${expectedRows}`,
         );
+        assert.ok(
+          metadataExtractionLoops <= expectedRows,
+          `${planMode}: metadata extracted before the per-event cap: ${metadataExtractionLoops} > ${expectedRows}`,
+        );
+        if (expectedRows > 0) assert.ok(metadataExtractionLoops > 0);
         if (input.q)
           assert.ok(
             searchMatchRows <= eligibleChildren,

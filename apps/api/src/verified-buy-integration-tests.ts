@@ -143,7 +143,7 @@ const deps: VerifiedBuyObserverDependencies = {
   readEvmReceipt: async () => ({ receipt, timestamp: facts.purchasedAt }),
   readFinalizedSolanaTransaction: async () => null,
   readDflowOrder: async () => null,
-  readPolymarketFills: async () => [],
+  readPolymarketFills: async () => ({ state: "fills", fills: [] }),
   readLimitlessOrder: async ({ clientOrderId }) => ({
     status: "found",
     clientOrderId,
@@ -958,11 +958,13 @@ try {
     );
     const timingDeps: VerifiedBuyObserverDependencies = {
       ...deps,
-      readPolymarketFills: async () =>
-        receiptHashes.map((hash) => ({
+      readPolymarketFills: async () => ({
+        state: "fills",
+        fills: receiptHashes.map((hash) => ({
           provider_tx_hash: hash,
           provider_status: "CONFIRMED",
         })),
+      }),
       readEvmReceipt: async (_chain, hash) => {
         const timestamp = scenario.times[receiptHashes.indexOf(hash)];
         assert.ok(timestamp, "receipt identity must match the timing fixture");

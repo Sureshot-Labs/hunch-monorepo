@@ -27,11 +27,31 @@ import {
 } from "../execution/delegated-funding-profile-ids.js";
 import { isDirectWithdrawalExecutionKind } from "../execution/direct-withdrawal-transfer.js";
 import {
+  FUNDING_EVIDENCE_REPAIR_REVISION,
+  fundingEvidenceRepairCompatibleSql,
+  initialFundingEvidenceRepairState,
+  intrinsicFundingReceiptSourceKeys,
+  parseFundingEvidenceRepairState,
+  sanitizeFundingEvidenceRepairProbe,
+  type FundingEvidenceRepairProbe,
+  type FundingEvidenceRepairState,
+  type FundingReceiptPollOptions,
+} from "./funding-evidence-repair-state.js";
+import { canonicalJsonEqual } from "../persistence/canonical.js";
+import { loadFundingEvidenceRepairSnapshot } from "../persistence/funding-evidence-repair-repository.js";
+import {
+  assertFundingEvidenceRepairFence,
+  fundingEvidenceRepairTime,
+  isFundingEvidenceRepairFenceLost,
+  withFundingEvidenceRepairFence,
+} from "./funding-evidence-repair-fence.js";
+import {
   claimFundingReconciliationJobs,
   fetchFundingOperationForWorkerInTransaction,
   finishFundingReconciliationLease as finishFundingReconciliationLeaseRaw,
   listFundingObservationsForOperation,
   releaseFundingReservationInTransaction,
+  renewFundingReconciliationLease,
   writeFundingOperationLifecycleProjectionCacheInTransaction,
   writeFundingSegmentProjectionCacheInTransaction,
   writeFundingOperationSupportFactsInTransaction,
@@ -796,6 +816,7 @@ export async function reduceFundingOperationInTransaction(
   client: PoolClient,
   input: Readonly<{ operationId: string; now?: Date }>,
 ): Promise<FundingReductionResult> {
+  await assertFundingEvidenceRepairFence(client, input.operationId);
   const now = input.now ?? new Date();
   const expiryPreflight = await preflightSettledConsumerReservationExpiry(
     client,
@@ -1113,7 +1134,14 @@ export type FundingReconciliationBatchOptions = Readonly<{
   receiptPoll?: (
     operationId: string,
     now: Date,
-  ) => Promise<Readonly<{ receiptsPolled: number }>>;
+    options?: FundingReceiptPollOptions,
+  ) => Promise<
+    Readonly<{
+      receiptsPolled: number;
+      sourceProbes?: Readonly<Record<string, FundingEvidenceRepairProbe>>;
+      dynamicSources?: boolean;
+    }>
+  >;
   postconditionPoll?: (
     operationId: string,
     now: Date,
@@ -1455,6 +1483,7 @@ async function synchronizeFundingReconciliationActiveWindow(
   }>,
 ): Promise<FundingReconciliationActiveWindow | null> {
   return tx(pool, async (client) => {
+    await assertFundingEvidenceRepairFence(client, input.operationId);
     const operation = await fetchFundingOperationForWorkerInTransaction(
       client,
       input.operationId,
@@ -1725,6 +1754,7 @@ async function loadFundingOperationState(
   }>
 > {
   return tx(pool, async (client) => {
+    await assertFundingEvidenceRepairFence(client, operationId);
     const operation = await fetchFundingOperationForWorkerInTransaction(
       client,
       operationId,
@@ -1858,6 +1888,7 @@ export async function expireUnbroadcastActionWait(
   input: Readonly<{ operationId: string; now: Date }>,
 ): Promise<boolean> {
   return tx(pool, async (client) => {
+    await assertFundingEvidenceRepairFence(client, input.operationId);
     const operation = await fetchFundingOperationForWorkerInTransaction(
       client,
       input.operationId,
@@ -1929,6 +1960,7 @@ async function markFundingOperationRecoveryRequiredInTransaction(
     now: Date;
   }>,
 ): Promise<boolean> {
+  await assertFundingEvidenceRepairFence(client, input.operationId);
   let operation = await fetchFundingOperationForWorkerInTransaction(
     client,
     input.operationId,
@@ -2029,26 +2061,29 @@ async function finishFundingReconciliationLease(
   pool: Pool,
   input: Parameters<typeof finishFundingReconciliationLeaseRaw>[1],
 ): Promise<void> {
-  if (input.result.kind !== "error" || input.result.deadLetter !== true) {
-    return finishFundingReconciliationLeaseRaw(pool, input);
-  }
-  const errorCode = input.result.errorCode;
   await tx(pool, async (client) => {
     const job = await client.query<{ operation_id: string }>(
       `select operation_id from funding_reconciliation_jobs where id = $1`,
       [input.jobId],
     );
     const operationId = job.rows[0]?.operation_id;
-    if (operationId) {
+    if (operationId)
+      await assertFundingEvidenceRepairFence(client, operationId);
+    const now = fundingEvidenceRepairTime(input.now);
+    if (
+      operationId &&
+      input.result.kind === "error" &&
+      input.result.deadLetter === true
+    ) {
       await markFundingOperationRecoveryRequiredInTransaction(client, {
         operationId,
-        errorCode,
+        errorCode: input.result.errorCode,
         recoveryMode: "manual_review",
-        now: input.now ?? new Date(),
+        now,
       });
     }
     // A lost lease rolls back the incident fact as well as the job update.
-    await finishFundingReconciliationLeaseRaw(client, input);
+    await finishFundingReconciliationLeaseRaw(client, { ...input, now });
   });
 }
 
@@ -2071,100 +2106,260 @@ async function processLease(
   receiptPoll?: FundingReconciliationBatchOptions["receiptPoll"],
   postconditionPoll?: FundingReconciliationBatchOptions["postconditionPoll"],
   destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"],
+  evidenceRepairClock?: Readonly<{ now?: Date; leaseSeconds?: number }>,
 ): Promise<"completed" | "requeued" | "failed" | "dead_lettered"> {
+  let ordinaryFence:
+    | Parameters<typeof withFundingEvidenceRepairFence>[0]
+    | null = null;
+  const releaseSupersededLease = async (authorityUnavailable = false) => {
+    const now = evidenceRepairClock?.now ?? new Date();
+    try {
+      await finishFundingReconciliationLeaseRaw(pool, {
+        jobId: lease.jobId,
+        leaseOwner: lease.leaseOwner,
+        leaseToken: lease.leaseToken,
+        now,
+        result: authorityUnavailable
+          ? {
+              kind: "error",
+              dueAt: new Date(now.getTime() + options.retryDelayMs),
+              errorCode: "funding_observation_authority_unavailable",
+              errorSummary:
+                "Observation authority is unavailable; no financial projection was changed",
+            }
+          : { kind: "requeue", dueAt: now },
+      });
+    } catch (error) {
+      if (
+        !(
+          error instanceof FundingPersistenceError &&
+          error.code === "lease_lost"
+        )
+      )
+        throw error;
+    }
+    return "failed" as const;
+  };
   try {
-    await tx(pool, async (client) => {
-      const operation = await fetchFundingOperationForWorkerInTransaction(
-        client,
-        lease.operationId,
-      );
-      const safeClosed = operation
-        ? await closeExpiredSafeFundingPreparationsInTransaction(
-            client,
-            operation.id,
-            options.now,
-          )
-        : false;
-      const embeddedClosed = operation
-        ? await closeExpiredEmbeddedFundingPreparationsInTransaction(
-            client,
-            operation.id,
-            options.now,
-          )
-        : false;
-      const solanaClosed = operation
-        ? await closeExpiredSolanaPreparationsInTransaction(
-            client,
-            operation.id,
-            options.now,
-          )
-        : false;
-      if (operation && (safeClosed || embeddedClosed || solanaClosed)) {
-        // A closed, never-admitted attempt is definitive cancellation evidence.
-        // Existing reduction detaches the old Buy and frees its reservations.
-        await reduceFundingOperationInTransaction(client, {
-          operationId: operation.id,
-          now: options.now,
-        });
-      }
-    });
-    let operationBeforePoll = await loadFundingOperationState(
-      pool,
-      lease.operationId,
-      options.now,
-      options.terminalTimeoutMs,
+    const repairHeader = await pool.query<{
+      status: string;
+      recovery_mode: string | null;
+      support_metadata: JsonRecord;
+      consent_stopped: boolean;
+    }>(
+      `select operation_row.status, operation_row.recovery_mode, operation_row.support_metadata,
+       (operation_row.expires_at <= $2 or (
+         exists (select 1 from funding_operation_steps action_row where action_row.operation_id=operation_row.id)
+         and not exists (select 1 from funding_operation_steps action_row
+           where action_row.operation_id=operation_row.id
+             and (action_row.action_expires_at is null or action_row.action_expires_at > $2))
+       )) as consent_stopped
+       from funding_operations operation_row where operation_row.id=$1`,
+      [lease.operationId, options.now],
+    );
+    const repairRow = repairHeader.rows[0];
+    const repair = parseFundingEvidenceRepairState(
+      repairRow?.support_metadata.evidenceRepairV1,
     );
     if (
-      operationBeforePoll.awaitingUnbroadcastActionReport &&
-      operationBeforePoll.unbroadcastActionExpiresAt !== null &&
-      operationBeforePoll.unbroadcastActionExpiresAt.getTime() <=
-        options.now.getTime() &&
-      (await expireUnbroadcastActionWait(pool, {
-        operationId: lease.operationId,
-        now: options.now,
-      }))
+      repairRow &&
+      "evidenceRepairV1" in repairRow.support_metadata &&
+      !repair
+    )
+      return "failed";
+    const nonterminal =
+      repairRow !== undefined &&
+      !["completed", "refunded", "failed", "cancelled"].includes(
+        repairRow.status,
+      );
+    // A claimed late-evidence wake is already addressed work. Do not send a
+    // stopped legacy operation through the manual-review/housekeeping gate just
+    // because it predates the repair envelope. Unscheduled legacy rows are not
+    // selected here; the background sweep remains bounded and unchanged.
+    const awakenedLegacyStopped =
+      !repair &&
+      nonterminal &&
+      (typeof repairRow.support_metadata.evidenceOnlyRecoveryAt === "string" ||
+        (repairRow.consent_stopped &&
+          repairRow.recovery_mode === "manual_review"));
+    if (
+      (repair &&
+        (repair.generation > repair.processedGeneration || nonterminal)) ||
+      awakenedLegacyStopped
     ) {
-      if (operationBeforePoll.recentFailedReceiptWatch) {
-        // Expiry releases an unused retry, but the earlier canonical failure
-        // remains under its bounded deep-reorg watch. Reload the now-terminal
-        // operation and keep this job alive until that watch ends.
-        operationBeforePoll = await loadFundingOperationState(
+      try {
+        return await processFundingEvidenceRepairLease(pool, lease, {
+          ...options,
+          // processLease has a batch-time snapshot for ordinary lifecycle
+          // decisions. Only the caller's explicit test clock may freeze lease
+          // renewal/completion after potentially slow receipt/provider I/O.
+          now: evidenceRepairClock?.now,
+          leaseSeconds: evidenceRepairClock?.leaseSeconds,
+          workerId: lease.leaseOwner,
+          providerPoll,
+          receiptPoll,
+          postconditionPoll,
+          destinationPoll,
+        });
+      } catch (error) {
+        if (
+          error instanceof FundingPersistenceError &&
+          error.code === "lease_lost"
+        ) {
+          const supersededAt = evidenceRepairClock?.now ?? new Date();
+          try {
+            // A new generation may invalidate acquisition while this worker
+            // still owns the queue lease. Release only that valid lease so the
+            // newer explicit request is not delayed behind its old timeout.
+            await finishFundingReconciliationLeaseRaw(pool, {
+              ...lease,
+              now: supersededAt,
+              result: { kind: "requeue", dueAt: supersededAt },
+            });
+          } catch (finishError) {
+            if (
+              !(
+                finishError instanceof FundingPersistenceError &&
+                finishError.code === "lease_lost"
+              )
+            )
+              throw finishError;
+          }
+          return "failed";
+        }
+        const failedAt = evidenceRepairClock?.now ?? new Date();
+        try {
+          await finishFundingReconciliationLeaseRaw(pool, {
+            ...lease,
+            now: failedAt,
+            result: {
+              kind: "error",
+              deadLetter: true,
+              dueAt: new Date(failedAt.getTime() + options.recoveryPollDelayMs),
+              errorCode: fundingEvidenceRepairErrorCode(error),
+              errorSummary:
+                "Evidence-only repair is unavailable; no transaction was sent",
+            },
+          });
+        } catch (finishError) {
+          if (
+            !(
+              finishError instanceof FundingPersistenceError &&
+              finishError.code === "lease_lost"
+            )
+          )
+            throw finishError;
+        }
+        return "failed";
+      }
+    }
+    ordinaryFence = {
+      ...lease,
+      generation: repair?.generation ?? null,
+      now: () => evidenceRepairClock?.now ?? new Date(),
+    };
+    // Ordinary terminal watches retain their cadence, but they still observe a
+    // specific repair generation (or its absence) across external acquisition.
+    return await withFundingEvidenceRepairFence(
+      ordinaryFence,
+      async (): Promise<
+        "completed" | "requeued" | "failed" | "dead_lettered"
+      > => {
+        await tx(pool, async (client) => {
+          await assertFundingEvidenceRepairFence(client, lease.operationId);
+          const operation = await fetchFundingOperationForWorkerInTransaction(
+            client,
+            lease.operationId,
+          );
+          const safeClosed = operation
+            ? await closeExpiredSafeFundingPreparationsInTransaction(
+                client,
+                operation.id,
+                options.now,
+              )
+            : false;
+          const embeddedClosed = operation
+            ? await closeExpiredEmbeddedFundingPreparationsInTransaction(
+                client,
+                operation.id,
+                options.now,
+              )
+            : false;
+          const solanaClosed = operation
+            ? await closeExpiredSolanaPreparationsInTransaction(
+                client,
+                operation.id,
+                options.now,
+              )
+            : false;
+          if (operation && (safeClosed || embeddedClosed || solanaClosed)) {
+            // A closed, never-admitted attempt is definitive cancellation evidence.
+            // Existing reduction detaches the old Buy and frees its reservations.
+            await reduceFundingOperationInTransaction(client, {
+              operationId: operation.id,
+              now: options.now,
+            });
+          }
+        });
+        let operationBeforePoll = await loadFundingOperationState(
           pool,
           lease.operationId,
           options.now,
           options.terminalTimeoutMs,
         );
-      } else {
-        await finishFundingReconciliationLease(pool, {
-          jobId: lease.jobId,
-          leaseOwner: lease.leaseOwner,
-          leaseToken: lease.leaseToken,
-          result: { kind: "completed" },
+        if (
+          operationBeforePoll.awaitingUnbroadcastActionReport &&
+          operationBeforePoll.unbroadcastActionExpiresAt !== null &&
+          operationBeforePoll.unbroadcastActionExpiresAt.getTime() <=
+            options.now.getTime() &&
+          (await expireUnbroadcastActionWait(pool, {
+            operationId: lease.operationId,
+            now: options.now,
+          }))
+        ) {
+          if (operationBeforePoll.recentFailedReceiptWatch) {
+            // Expiry releases an unused retry, but the earlier canonical failure
+            // remains under its bounded deep-reorg watch. Reload the now-terminal
+            // operation and keep this job alive until that watch ends.
+            operationBeforePoll = await loadFundingOperationState(
+              pool,
+              lease.operationId,
+              options.now,
+              options.terminalTimeoutMs,
+            );
+          } else {
+            await finishFundingReconciliationLease(pool, {
+              jobId: lease.jobId,
+              leaseOwner: lease.leaseOwner,
+              leaseToken: lease.leaseToken,
+              result: { kind: "completed" },
+              now: options.now,
+            });
+            return "completed";
+          }
+        }
+        const pollEvidence = await pollFundingReconciliationEvidence({
+          operationId: lease.operationId,
+          state: operationBeforePoll.state,
+          recoveryMode: operationBeforePoll.recoveryMode,
+          recentFailedReceiptWatch:
+            operationBeforePoll.recentFailedReceiptWatch,
+          terminalReceiptWatch: operationBeforePoll.terminalReceiptWatch,
+          terminalRelayRefundWatch:
+            operationBeforePoll.terminalRelayRefundWatch,
+          awaitingUnbroadcastActionReport:
+            operationBeforePoll.awaitingUnbroadcastActionReport,
           now: options.now,
+          providerPoll,
+          receiptPoll,
+          postconditionPoll,
+          destinationPoll,
         });
-        return "completed";
-      }
-    }
-    const pollEvidence = await pollFundingReconciliationEvidence({
-      operationId: lease.operationId,
-      state: operationBeforePoll.state,
-      recoveryMode: operationBeforePoll.recoveryMode,
-      recentFailedReceiptWatch: operationBeforePoll.recentFailedReceiptWatch,
-      terminalReceiptWatch: operationBeforePoll.terminalReceiptWatch,
-      terminalRelayRefundWatch: operationBeforePoll.terminalRelayRefundWatch,
-      awaitingUnbroadcastActionReport:
-        operationBeforePoll.awaitingUnbroadcastActionReport,
-      now: options.now,
-      providerPoll,
-      receiptPoll,
-      postconditionPoll,
-      destinationPoll,
-    });
-    if (pollEvidence.terminalReceiptPollFailed) {
-      const terminalReceiptVerificationWindow = await pool.query<{
-        expired: boolean;
-      }>(
-        `select exists (
+        if (pollEvidence.terminalReceiptPollFailed) {
+          const terminalReceiptVerificationWindow = await pool.query<{
+            expired: boolean;
+          }>(
+            `select exists (
                  select 1
                    from funding_operation_steps step
                    join funding_step_receipt_observations receipt
@@ -2186,32 +2381,32 @@ async function processLease(
                     and receipt.finalized_at >
                           $2::timestamptz - interval '15 minutes'
                ) as expired`,
-        [lease.operationId, options.now],
-      );
-      const deadLetter =
-        terminalReceiptVerificationWindow.rows[0]?.expired === true;
-      await finishFundingReconciliationLease(pool, {
-        jobId: lease.jobId,
-        leaseOwner: lease.leaseOwner,
-        leaseToken: lease.leaseToken,
-        result: {
-          kind: "error",
-          dueAt: new Date(options.now.getTime() + options.retryDelayMs),
-          errorCode: "terminal_relay_receipt_verification_unavailable",
-          errorSummary:
-            "terminal action receipt canonicality verification was unavailable",
-          deadLetter,
-        },
-        now: options.now,
-      });
-      return deadLetter ? "dead_lettered" : "requeued";
-    }
-    const reduction = await reduceFundingOperation(pool, {
-      operationId: lease.operationId,
-      now: options.now,
-    });
-    const unresolvedReceiptReorg = await pool.query<{ incident: boolean }>(
-      `select exists (
+            [lease.operationId, options.now],
+          );
+          const deadLetter =
+            terminalReceiptVerificationWindow.rows[0]?.expired === true;
+          await finishFundingReconciliationLease(pool, {
+            jobId: lease.jobId,
+            leaseOwner: lease.leaseOwner,
+            leaseToken: lease.leaseToken,
+            result: {
+              kind: "error",
+              dueAt: new Date(options.now.getTime() + options.retryDelayMs),
+              errorCode: "terminal_relay_receipt_verification_unavailable",
+              errorSummary:
+                "terminal action receipt canonicality verification was unavailable",
+              deadLetter,
+            },
+            now: options.now,
+          });
+          return deadLetter ? "dead_lettered" : "requeued";
+        }
+        const reduction = await reduceFundingOperation(pool, {
+          operationId: lease.operationId,
+          now: options.now,
+        });
+        const unresolvedReceiptReorg = await pool.query<{ incident: boolean }>(
+          `select exists (
          select 1
            from funding_step_receipt_observations receipt
            join funding_operation_step_attempts receipt_attempt
@@ -2223,28 +2418,28 @@ async function processLease(
             and receipt.reorged_at <=
                   $2::timestamptz - interval '15 minutes'
        ) as incident`,
-      [lease.operationId, options.now],
-    );
-    if (unresolvedReceiptReorg.rows[0]?.incident === true) {
-      await finishFundingReconciliationLease(pool, {
-        jobId: lease.jobId,
-        leaseOwner: lease.leaseOwner,
-        leaseToken: lease.leaseToken,
-        result: {
-          kind: "error",
-          dueAt: options.now,
-          errorCode: FUNDING_RECEIPT_REORG_UNRESOLVED_ERROR_CODE,
-          errorSummary:
-            "funding action receipt reorg remained unresolved after its canonical watch window",
-          deadLetter: true,
-        },
-        now: options.now,
-      });
-      return "dead_lettered";
-    }
-    const actionReceiptReorgWatch = reduction.terminal
-      ? await pool.query<{ watching: boolean }>(
-          `select exists (
+          [lease.operationId, options.now],
+        );
+        if (unresolvedReceiptReorg.rows[0]?.incident === true) {
+          await finishFundingReconciliationLease(pool, {
+            jobId: lease.jobId,
+            leaseOwner: lease.leaseOwner,
+            leaseToken: lease.leaseToken,
+            result: {
+              kind: "error",
+              dueAt: options.now,
+              errorCode: FUNDING_RECEIPT_REORG_UNRESOLVED_ERROR_CODE,
+              errorSummary:
+                "funding action receipt reorg remained unresolved after its canonical watch window",
+              deadLetter: true,
+            },
+            now: options.now,
+          });
+          return "dead_lettered";
+        }
+        const actionReceiptReorgWatch = reduction.terminal
+          ? await pool.query<{ watching: boolean }>(
+              `select exists (
              select 1
                from funding_operation_steps step
                join funding_step_receipt_observations receipt
@@ -2272,28 +2467,31 @@ async function processLease(
                   )
                 )
            ) as watching`,
-          [lease.operationId, options.now],
-        )
-      : null;
-    const reductionCompleted =
-      reduction.terminal &&
-      !reduction.reorgBlockedByTerminalState &&
-      actionReceiptReorgWatch?.rows[0]?.watching !== true;
-    const canonicalFinalizedStepEvidencePendingReduction = reductionCompleted
-      ? false
-      : await hasCanonicalFinalizedStepEvidencePendingReduction(
-          pool,
-          lease.operationId,
-          options.now,
-        );
-    // A reorged refund is a money-movement incident, not a property of the
-    // materialized operation cache.  The projector deliberately reopens its
-    // public cache to recovery_required as soon as the canonical credit is
-    // lost.  Keep the bounded watch/dead-letter decision anchored in the
-    // reorged refund fact, otherwise that correct cache update would turn the
-    // final scan into an unbounded retry loop.
-    const terminalRefundReorgIncident = await pool.query<{ incident: boolean }>(
-      `select exists (
+              [lease.operationId, options.now],
+            )
+          : null;
+        const reductionCompleted =
+          reduction.terminal &&
+          !reduction.reorgBlockedByTerminalState &&
+          actionReceiptReorgWatch?.rows[0]?.watching !== true;
+        const canonicalFinalizedStepEvidencePendingReduction =
+          reductionCompleted
+            ? false
+            : await hasCanonicalFinalizedStepEvidencePendingReduction(
+                pool,
+                lease.operationId,
+                options.now,
+              );
+        // A reorged refund is a money-movement incident, not a property of the
+        // materialized operation cache.  The projector deliberately reopens its
+        // public cache to recovery_required as soon as the canonical credit is
+        // lost.  Keep the bounded watch/dead-letter decision anchored in the
+        // reorged refund fact, otherwise that correct cache update would turn the
+        // final scan into an unbounded retry loop.
+        const terminalRefundReorgIncident = await pool.query<{
+          incident: boolean;
+        }>(
+          `select exists (
                select 1
                  from funding_observations reorged_refund
                 where reorged_refund.operation_id = $1::uuid
@@ -2336,198 +2534,226 @@ async function processLease(
                        )
                   )
              ) as incident`,
-      [lease.operationId, options.now],
+          [lease.operationId, options.now],
+        );
+        if (terminalRefundReorgIncident.rows[0]?.incident === true) {
+          await finishFundingReconciliationLease(pool, {
+            jobId: lease.jobId,
+            leaseOwner: lease.leaseOwner,
+            leaseToken: lease.leaseToken,
+            result: {
+              kind: "error",
+              dueAt: options.now,
+              errorCode: TERMINAL_REFUND_REORG_UNRESOLVED_ERROR_CODE,
+              errorSummary:
+                "terminal Relay refund reorg remained unresolved after its canonical recovery window",
+              deadLetter: true,
+            },
+            now: options.now,
+          });
+          return "dead_lettered";
+        }
+        const activeWindow = reductionCompleted
+          ? null
+          : await synchronizeFundingReconciliationActiveWindow(pool, {
+              operationId: lease.operationId,
+              attemptCount: lease.attemptCount,
+              now: options.now,
+              terminalTimeoutMs: options.terminalTimeoutMs,
+            });
+        const disposition = fundingReconciliationDisposition({
+          canonicalFinalizedStepEvidencePendingReduction,
+          state: reduction.finalState,
+          recoveryMode: reduction.recoveryMode,
+          reconciliationEvidenceTimedOut:
+            reduction.reconciliationEvidenceTimedOut,
+          automaticRecoveryRecorded: reduction.automaticRecoveryRecorded,
+          reductionCompleted,
+          reconciliationStartedAt: activeWindow?.startedAt ?? null,
+          now: options.now,
+          terminalTimeoutMs: options.terminalTimeoutMs,
+        });
+        // A receipt lookup can resolve the provider reference in this very pass.
+        // Do not schedule from its stale pre-poll replay lease after new evidence.
+        const schedulingWaitState = await fundingReconciliationWaitState(
+          pool,
+          lease.operationId,
+          options.terminalTimeoutMs,
+          options.now,
+        );
+        const providerReferenceDueAt =
+          schedulingWaitState.awaitingProviderReference &&
+          schedulingWaitState.providerReferenceRecoveryAt
+            ? new Date(
+                Math.max(
+                  schedulingWaitState.providerReferenceRecoveryAt.getTime(),
+                  options.now.getTime() + options.pollDelayMs,
+                ),
+              )
+            : null;
+        if (disposition === "complete") {
+          await finishFundingReconciliationLease(pool, {
+            jobId: lease.jobId,
+            leaseOwner: lease.leaseOwner,
+            leaseToken: lease.leaseToken,
+            result: { kind: "completed" },
+            now: options.now,
+          });
+          return "completed";
+        }
+        if (disposition === "recovery_required") {
+          await markFundingOperationRecoveryRequired(pool, {
+            operationId: lease.operationId,
+            errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+            recoveryMode: "automatic_evidence",
+            now: options.now,
+          });
+          await finishFundingReconciliationLease(pool, {
+            jobId: lease.jobId,
+            leaseOwner: lease.leaseOwner,
+            leaseToken: lease.leaseToken,
+            result: {
+              kind: "requeue",
+              dueAt:
+                providerReferenceDueAt ??
+                new Date(
+                  options.now.getTime() +
+                    fundingReconciliationPollDelayMs(
+                      {
+                        status: "recovery_required",
+                        stage: reduction.finalState.stage,
+                      },
+                      {
+                        activePollDelayMs: options.pollDelayMs,
+                        broadcastEvidenceActiveUntil:
+                          schedulingWaitState.broadcastEvidenceActiveUntil,
+                        idlePollDelayMs: options.idlePollDelayMs,
+                        now: options.now,
+                        recoveryMode: "automatic_evidence",
+                        recoveryPollDelayMs: options.recoveryPollDelayMs,
+                      },
+                    ),
+                ),
+            },
+            now: options.now,
+          });
+          return "requeued";
+        }
+        await finishFundingReconciliationLease(pool, {
+          jobId: lease.jobId,
+          leaseOwner: lease.leaseOwner,
+          leaseToken: lease.leaseToken,
+          result: {
+            kind: "requeue",
+            dueAt:
+              providerReferenceDueAt !== null
+                ? providerReferenceDueAt
+                : new Date(
+                    options.now.getTime() +
+                      fundingReconciliationPollDelayMs(reduction.finalState, {
+                        activePollDelayMs: options.pollDelayMs,
+                        broadcastEvidenceActiveUntil:
+                          schedulingWaitState.broadcastEvidenceActiveUntil,
+                        idlePollDelayMs: options.idlePollDelayMs,
+                        now: options.now,
+                        recoveryMode: reduction.recoveryMode,
+                        recoveryPollDelayMs: options.recoveryPollDelayMs,
+                        awaitingUnbroadcastActionReport:
+                          schedulingWaitState.awaitingUnbroadcastActionReport,
+                      }),
+                  ),
+          },
+          now: options.now,
+        });
+        return "requeued";
+      },
     );
-    if (terminalRefundReorgIncident.rows[0]?.incident === true) {
+  } catch (error) {
+    if (
+      isFundingEvidenceRepairFenceLost(error) ||
+      (error instanceof FundingPersistenceError && error.code === "lease_lost")
+    )
+      return releaseSupersededLease();
+    // A failed header read never established authority over operation facts.
+    // Only release the still-owned job, at the existing technical retry cadence.
+    if (!ordinaryFence) return releaseSupersededLease(true);
+    const recover = async (): Promise<
+      "completed" | "requeued" | "failed" | "dead_lettered"
+    > => {
+      const detail = summarizeError(error);
+      const activeWindow = await synchronizeFundingReconciliationActiveWindow(
+        pool,
+        {
+          operationId: lease.operationId,
+          attemptCount: lease.attemptCount,
+          now: options.now,
+          terminalTimeoutMs: options.terminalTimeoutMs,
+        },
+      );
+      const terminalTimeoutReached =
+        activeWindow != null &&
+        fundingReconciliationTerminalTimeoutReached({
+          reconciliationStartedAt: activeWindow.startedAt,
+          now: options.now,
+          terminalTimeoutMs: options.terminalTimeoutMs,
+        });
+      const timeoutRecoveryRequired = terminalTimeoutReached
+        ? await markFundingOperationRecoveryRequired(pool, {
+            operationId: lease.operationId,
+            errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+            recoveryMode: "automatic_evidence",
+            now: options.now,
+          })
+        : false;
+      if (timeoutRecoveryRequired) {
+        await finishFundingReconciliationLease(pool, {
+          jobId: lease.jobId,
+          leaseOwner: lease.leaseOwner,
+          leaseToken: lease.leaseToken,
+          result: {
+            kind: "requeue",
+            dueAt: new Date(
+              options.now.getTime() + options.recoveryPollDelayMs,
+            ),
+          },
+          now: options.now,
+        });
+        return "requeued";
+      }
+      const maximumActiveAttemptsReached =
+        activeWindow != null &&
+        lease.attemptCount - activeWindow.initialAttemptCount >=
+          options.maxAttempts;
+      const deadLetter =
+        maximumActiveAttemptsReached &&
+        !timeoutRecoveryRequired &&
+        fundingReconciliationErrorIsNonTransient(error);
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
         leaseToken: lease.leaseToken,
         result: {
           kind: "error",
-          dueAt: options.now,
-          errorCode: TERMINAL_REFUND_REORG_UNRESOLVED_ERROR_CODE,
-          errorSummary:
-            "terminal Relay refund reorg remained unresolved after its canonical recovery window",
-          deadLetter: true,
+          dueAt: new Date(options.now.getTime() + options.retryDelayMs),
+          errorCode: detail.code,
+          errorSummary: detail.summary,
+          deadLetter,
         },
         now: options.now,
       });
-      return "dead_lettered";
+      return deadLetter ? "dead_lettered" : "failed";
+    };
+    try {
+      return await withFundingEvidenceRepairFence(ordinaryFence, recover);
+    } catch (recoveryError) {
+      if (
+        isFundingEvidenceRepairFenceLost(recoveryError) ||
+        (recoveryError instanceof FundingPersistenceError &&
+          recoveryError.code === "lease_lost")
+      )
+        return releaseSupersededLease();
+      throw recoveryError;
     }
-    const activeWindow = reductionCompleted
-      ? null
-      : await synchronizeFundingReconciliationActiveWindow(pool, {
-          operationId: lease.operationId,
-          attemptCount: lease.attemptCount,
-          now: options.now,
-          terminalTimeoutMs: options.terminalTimeoutMs,
-        });
-    const disposition = fundingReconciliationDisposition({
-      canonicalFinalizedStepEvidencePendingReduction,
-      state: reduction.finalState,
-      recoveryMode: reduction.recoveryMode,
-      reconciliationEvidenceTimedOut: reduction.reconciliationEvidenceTimedOut,
-      automaticRecoveryRecorded: reduction.automaticRecoveryRecorded,
-      reductionCompleted,
-      reconciliationStartedAt: activeWindow?.startedAt ?? null,
-      now: options.now,
-      terminalTimeoutMs: options.terminalTimeoutMs,
-    });
-    // A receipt lookup can resolve the provider reference in this very pass.
-    // Do not schedule from its stale pre-poll replay lease after new evidence.
-    const schedulingWaitState = await fundingReconciliationWaitState(
-      pool,
-      lease.operationId,
-      options.terminalTimeoutMs,
-      options.now,
-    );
-    const providerReferenceDueAt =
-      schedulingWaitState.awaitingProviderReference &&
-      schedulingWaitState.providerReferenceRecoveryAt
-        ? new Date(
-            Math.max(
-              schedulingWaitState.providerReferenceRecoveryAt.getTime(),
-              options.now.getTime() + options.pollDelayMs,
-            ),
-          )
-        : null;
-    if (disposition === "complete") {
-      await finishFundingReconciliationLease(pool, {
-        jobId: lease.jobId,
-        leaseOwner: lease.leaseOwner,
-        leaseToken: lease.leaseToken,
-        result: { kind: "completed" },
-        now: options.now,
-      });
-      return "completed";
-    }
-    if (disposition === "recovery_required") {
-      await markFundingOperationRecoveryRequired(pool, {
-        operationId: lease.operationId,
-        errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
-        recoveryMode: "automatic_evidence",
-        now: options.now,
-      });
-      await finishFundingReconciliationLease(pool, {
-        jobId: lease.jobId,
-        leaseOwner: lease.leaseOwner,
-        leaseToken: lease.leaseToken,
-        result: {
-          kind: "requeue",
-          dueAt:
-            providerReferenceDueAt ??
-            new Date(
-              options.now.getTime() +
-                fundingReconciliationPollDelayMs(
-                  {
-                    status: "recovery_required",
-                    stage: reduction.finalState.stage,
-                  },
-                  {
-                    activePollDelayMs: options.pollDelayMs,
-                    broadcastEvidenceActiveUntil:
-                      schedulingWaitState.broadcastEvidenceActiveUntil,
-                    idlePollDelayMs: options.idlePollDelayMs,
-                    now: options.now,
-                    recoveryMode: "automatic_evidence",
-                    recoveryPollDelayMs: options.recoveryPollDelayMs,
-                  },
-                ),
-            ),
-        },
-        now: options.now,
-      });
-      return "requeued";
-    }
-    await finishFundingReconciliationLease(pool, {
-      jobId: lease.jobId,
-      leaseOwner: lease.leaseOwner,
-      leaseToken: lease.leaseToken,
-      result: {
-        kind: "requeue",
-        dueAt:
-          providerReferenceDueAt !== null
-            ? providerReferenceDueAt
-            : new Date(
-                options.now.getTime() +
-                  fundingReconciliationPollDelayMs(reduction.finalState, {
-                    activePollDelayMs: options.pollDelayMs,
-                    broadcastEvidenceActiveUntil:
-                      schedulingWaitState.broadcastEvidenceActiveUntil,
-                    idlePollDelayMs: options.idlePollDelayMs,
-                    now: options.now,
-                    recoveryMode: reduction.recoveryMode,
-                    recoveryPollDelayMs: options.recoveryPollDelayMs,
-                    awaitingUnbroadcastActionReport:
-                      schedulingWaitState.awaitingUnbroadcastActionReport,
-                  }),
-              ),
-      },
-      now: options.now,
-    });
-    return "requeued";
-  } catch (error) {
-    const detail = summarizeError(error);
-    const activeWindow = await synchronizeFundingReconciliationActiveWindow(
-      pool,
-      {
-        operationId: lease.operationId,
-        attemptCount: lease.attemptCount,
-        now: options.now,
-        terminalTimeoutMs: options.terminalTimeoutMs,
-      },
-    );
-    const terminalTimeoutReached =
-      activeWindow != null &&
-      fundingReconciliationTerminalTimeoutReached({
-        reconciliationStartedAt: activeWindow.startedAt,
-        now: options.now,
-        terminalTimeoutMs: options.terminalTimeoutMs,
-      });
-    const timeoutRecoveryRequired = terminalTimeoutReached
-      ? await markFundingOperationRecoveryRequired(pool, {
-          operationId: lease.operationId,
-          errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
-          recoveryMode: "automatic_evidence",
-          now: options.now,
-        })
-      : false;
-    if (timeoutRecoveryRequired) {
-      await finishFundingReconciliationLease(pool, {
-        jobId: lease.jobId,
-        leaseOwner: lease.leaseOwner,
-        leaseToken: lease.leaseToken,
-        result: {
-          kind: "requeue",
-          dueAt: new Date(options.now.getTime() + options.recoveryPollDelayMs),
-        },
-        now: options.now,
-      });
-      return "requeued";
-    }
-    const maximumActiveAttemptsReached =
-      activeWindow != null &&
-      lease.attemptCount - activeWindow.initialAttemptCount >=
-        options.maxAttempts;
-    const deadLetter =
-      maximumActiveAttemptsReached &&
-      !timeoutRecoveryRequired &&
-      fundingReconciliationErrorIsNonTransient(error);
-    await finishFundingReconciliationLease(pool, {
-      jobId: lease.jobId,
-      leaseOwner: lease.leaseOwner,
-      leaseToken: lease.leaseToken,
-      result: {
-        kind: "error",
-        dueAt: new Date(options.now.getTime() + options.retryDelayMs),
-        errorCode: detail.code,
-        errorSummary: detail.summary,
-        deadLetter,
-      },
-      now: options.now,
-    });
-    return deadLetter ? "dead_lettered" : "failed";
   }
 }
 
@@ -2542,6 +2768,378 @@ export function fundingEvidenceRepairErrorCode(error: unknown): string {
     }
   }
   return "evidence_repair_failed";
+}
+
+type EvidenceRepairLease = Readonly<{
+  jobId: string;
+  operationId: string;
+  leaseOwner: string;
+  leaseToken: string;
+}>;
+
+async function lockFundingEvidenceRepairLease(
+  client: PoolClient,
+  lease: EvidenceRepairLease,
+  now: Date,
+): Promise<void> {
+  // Keep the existing intent -> operation -> job lock order. In particular,
+  // explicit requests and late evidence must not deadlock the stopping worker.
+  await client.query(
+    `select id from telegram_trade_intents where funding_operation_id=$1 order by id for update`,
+    [lease.operationId],
+  );
+  await client.query(
+    `select id from funding_operations where id=$1 for update`,
+    [lease.operationId],
+  );
+  const owned = await client.query(
+    `select id from funding_reconciliation_jobs where id=$1 and status='leased'
+       and lease_owner=$2 and lease_token=$3 and lease_until>$4 for update`,
+    [lease.jobId, lease.leaseOwner, lease.leaseToken, now],
+  );
+  if (owned.rowCount !== 1)
+    throw new FundingPersistenceError(
+      "lease_lost",
+      "evidence repair lease is no longer owned",
+    );
+}
+
+/** Observation/accounting only. There are deliberately no executor/consumer callbacks. */
+async function processFundingEvidenceRepairLease(
+  pool: Pool,
+  lease: EvidenceRepairLease,
+  options: FundingReconciliationBatchOptions,
+): Promise<"completed" | "requeued" | "failed"> {
+  const now = options.now ?? new Date();
+  const currentTime = () => options.now ?? new Date();
+  const receiptPoll = options.receiptPoll;
+  const providerPoll = options.providerPoll;
+  const postconditionPoll = options.postconditionPoll;
+  const destinationPoll = options.destinationPoll;
+  if (!receiptPoll) {
+    await finishFundingReconciliationLeaseRaw(pool, {
+      ...lease,
+      now,
+      result: {
+        kind: "requeue",
+        dueAt: new Date(now.getTime() + (options.retryDelayMs ?? 30_000)),
+      },
+    });
+    return "requeued";
+  }
+  const started = await tx(pool, async (client) => {
+    await lockFundingEvidenceRepairLease(client, lease, now);
+    const snapshot = await loadFundingEvidenceRepairSnapshot(
+      client,
+      lease.operationId,
+      now,
+    );
+    if (snapshot && !snapshot.compatible)
+      throw new FundingPersistenceError(
+        "lease_lost",
+        "repair generation format changed",
+      );
+    if (!snapshot?.stopped)
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "evidence-only repair requires stopped consent",
+      );
+    const previous = snapshot.repair ?? initialFundingEvidenceRepairState();
+    const requested = previous.generation > previous.processedGeneration;
+    const meaningful =
+      requested ||
+      previous.inputDigest !== snapshot.inputDigest ||
+      previous.evaluatorRevision !== FUNDING_EVIDENCE_REPAIR_REVISION;
+    const generation =
+      meaningful && !requested ? previous.generation + 1 : previous.generation;
+    const active = meaningful
+      ? { ...previous, generation, state: "requested" as const }
+      : previous;
+    if (!snapshot.evidenceOnly || meaningful) {
+      const operation = await fetchFundingOperationForWorkerInTransaction(
+        client,
+        lease.operationId,
+      );
+      if (!operation)
+        throw new FundingPersistenceError(
+          "operation_not_found",
+          "repair operation disappeared",
+        );
+      await writeFundingOperationSupportFactsInTransaction(client, {
+        operationId: operation.id,
+        expectedVersion: operation.version,
+        now,
+        supportMetadataPatch: {
+          ...(!snapshot.evidenceOnly
+            ? { evidenceOnlyRecoveryAt: now.toISOString() }
+            : {}),
+          evidenceRepairV1: JSON.parse(JSON.stringify(active)) as JsonRecord,
+        },
+      });
+    }
+    if (meaningful)
+      await client.query(
+        `update funding_reconciliation_jobs set attempt_count=attempt_count+1 where id=$1`,
+        [lease.jobId],
+      );
+    return {
+      snapshot,
+      previous,
+      generation,
+      meaningful,
+      skipSourceKeys: intrinsicFundingReceiptSourceKeys(previous),
+    };
+  });
+  let failed = false;
+  let canonicalUnavailable = false;
+  let dynamicSources = false;
+  let sourceProbes: Readonly<Record<string, FundingEvidenceRepairProbe>> = {};
+  const poll = async (
+    stage: "receipt" | "provider" | "postcondition" | "destination",
+    work: () => Promise<unknown>,
+  ) => {
+    await renewFundingReconciliationLease(pool, {
+      ...lease,
+      now: currentTime(),
+      leaseSeconds: options.leaseSeconds ?? 30,
+    });
+    try {
+      await withFundingEvidenceRepairFence(
+        { ...lease, generation: started.generation, now: currentTime },
+        work,
+      );
+    } catch (error) {
+      if (isFundingEvidenceRepairFenceLost(error))
+        throw new FundingPersistenceError(
+          "lease_lost",
+          "evidence acquisition apply fence was lost",
+        );
+      if (
+        error instanceof FundingPersistenceError &&
+        error.code === "lease_lost"
+      )
+        throw error;
+      failed = true;
+      if (stage !== "provider") canonicalUnavailable = true;
+    }
+  };
+  await poll("receipt", async () => {
+    const result = await receiptPoll(lease.operationId, currentTime(), {
+      skipSourceKeys: started.skipSourceKeys,
+      skipUnchanged: true,
+    });
+    sourceProbes = Object.fromEntries(
+      Object.entries(result.sourceProbes ?? {}).flatMap(([key, value]) => {
+        const probe = sanitizeFundingEvidenceRepairProbe(value);
+        return /^[a-f0-9]{64}$/.test(key) && probe ? [[key, probe]] : [];
+      }),
+    );
+    dynamicSources = result.dynamicSources ?? result.receiptsPolled > 0;
+  });
+  // Acquisition is dependency-specific. A known immutable source mismatch is
+  // skipped, but pending/provider/destination/refund evidence remains observable.
+  let acquired = await loadFundingEvidenceRepairSnapshot(
+    pool,
+    lease.operationId,
+    currentTime(),
+  );
+  if (!acquired)
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "repair operation disappeared",
+    );
+  if (acquired.providerNeeded && providerPoll)
+    await poll("provider", () =>
+      providerPoll(lease.operationId, currentTime()),
+    );
+  if (acquired.postconditionNeeded && postconditionPoll)
+    await poll("postcondition", () =>
+      postconditionPoll(lease.operationId, currentTime()),
+    );
+  if (acquired.destinationNeeded && destinationPoll)
+    await poll("destination", () =>
+      destinationPoll(lease.operationId, currentTime()),
+    );
+  // Keep standalone/direct ingress observers for the first explicit pass even
+  // without a provider request; absent facts never become proof of no transfer.
+  if (
+    (started.meaningful ||
+      started.previous.reason === "verification_unavailable") &&
+    !acquired.destinationNeeded &&
+    destinationPoll
+  )
+    await poll("destination", () =>
+      destinationPoll(lease.operationId, currentTime()),
+    );
+  if (
+    (started.meaningful ||
+      started.previous.reason === "verification_unavailable") &&
+    !acquired.postconditionNeeded &&
+    postconditionPoll
+  )
+    await poll("postcondition", () =>
+      postconditionPoll(lease.operationId, currentTime()),
+    );
+  return tx(pool, async (client) => {
+    const finishedAt = currentTime();
+    await lockFundingEvidenceRepairLease(client, lease, finishedAt);
+    acquired = await loadFundingEvidenceRepairSnapshot(
+      client,
+      lease.operationId,
+      finishedAt,
+    );
+    if (!acquired)
+      throw new FundingPersistenceError(
+        "operation_not_found",
+        "repair operation disappeared",
+      );
+    if (!acquired.compatible)
+      throw new FundingPersistenceError(
+        "lease_lost",
+        "repair generation format changed",
+      );
+    const latest = acquired.repair ?? initialFundingEvidenceRepairState();
+    if (latest.generation !== started.generation) {
+      await finishFundingReconciliationLeaseRaw(client, {
+        ...lease,
+        now: finishedAt,
+        result: { kind: "requeue", dueAt: finishedAt },
+      });
+      return "requeued";
+    }
+    const changed = acquired.inputDigest !== started.snapshot.inputDigest;
+    let terminal = false;
+    if (
+      !canonicalUnavailable &&
+      (started.meaningful ||
+        changed ||
+        (latest.reason === "verification_unavailable" && !failed))
+    ) {
+      const reduction = await reduceFundingOperationInTransaction(client, {
+        operationId: lease.operationId,
+        now: finishedAt,
+      });
+      terminal = reduction.terminal;
+      const reduced = await loadFundingEvidenceRepairSnapshot(
+        client,
+        lease.operationId,
+        finishedAt,
+      );
+      if (!reduced)
+        throw new FundingPersistenceError(
+          "operation_not_found",
+          "repair operation disappeared",
+        );
+      acquired = reduced;
+    }
+    const newRetryWindow =
+      changed || started.meaningful || latest.retryStartedAt === null;
+    const retryStartedAt = failed
+      ? newRetryWindow
+        ? finishedAt.toISOString()
+        : latest.retryStartedAt
+      : null;
+    const proposedRetryCount = failed
+      ? newRetryWindow
+        ? 1
+        : latest.retryCount + 1
+      : 0;
+    const technicalRetry =
+      failed &&
+      retryStartedAt !== null &&
+      proposedRetryCount < (options.maxAttempts ?? 20) &&
+      finishedAt.getTime() - Date.parse(retryStartedAt) <
+        (options.terminalTimeoutMs ??
+          DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS);
+    const retryCount =
+      failed &&
+      !technicalRetry &&
+      !newRetryWindow &&
+      latest.state === "waiting_evidence"
+        ? latest.retryCount
+        : proposedRetryCount;
+    const probes = { ...latest.sourceProbes, ...sourceProbes };
+    const next: FundingEvidenceRepairState = {
+      ...latest,
+      evaluatorRevision: FUNDING_EVIDENCE_REPAIR_REVISION,
+      state: technicalRetry ? "technical_retry" : "waiting_evidence",
+      processedGeneration: started.generation,
+      inputDigest: acquired.inputDigest,
+      reason: failed
+        ? "verification_unavailable"
+        : changed || started.meaningful
+          ? "new_evidence"
+          : "unchanged_evidence",
+      sourceProbes: probes,
+      lastProbe: Object.values(sourceProbes).at(-1) ?? latest.lastProbe,
+      retryStartedAt,
+      retryCount,
+    };
+    // No version churn on unchanged acquisition. 'new_evidence' describes the
+    // last meaningful pass, not a reason to write another housekeeping version.
+    if (
+      !changed &&
+      !started.meaningful &&
+      !failed &&
+      latest.reason === "new_evidence"
+    )
+      (next as { reason: FundingEvidenceRepairState["reason"] }).reason =
+        latest.reason;
+    if (!canonicalJsonEqual(latest, next)) {
+      const operation = await fetchFundingOperationForWorkerInTransaction(
+        client,
+        lease.operationId,
+      );
+      if (!operation)
+        throw new FundingPersistenceError(
+          "operation_not_found",
+          "repair operation disappeared",
+        );
+      await writeFundingOperationSupportFactsInTransaction(client, {
+        operationId: operation.id,
+        expectedVersion: operation.version,
+        now: finishedAt,
+        supportMetadataPatch: {
+          evidenceRepairV1: JSON.parse(JSON.stringify(next)) as JsonRecord,
+        },
+      });
+    }
+    const dynamic =
+      dynamicSources ||
+      failed ||
+      acquired.providerNeeded ||
+      acquired.destinationNeeded ||
+      acquired.postconditionNeeded;
+    await finishFundingReconciliationLeaseRaw(client, {
+      ...lease,
+      now: finishedAt,
+      result: terminal
+        ? {
+            kind: "requeue",
+            dueAt: new Date(
+              finishedAt.getTime() + (options.pollDelayMs ?? 15_000),
+            ),
+          }
+        : {
+            kind: "error",
+            deadLetter: true,
+            dueAt: dynamic
+              ? new Date(
+                  finishedAt.getTime() +
+                    (technicalRetry
+                      ? (options.retryDelayMs ?? 30_000)
+                      : (options.recoveryPollDelayMs ?? 60_000)),
+                )
+              : "infinity",
+            errorCode: failed
+              ? "evidence_repair_poll_unavailable"
+              : "evidence_repair_unresolved",
+            errorSummary:
+              "Evidence-only repair is waiting for relevant evidence; no transaction was sent",
+          },
+    });
+    return terminal ? "requeued" : failed ? "failed" : "completed";
+  });
 }
 
 /** No executor/consumer callbacks: this can only refresh evidence and accounting.
@@ -2570,10 +3168,12 @@ export async function recoverStoppedFundingOperations(
       lease_token: string;
     }>(
       `with source_page as materialized (
-       select id, expires_at, status from funding_operations
+       select id, expires_at, status, support_metadata from funding_operations
         where status not in ('completed','refunded','failed','cancelled')
           and id=any($3::uuid[])
-          and updated_at < $1::timestamptz - interval '5 minutes'
+          and ${fundingEvidenceRepairCompatibleSql("funding_operations")}
+          and (support_metadata ? 'evidenceRepairV1'
+            or updated_at < $1::timestamptz - interval '5 minutes')
      ), repair_candidate as (
        select repair_job.id
          from source_page
@@ -2593,7 +3193,10 @@ export async function recoverStoppedFundingOperations(
                 and repair_reservation.state='active'
                 and repair_reservation.expires_at <= $1))
           and repair_job.status in ('completed','dead_letter')
-          and repair_job.updated_at < $1::timestamptz - interval '5 minutes'
+          and (case when source_page.support_metadata ? 'evidenceRepairV1'
+            then repair_job.due_at <= $1 or
+              source_page.support_metadata->'evidenceRepairV1'->>'evaluatorRevision' is distinct from $4::text
+            else repair_job.updated_at < $1::timestamptz - interval '5 minutes' end)
         order by source_page.id
         for update of repair_job skip locked
         limit 1
@@ -2602,11 +3205,16 @@ export async function recoverStoppedFundingOperations(
         set status='leased', due_at='infinity'::timestamptz,
             lease_owner=$2, lease_token=gen_random_uuid(),
             lease_until=$1::timestamptz + interval '2 minutes',
-            completed_at=null, attempt_count=attempt_count+1
+            completed_at=null
        from repair_candidate
       where repair_job.id=repair_candidate.id
       returning repair_job.id, repair_job.operation_id, repair_job.lease_token`,
-      [now, options.workerId, page.rows.map((row) => row.id)],
+      [
+        now,
+        options.workerId,
+        page.rows.map((row) => row.id),
+        FUNDING_EVIDENCE_REPAIR_REVISION,
+      ],
     );
     await client.query(
       `update funding_recovery_scan_cursor
@@ -2617,94 +3225,56 @@ export async function recoverStoppedFundingOperations(
   });
   const job = claimed.rows[0];
   if (!job) return 0;
-  let failed = false;
-  let repairStage = "mark_evidence_only";
   try {
-    // Match intent -> operation lock order. Detach old purchase consent before
-    // evidence can turn a stopped route into ready; never start a historic Buy.
-    await tx(pool, async (client) => {
-      await client.query(
-        `select id from telegram_trade_intents
-        where funding_operation_id=$1 order by id for update`,
-        [job.operation_id],
-      );
-      const operation = await fetchFundingOperationForWorkerInTransaction(
-        client,
-        job.operation_id,
-      );
-      if (!operation) throw new Error("repair operation disappeared");
-      await writeFundingOperationSupportFactsInTransaction(client, {
-        operationId: operation.id,
-        expectedVersion: operation.version,
-        supportMetadataPatch: { evidenceOnlyRecoveryAt: now.toISOString() },
-        now,
-      });
-    });
-    // Sources may refresh independently, but unavailable canonical receipt
-    // verification must never permit reservation release from stale evidence.
-    let verificationUnavailable = false;
-    let verificationFailure: unknown;
-    let verificationStage = "verification";
-    for (const [stage, poll] of [
-      ["receipt", options.receiptPoll],
-      ["provider", options.providerPoll],
-      ["postcondition", options.postconditionPoll],
-      ["destination", options.destinationPoll],
-    ] as const) {
-      try {
-        await poll?.(job.operation_id, now);
-      } catch (error) {
-        failed = true;
-        if (stage !== "provider" && !verificationUnavailable) {
-          verificationUnavailable = true;
-          verificationFailure = error;
-          verificationStage = stage;
-        }
-      }
-    }
-    if (verificationUnavailable) {
-      repairStage = verificationStage;
-      throw verificationFailure;
-    }
-    repairStage = "reduce";
-    const reduction = await reduceFundingOperation(pool, {
-      operationId: job.operation_id,
-      now,
-    });
-    await finishFundingReconciliationLeaseRaw(pool, {
-      jobId: job.id,
-      leaseOwner: options.workerId,
-      leaseToken: job.lease_token,
-      now,
-      result: reduction.terminal
-        ? {
-            // Let the ordinary worker retain its receipt/refund reorg watch.
-            kind: "requeue",
-            dueAt: new Date(now.getTime() + (options.pollDelayMs ?? 15_000)),
-          }
-        : {
-            kind: "error",
-            deadLetter: true,
-            dueAt: new Date(now.getTime() + 300_000),
-            errorCode: failed
-              ? "evidence_repair_poll_unavailable"
-              : "evidence_repair_unresolved",
-            errorSummary:
-              "Evidence-only repair remains unresolved; bounded background retry is enabled",
-          },
-    });
+    await processFundingEvidenceRepairLease(
+      pool,
+      {
+        jobId: job.id,
+        operationId: job.operation_id,
+        leaseOwner: options.workerId,
+        leaseToken: job.lease_token,
+      },
+      options,
+    );
   } catch (error) {
+    if (
+      error instanceof FundingPersistenceError &&
+      error.code === "lease_lost"
+    ) {
+      const supersededAt = options.now ?? new Date();
+      try {
+        await finishFundingReconciliationLeaseRaw(pool, {
+          jobId: job.id,
+          leaseOwner: options.workerId,
+          leaseToken: job.lease_token,
+          now: supersededAt,
+          result: { kind: "requeue", dueAt: supersededAt },
+        });
+      } catch (finishError) {
+        if (
+          !(
+            finishError instanceof FundingPersistenceError &&
+            finishError.code === "lease_lost"
+          )
+        )
+          throw finishError;
+      }
+      return 1;
+    }
     await finishFundingReconciliationLeaseRaw(pool, {
       jobId: job.id,
       leaseOwner: options.workerId,
       leaseToken: job.lease_token,
-      now,
+      now: options.now ?? new Date(),
       result: {
         kind: "error",
         deadLetter: true,
-        dueAt: new Date(now.getTime() + 300_000),
+        dueAt: new Date(
+          now.getTime() + (options.recoveryPollDelayMs ?? 60_000),
+        ),
         errorCode: fundingEvidenceRepairErrorCode(error),
-        errorSummary: `Evidence-only repair failed at ${repairStage}; will retry; no transaction was sent`,
+        errorSummary:
+          "Evidence-only repair is unavailable; no transaction was sent",
       },
     });
   }
@@ -2770,6 +3340,7 @@ export async function runFundingReconciliationBatch(
           options.receiptPoll,
           options.postconditionPoll,
           options.destinationPoll,
+          { now: options.now, leaseSeconds: options.leaseSeconds },
         ),
       ),
     );

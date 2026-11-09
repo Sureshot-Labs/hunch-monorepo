@@ -1,4 +1,5 @@
 import { tx, type Pool } from "@hunch/infra";
+import { storePolymarketFillEvidence } from "./verified-buy-fill-wake.js";
 import type { Position } from "../order-types.js";
 import {
   expandPolymarketWallets,
@@ -2372,30 +2373,11 @@ export async function syncPolymarketTradesForSigner(
           ]
         : [],
     );
-    if (tradeEvidence.length) {
-      await client.query(
-        `
-        update order_fills fill_row
-        set provider_tx_hash = evidence_row.tx_hash,
-            provider_status = evidence_row.provider_status
-        from unnest($1::text[], $2::text[], $3::text[])
-          as evidence_row(trade_id, tx_hash, provider_status)
-        where fill_row.order_id = any($4::uuid[])
-          and fill_row.venue_trade_id = evidence_row.trade_id
-      `,
-        [
-          tradeEvidence.map((trade) => trade.id),
-          tradeEvidence.map((trade) => trade.transactionHash),
-          tradeEvidence.map((trade) => trade.status ?? "UNKNOWN"),
-          fillOrderIds,
-        ],
-      );
-      await client.query(
-        `update orders set verified_buy_due_at = now()
-        where id = any($1::uuid[]) and side = 'BUY'`,
-        [fillOrderIds],
-      );
-    }
+    await storePolymarketFillEvidence(client, {
+      orderIds: fillOrderIds,
+      insertedOrderIds: rows.map((fill) => fill.order_id),
+      tradeEvidence,
+    });
 
     let persistedAggregateUpdateCount = 0;
     if (persistedCandidateFills.length) {

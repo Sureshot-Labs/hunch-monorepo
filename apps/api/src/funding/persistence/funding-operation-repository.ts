@@ -20,6 +20,8 @@ import {
 } from "../domain/transitions.js";
 import { isValidFundingCommitPlanBoundary } from "../validation/funding-commit-plan-validator.js";
 import { fundingReservationHoldSql } from "./source-reservation-hold.js";
+import { fundingEvidenceRepairCompatibleSql } from "../reconciliation/funding-evidence-repair-state.js";
+import { assertFundingEvidenceRepairFence } from "../reconciliation/funding-evidence-repair-fence.js";
 import {
   canonicalJsonEqual,
   canonicalJsonHash,
@@ -1666,6 +1668,7 @@ export async function writeFundingOperationSupportFactsInTransaction(
     now: Date;
   }>,
 ): Promise<FundingOperationRow> {
+  await assertFundingEvidenceRepairFence(client, input.operationId);
   const { rows } = await client.query<FundingOperationDbRow>(
     `select ${operationColumns}
        from funding_operations
@@ -1922,6 +1925,7 @@ export async function allocateFundingObservationInTransaction(
 ): Promise<
   Readonly<{ observation: FundingObservationRow; replayed: boolean }>
 > {
+  await assertFundingEvidenceRepairFence(client, input.operationId);
   const canonical = input.finalityStatus !== "reorged";
   const canonicalInputAssetId = canonicalAssetId({
     networkId: input.networkId,
@@ -2361,6 +2365,9 @@ export async function claimFundingReconciliationJobsInTransaction(
           or (status = 'leased' and lease_until <= $1)
         )
           and operation_id <> all($5::uuid[])
+          and exists (select 1 from funding_operations operation_row
+            where operation_row.id=funding_reconciliation_jobs.operation_id
+              and ${fundingEvidenceRepairCompatibleSql("operation_row")})
         order by priority desc, due_at asc, id asc
         for update skip locked
         limit $2
@@ -2373,7 +2380,11 @@ export async function claimFundingReconciliationJobsInTransaction(
           lease_owner = $3,
           lease_token = gen_random_uuid(),
           lease_until = $1 + make_interval(secs => $4),
-          attempt_count = attempt_count + 1,
+          attempt_count = attempt_count + case when exists (
+            select 1 from funding_operations operation_row
+            where operation_row.id=job.operation_id
+              and operation_row.support_metadata ? 'evidenceRepairV1'
+          ) then 0 else 1 end,
           completed_at = null
       from candidates
       where job.id = candidates.id
@@ -2456,7 +2467,7 @@ export async function finishFundingReconciliationLease(
       | Readonly<{ kind: "requeue"; dueAt: Date }>
       | Readonly<{
           kind: "error";
-          dueAt: Date;
+          dueAt: Date | "infinity";
           errorCode: string;
           errorSummary: string;
           deadLetter?: boolean;
@@ -2485,11 +2496,11 @@ export async function finishFundingReconciliationLease(
     `
       update funding_reconciliation_jobs
       set status = case
-            when $4 = 'completed' and due_at <> 'infinity'::timestamptz
+            when $4 in ('completed','dead_letter') and due_at <> 'infinity'::timestamptz
               then 'scheduled'
             else $4
           end,
-          due_at = case when $4 = 'scheduled'
+          due_at = case when $4 = 'scheduled' or due_at <> 'infinity'::timestamptz
             then least(due_at, $5::timestamptz)
             else $5::timestamptz
           end,
@@ -2499,7 +2510,7 @@ export async function finishFundingReconciliationLease(
           last_error_code = $6,
           last_error_summary = $7,
           completed_at = case
-            when $8 and not ($4 = 'completed' and due_at <> 'infinity'::timestamptz)
+            when $8 and due_at = 'infinity'::timestamptz
               then $9::timestamptz
             else null
           end
@@ -2507,6 +2518,7 @@ export async function finishFundingReconciliationLease(
         and status = 'leased'
         and lease_owner = $2
         and lease_token = $3
+        and lease_until > $9
     `,
     [
       input.jobId,

@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "../reconciliation/funding-evidence-repair-fence.js";
 import bs58 from "bs58";
 import { parseVerifiedSolanaSubmission } from "../execution/signed-solana-submission.js";
 
@@ -548,6 +549,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     now?: Date;
   }>,
 ): Promise<FundingStepReceiptObservation> {
+  await assertFundingEvidenceRepairFence(client, input.operationId);
   const now = input.now ?? new Date();
   const operationResult = await client.query<{
     operation_user_id: string;
