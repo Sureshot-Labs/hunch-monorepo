@@ -63,6 +63,13 @@ import {
 } from "./privy-transaction-reference.js";
 import type { FundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 import type { DelegatedFundingExecutionResult } from "./delegated-funding-executor.js";
+import { canonicalJsonEqual } from "../persistence/canonical.js";
+import {
+  fundingReceiptSourceKey,
+  sanitizeFundingEvidenceRepairProbe,
+  type FundingEvidenceRepairProbe,
+  type FundingReceiptPollOptions,
+} from "../reconciliation/funding-evidence-repair-state.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -636,6 +643,25 @@ export function evaluateEvmActionReceipt(
           normalizedHex(input.action.data) &&
         input.transaction.value === BigInt(input.action.valueRaw));
   if (!matches) {
+    // These transaction-content comparisons do not change as confirmations
+    // advance. Keep the mask operationally, without persisting raw payloads or
+    // treating an unknown wallet wrapper as an accepted execution envelope.
+    const directMask =
+      executionEnvelope === "direct" && input.action.kind === "evm_transaction"
+        ? {
+            chain: input.transaction.chainId === expectedChainId,
+            from:
+              input.transaction.from.toLowerCase() ===
+              input.expectedSignerAddress.toLowerCase(),
+            to:
+              input.transaction.to?.toLowerCase() ===
+              input.action.to.toLowerCase(),
+            calldata:
+              normalizedHex(input.transaction.data) ===
+              normalizedHex(input.action.data),
+            value: input.transaction.value === BigInt(input.action.valueRaw),
+          }
+        : null;
     return {
       status: "mismatch",
       actionMatch: false,
@@ -647,6 +673,9 @@ export function evaluateEvmActionReceipt(
         executionEnvelope,
         transactionObserved: true,
         receiptObserved: input.receipt != null,
+        ...(directMask
+          ? { matchingMask: directMask, intrinsicMismatch: true }
+          : {}),
       }),
     };
   }
@@ -2906,6 +2935,42 @@ export type PrivyFundingReferenceResolver = (
   networkId: string,
 ) => Promise<DelegatedFundingExecutionResult>;
 
+function unchangedAcquiredReceipt(
+  previous: FundingStepReceiptObservation | null,
+  incoming: FundingStepReceiptEvidence,
+): boolean {
+  if (!previous) return false;
+  const semanticEvidence = (value: JsonRecord) =>
+    Object.fromEntries(
+      Object.entries(value).filter(
+        ([key]) => key !== "confirmations" && key !== "confirmationPolicy",
+      ),
+    );
+  return canonicalJsonEqual(
+    {
+      status: previous.status,
+      actionMatch: previous.actionMatch,
+      ledgerHeight: previous.ledgerHeight,
+      blockHash: previous.blockHash,
+      canonical: previous.canonical,
+      failureCode: previous.failureCode,
+      evidence: semanticEvidence(previous.evidence),
+    },
+    {
+      status: incoming.status,
+      actionMatch: incoming.actionMatch,
+      ledgerHeight: incoming.ledgerHeight,
+      blockHash: incoming.blockHash,
+      canonical: incoming.canonical,
+      failureCode: incoming.failureCode,
+      evidence: semanticEvidence({
+        ...previous.evidence,
+        ...incoming.evidence,
+      }),
+    },
+  );
+}
+
 export class FundingStepReceiptReconciliationDriver {
   constructor(
     readonly referenceCodec: FundingTransactionReferenceCodec,
@@ -2922,10 +2987,22 @@ export class FundingStepReceiptReconciliationDriver {
     pool: Pool,
     operationId: string,
     now = new Date(),
-  ): Promise<Readonly<{ receiptsPolled: number; receiptsFinalized: number }>> {
-    const targets = await (
-      this.dependencies.listTargets ?? listFundingStepReceiptTargets
-    )(pool, operationId);
+    options: FundingReceiptPollOptions = {},
+  ): Promise<
+    Readonly<{
+      receiptsPolled: number;
+      receiptsFinalized: number;
+      sourceProbes: Readonly<Record<string, FundingEvidenceRepairProbe>>;
+      dynamicSources: boolean;
+    }>
+  > {
+    const skipped = new Set(options.skipSourceKeys ?? []);
+    const targets = (
+      await (this.dependencies.listTargets ?? listFundingStepReceiptTargets)(
+        pool,
+        operationId,
+      )
+    ).filter((target) => !skipped.has(fundingReceiptSourceKey(target)));
     const inspectionContext = createEvmReceiptInspectionContext();
     const inspectionResults: ReadonlyArray<
       PromiseSettledResult<
@@ -3049,6 +3126,7 @@ export class FundingStepReceiptReconciliationDriver {
     );
 
     let receiptsFinalized = 0;
+    const sourceProbes: Record<string, FundingEvidenceRepairProbe> = {};
     const failures: unknown[] = [];
     for (const result of inspectionResults) {
       if (result.status === "rejected") {
@@ -3057,6 +3135,22 @@ export class FundingStepReceiptReconciliationDriver {
       }
       if (result.value.kind !== "receipt") continue;
       const { target, inspected } = result.value;
+      const probe = sanitizeFundingEvidenceRepairProbe({
+        outcome:
+          inspected.evidence.intrinsicMismatch === true
+            ? "intrinsic_mismatch"
+            : "observed",
+        status: inspected.status,
+        matchingMask: inspected.evidence.matchingMask,
+      });
+      if (probe) sourceProbes[fundingReceiptSourceKey(target)] = probe;
+      if (
+        options.skipUnchanged &&
+        unchangedAcquiredReceipt(target.previousReceipt, inspected)
+      ) {
+        if (inspected.status === "finalized") receiptsFinalized += 1;
+        continue;
+      }
       try {
         await (
           this.dependencies.applyEvidence ?? applyFundingStepReceiptEvidence
@@ -3079,6 +3173,15 @@ export class FundingStepReceiptReconciliationDriver {
         "one or more funding receipt inspections failed",
       );
     }
-    return { receiptsPolled: targets.length, receiptsFinalized };
+    return {
+      receiptsPolled: targets.length,
+      receiptsFinalized,
+      sourceProbes,
+      dynamicSources: targets.some(
+        (target) =>
+          sourceProbes[fundingReceiptSourceKey(target)]?.outcome !==
+          "intrinsic_mismatch",
+      ),
+    };
   }
 }

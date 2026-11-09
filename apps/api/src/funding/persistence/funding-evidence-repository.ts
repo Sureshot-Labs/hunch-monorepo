@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "../reconciliation/funding-evidence-repair-fence.js";
 
 import type { JsonValue } from "../domain/types.js";
 import {
@@ -1845,6 +1846,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     stepState: FundingOperationStepState;
   }>
 > {
+  await assertFundingEvidenceRepairFence(client, input.operationId);
   const now = input.now ?? new Date();
   const operationResult = await client.query<{
     operation_support_metadata: JsonRecord;
@@ -3221,6 +3223,7 @@ export async function upsertFundingProviderRequestInTransaction(
     supportMetadata?: JsonRecord;
   }>,
 ): Promise<Readonly<{ id: string; replayed: boolean }>> {
+  await assertFundingEvidenceRepairFence(client, input.operationId);
   const observedAt = input.observedAt ?? new Date();
   const { rows } = await client.query<{
     id: string;

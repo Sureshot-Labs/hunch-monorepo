@@ -43,6 +43,7 @@ import {
   listFundingStepReceiptTargets,
   shouldIgnoreFundingStepReceiptUpdate,
 } from "../../persistence/funding-step-receipt-repository.js";
+import { fundingReceiptSourceKey } from "../../reconciliation/funding-evidence-repair-state.js";
 
 const evmAction = {
   kind: "evm_transaction" as const,
@@ -2744,8 +2745,129 @@ const driverResult = await driver.pollOperation(
   target.operationId,
   new Date("2026-07-24T10:00:00.000Z"),
 );
-assert.deepEqual(driverResult, { receiptsPolled: 1, receiptsFinalized: 1 });
+assert.equal(driverResult.receiptsPolled, 1);
+assert.equal(driverResult.receiptsFinalized, 1);
 assert.equal(applied[0]?.status, "finalized");
+
+let acquisitionReads = 0;
+let acquisitionApplies = 0;
+let acquisitionEvidence: FundingStepReceiptEvidence = {
+  status: "pending",
+  actionMatch: null,
+  canonical: true,
+  ledgerHeight: null,
+  blockHash: null,
+  failureCode: null,
+  evidence: { transactionObserved: false },
+};
+const acquisitionTarget: FundingStepReceiptTarget = {
+  ...target,
+  previousReceipt: {
+    operationId: target.operationId,
+    stepId: target.stepId,
+    attemptId: target.attemptId,
+    networkId: target.networkId,
+    ...acquisitionEvidence,
+    firstSeenAt: new Date(0),
+    observedAt: new Date(0),
+    finalizedAt: null,
+    reorgedAt: null,
+  },
+};
+const acquisitionDriver = new FundingStepReceiptReconciliationDriver(
+  driver.referenceCodec,
+  {
+    listTargets: async () => [acquisitionTarget],
+    inspectEvm: async () => {
+      acquisitionReads++;
+      return acquisitionEvidence;
+    },
+    applyEvidence: async (_pool, input) => {
+      acquisitionApplies++;
+      return {
+        operationId: input.operationId,
+        stepId: input.stepId,
+        attemptId: input.attemptId,
+        networkId: input.networkId,
+        ...input.receipt,
+        firstSeenAt: new Date(0),
+        observedAt: new Date(0),
+        finalizedAt: null,
+        reorgedAt: null,
+      };
+    },
+  },
+);
+assert.equal(
+  (
+    await acquisitionDriver.pollOperation(
+      {} as never,
+      target.operationId,
+      new Date(),
+      { skipUnchanged: true },
+    )
+  ).dynamicSources,
+  true,
+);
+assert.equal(
+  acquisitionReads,
+  1,
+  "pending receipts must remain under dynamic acquisition",
+);
+assert.equal(
+  acquisitionApplies,
+  0,
+  "an identical pending acquisition must not re-run the reducer",
+);
+acquisitionEvidence = {
+  ...acquisitionEvidence,
+  status: "finalized",
+  actionMatch: true,
+  ledgerHeight: "10",
+  blockHash: evmReceipt.blockHash,
+};
+await acquisitionDriver.pollOperation(
+  {} as never,
+  target.operationId,
+  new Date(),
+  { skipUnchanged: true },
+);
+assert.equal(
+  acquisitionApplies,
+  1,
+  "late finalized evidence must still be applied",
+);
+await acquisitionDriver.pollOperation(
+  {} as never,
+  target.operationId,
+  new Date(),
+  { skipSourceKeys: [fundingReceiptSourceKey(acquisitionTarget)] },
+);
+assert.equal(
+  acquisitionReads,
+  2,
+  "an exact intrinsic source digest may suppress only that source",
+);
+const directMismatchMask = evaluateEvmActionReceipt({
+  action: evmAction,
+  expectedSignerAddress: evmTransaction.from,
+  transaction: {
+    ...evmTransaction,
+    from: evmAction.to,
+    to: evmTransaction.from,
+    data: "0xdeadbeef",
+  },
+  receipt: evmReceipt,
+  previous: null,
+});
+assert.deepEqual(directMismatchMask.evidence.matchingMask, {
+  chain: true,
+  from: false,
+  to: false,
+  calldata: false,
+  value: true,
+});
+assert.equal(directMismatchMask.evidence.intrinsicMismatch, true);
 
 const correctedFinalizedReceipt: FundingStepReceiptEvidence = {
   status: "finalized",

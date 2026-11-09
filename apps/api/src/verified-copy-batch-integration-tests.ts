@@ -30,7 +30,7 @@ const deps: VerifiedBuyObserverDependencies = {
   readEvmReceipt: async () => {
     throw new Error("Unexpected receipt read");
   },
-  readPolymarketFills: async () => [],
+  readPolymarketFills: async () => ({ state: "fills", fills: [] }),
   readDflowOrder: async () => null,
   readFinalizedSolanaTransaction: async () => null,
 };

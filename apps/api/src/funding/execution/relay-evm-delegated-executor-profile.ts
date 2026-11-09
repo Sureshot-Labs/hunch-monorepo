@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "../reconciliation/funding-evidence-repair-fence.js";
 
 import type {
   JsonValue,
@@ -3589,6 +3590,7 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
   // preBroadcastRelay owns the allowance lane before touching operation rows.
   // Follow that same total order, then lock each mutable funding row with a
   // fresh statement and revalidate the unlocked discovery candidate.
+  await assertFundingEvidenceRepairFence(client, candidate.parentOperationId);
   const operation = await client.query<{ funding_authorization_id: string }>(
     `select support_metadata ->> 'fundingAuthorizationId'
               as funding_authorization_id

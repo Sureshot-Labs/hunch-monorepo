@@ -78,7 +78,8 @@ export function resolveClientIp(
     : [];
 
   const candidates = [...forwarded, request.ip].filter(
-    (value): value is string => Boolean(value && value.trim()),
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0,
   );
 
   for (const candidate of candidates) {

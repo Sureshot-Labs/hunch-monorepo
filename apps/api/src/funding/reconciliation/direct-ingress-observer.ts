@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "./funding-evidence-repair-fence.js";
 
 import { isRecord } from "../../lib/type-guards.js";
 import { isRetainedOwnedSourceAsset } from "../receive/retained-solana-assets.js";
@@ -430,6 +431,7 @@ async function moveToAmbiguousRecovery(
     now: Date;
   }>,
 ): Promise<void> {
+  await assertFundingEvidenceRepairFence(client, input.target.operationId);
   const current = await client.query<{ version: number }>(
     `select version
        from funding_operations
@@ -486,6 +488,7 @@ async function persistSatisfiedAmount(
     now: Date;
   }>,
 ): Promise<boolean> {
+  await assertFundingEvidenceRepairFence(client, input.target.operationId);
   const selection = selectDirectIngressVariant({
     variants: input.target.variants,
     observations: input.observation.variants,

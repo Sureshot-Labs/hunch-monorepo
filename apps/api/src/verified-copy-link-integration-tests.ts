@@ -71,6 +71,25 @@ async function explainSelector(
     assert.equal(scannedRows, expected);
     const sharedHits = Number(plan.Plan["Shared Hit Blocks"] ?? 0);
     const sharedReads = Number(plan.Plan["Shared Read Blocks"] ?? 0);
+    // Execute even on success so failure diagnostics remain PostgreSQL-tested.
+    // Statistics are estimates; they can suggest contamination, not prove its cause.
+    const maintenance = await client.query(
+      `select n_live_tup,n_dead_tup,last_autovacuum,last_autoanalyze,last_vacuum,last_analyze,
+       pg_relation_size(relid) as heap_bytes,pg_indexes_size(relid) as index_bytes
+       from pg_stat_all_tables where schemaname='public' and relname='copy_attributions'`,
+    );
+    if (sharedHits + sharedReads >= 100)
+      console.error(
+        JSON.stringify({
+          scenario,
+          generic,
+          sharedHits,
+          sharedReads,
+          statisticsAreEstimates: true,
+          maintenance: maintenance.rows,
+          plan,
+        }),
+      );
     assert.ok(
       sharedHits + sharedReads < 100,
       `${scenario}: bounded index/heap buffers despite one million nonmatches`,

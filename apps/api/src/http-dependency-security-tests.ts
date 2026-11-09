@@ -6,6 +6,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { imageSize } from "image-size";
 import { z } from "zod";
 import { resolveTrustedProxy } from "./lib/trusted-proxy.js";
+import { resolveClientIp } from "./lib/geo-fence.js";
 
 const rootRequire = createRequire(
   new URL("../../../package.json", import.meta.url),
@@ -176,9 +177,81 @@ test("proxy trust validates private addresses and the configured hop bound", () 
   }
   assert.equal(trusted("127.0.0.1", -1), false);
   assert.equal(trusted("127.0.0.1", 0.5), false);
+  for (const address of [
+    undefined,
+    null,
+    0,
+    1,
+    true,
+    [],
+    {},
+    { toString: () => "127.0.0.1" },
+  ]) {
+    assert.equal(trusted(address, 0), false);
+  }
   const zeroHops = resolveTrustedProxy(true, 0);
   assert.ok(zeroHops);
   assert.equal(zeroHops("127.0.0.1", 0), false);
+});
+
+test("missing transport IP fails closed without trusting unsigned forwarded fields", async () => {
+  const proxyConfig = {
+    enabled: false,
+    blockedCountries: [],
+    defaultPolicy: "allow" as const,
+    trustProxy: true,
+    proxySecret: "synthetic-proxy-secret",
+  };
+  for (const transportAddress of [undefined, null, 42]) {
+    const app = Fastify({ trustProxy: resolveTrustedProxy(true, 1) });
+    // A disconnected request can lose its socket address while earlier hooks
+    // await I/O. Exercise Fastify's real proxy getter, not only the predicate.
+    app.addHook("onRequest", async (request) => {
+      Object.defineProperty(request.raw.socket, "remoteAddress", {
+        value: transportAddress,
+        configurable: true,
+      });
+    });
+    app.get("/", async (request) => ({
+      clientIp: resolveClientIp(request, proxyConfig),
+      host: request.host,
+      protocol: request.protocol,
+    }));
+    const forwardedHeaders = {
+      host: "origin.test",
+      "x-forwarded-for": "198.51.100.8",
+      "x-forwarded-host": "untrusted.test",
+      "x-forwarded-proto": "https",
+      "x-hunch-client-ip": "203.0.113.8",
+    };
+    try {
+      const unsigned = await app.inject({
+        url: "/",
+        headers: forwardedHeaders,
+      });
+      assert.equal(unsigned.statusCode, 200);
+      assert.deepEqual(unsigned.json(), {
+        clientIp: null,
+        host: "origin.test",
+        protocol: "http",
+      });
+      const signed = await app.inject({
+        url: "/",
+        headers: {
+          ...forwardedHeaders,
+          "x-hunch-proxy-secret": proxyConfig.proxySecret,
+        },
+      });
+      assert.equal(signed.statusCode, 200);
+      assert.deepEqual(signed.json(), {
+        clientIp: "203.0.113.8",
+        host: "origin.test",
+        protocol: "http",
+      });
+    } finally {
+      await app.close();
+    }
+  }
 });
 
 test("only a trusted private proxy can supply forwarded request fields", async () => {

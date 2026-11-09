@@ -28,6 +28,7 @@ import {
   RelayReconciliationDriver,
 } from "./reconciliation.js";
 import { verifyRelayWebhook } from "./webhook.js";
+import { lockFundingEvidenceRepairApplyOrder } from "../../funding/reconciliation/funding-evidence-repair-fence.js";
 
 const route = RELAY_ROUTE_SPECS["polygon-pol-to-base-eth"];
 if (!route) throw new Error("Relay integration route missing");
@@ -414,6 +415,65 @@ try {
     status: "in_progress",
     stage: "committed",
   });
+  const repairConnection = await pool.connect();
+  const webhookConnection = await pool.connect();
+  let concurrentWebhook: ReturnType<typeof ingestVerifiedRelayWebhook> | null =
+    null;
+  try {
+    const webhookPid = Number(
+      (await webhookConnection.query("select pg_backend_pid() as backend_pid"))
+        .rows[0].backend_pid,
+    );
+    await repairConnection.query("begin");
+    await repairConnection.query("set local statement_timeout='3s'");
+    await repairConnection.query("set local lock_timeout='2s'");
+    await lockFundingEvidenceRepairApplyOrder(repairConnection, operationId);
+    // Give the webhook its own real transaction/connection, while retaining
+    // ownership here so the test can observe its lock wait deterministically.
+    concurrentWebhook = ingestVerifiedRelayWebhook(
+      {
+        connect: async () => ({
+          query: webhookConnection.query.bind(webhookConnection),
+          release() {},
+        }),
+      } as never,
+      { webhook, referenceCodec },
+    );
+    let webhookWaiting = false;
+    for (let poll = 0; poll < 100 && !webhookWaiting; poll++) {
+      webhookWaiting =
+        (
+          await repairConnection.query(
+            "select wait_event_type='Lock' as waiting from pg_stat_activity where pid=$1",
+            [webhookPid],
+          )
+        ).rows[0]?.waiting === true;
+      if (!webhookWaiting)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(
+      webhookWaiting,
+      true,
+      "the concurrent webhook must wait behind the repair's canonical operation lock",
+    );
+    const requestLock = await repairConnection.query(
+      "select id from funding_provider_requests where segment_id=$1 and request_ref_lookup_hmac=$2 for update",
+      [segmentId, referenceCodec.fingerprint(childRequestId)],
+    );
+    assert.equal(
+      requestLock.rowCount,
+      1,
+      "webhook must not hold a provider row while waiting for the repair job",
+    );
+    await repairConnection.query("commit");
+    await concurrentWebhook;
+    concurrentWebhook = null;
+  } finally {
+    await repairConnection.query("rollback");
+    if (concurrentWebhook) await concurrentWebhook;
+    repairConnection.release();
+    webhookConnection.release();
+  }
   console.log(
     "[relay-reconciliation-integration-tests] concurrent polling, child discovery, encrypted correlation, replay/stale webhook suppression, and observation-only terminality ok",
   );

@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "./funding-evidence-repair-fence.js";
 
 import { isRecord } from "../../lib/type-guards.js";
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
@@ -342,6 +343,7 @@ export async function recordOwnedRouteCanonicalDestinationCredit(
     now: Date;
   }>,
 ): Promise<void> {
+  await assertFundingEvidenceRepairFence(client, input.match.operationId);
   await allocateFundingObservationInTransaction(client, {
     operationId: input.match.operationId,
     segmentId: input.match.segmentId,
@@ -1365,6 +1367,7 @@ async function persistExactDestinationCredits(
     now: Date;
   }>,
 ): Promise<boolean> {
+  await assertFundingEvidenceRepairFence(client, input.target.operationId);
   for (const credit of input.credits) {
     const lockedReceipt = await client.query<{ id: string }>(
       `select destination_receipt.id::text as id
@@ -1444,6 +1447,7 @@ async function persistSatisfiedAmount(
     now: Date;
   }>,
 ): Promise<boolean> {
+  await assertFundingEvidenceRepairFence(client, input.target.operationId);
   const creditedRaw = ownedRouteSatisfiedAmount({
     baselineRaw: input.target.baselineRaw,
     observedRaw: input.observation.observedRaw,

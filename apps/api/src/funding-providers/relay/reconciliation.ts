@@ -4,6 +4,10 @@ import type { JsonValue } from "../../funding/domain/types.js";
 import { sameAccountAddress } from "../../funding/domain/asset-identity.js";
 import { upsertFundingProviderRequestInTransaction } from "../../funding/persistence/funding-evidence-repository.js";
 import { wakeFundingReconciliationInTransaction } from "../../funding/persistence/funding-operation-repository.js";
+import {
+  assertFundingEvidenceRepairFence,
+  lockFundingEvidenceRepairApplyOrder,
+} from "../../funding/reconciliation/funding-evidence-repair-fence.js";
 import { RelayClient } from "./client.js";
 import type {
   RelayDepositAddressCodec,
@@ -179,6 +183,8 @@ async function persistStatus(
     (reference) => input.referenceCodec.fingerprint(reference),
   );
   await tx(pool, async (client) => {
+    await lockFundingEvidenceRepairApplyOrder(client, input.operationId);
+    await assertFundingEvidenceRepairFence(client, input.operationId);
     const requestHmac = input.referenceCodec.fingerprint(input.requestId);
     const existingResult = await client.query<{
       support_metadata: JsonRecord;
@@ -478,6 +484,28 @@ export async function ingestVerifiedRelayWebhook(
   const requestId = input.webhook.payload.data.requestId;
   const requestHmac = input.referenceCodec.fingerprint(requestId);
   return tx(pool, async (client) => {
+    // Discover ownership without a row lock, then acquire the same canonical
+    // order as a fenced provider poll BEFORE locking the request itself.
+    const discovered = await client.query<{ operation_id: string }>(
+      `select segment_row.operation_id from funding_provider_requests request_row
+       join funding_operation_segments segment_row on segment_row.id=request_row.segment_id
+       where request_row.request_ref_lookup_hmac=$1 and request_row.lookup_key_version=$2
+         and segment_row.provider_id='relay'`,
+      [requestHmac, input.referenceCodec.keyVersion],
+    );
+    const discoveredOperation = discovered.rows[0];
+    if (!discoveredOperation || discovered.rows.length !== 1)
+      throw new Error(
+        "Relay webhook request correlation is missing or ambiguous",
+      );
+    await lockFundingEvidenceRepairApplyOrder(
+      client,
+      discoveredOperation.operation_id,
+    );
+    await assertFundingEvidenceRepairFence(
+      client,
+      discoveredOperation.operation_id,
+    );
     const { rows } = await client.query<{
       id: string;
       operation_id: string;

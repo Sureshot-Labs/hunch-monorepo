@@ -109,7 +109,7 @@ const deps: VerifiedBuyObserverDependencies = {
   },
   readFinalizedSolanaTransaction: async () => null,
   readDflowOrder: async () => null,
-  readPolymarketFills: async () => [],
+  readPolymarketFills: async () => ({ state: "fills", fills: [] }),
 };
 const policy = {
   batchSize: 1,

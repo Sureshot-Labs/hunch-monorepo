@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { assertFundingEvidenceRepairFence } from "./funding-evidence-repair-fence.js";
 
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
@@ -289,6 +290,7 @@ async function persistScan(
     now: Date;
   }>,
 ): Promise<boolean> {
+  await assertFundingEvidenceRepairFence(client, input.target.operationId);
   const locked = await client.query<{
     reservation_status: string;
   }>(

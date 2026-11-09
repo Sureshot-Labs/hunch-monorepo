@@ -80,6 +80,7 @@ import {
 import { fetchLimitlessOnchainSnapshot } from "./limitless-onchain.js";
 import { extractLimitlessMarketExchangeAddress } from "./limitless-market-contracts.js";
 import { isLimitlessAmmMarketMetadata } from "./limitless-market-mode.js";
+import { readLimitlessAmmMarketAddress } from "./limitless-amm-address.js";
 import {
   deterministicLimitlessClientOrderId,
   deterministicLimitlessDirectHandoffClientOrderId,
@@ -5815,17 +5816,6 @@ export function isLimitlessBotClobExecutable(): boolean {
 }
 
 type LimitlessTradingMarket = Awaited<ReturnType<typeof loadMarketForVenue>>;
-
-function readLimitlessAmmMarketAddress(metadata: unknown): string | null {
-  if (!isRecord(metadata)) return null;
-  return toChecksumAddress(
-    readString(metadata.address) ??
-      readString(metadata.marketAddress) ??
-      readString(metadata.market_address) ??
-      readString(metadata.ammAddress) ??
-      readString(metadata.amm_address),
-  );
-}
 
 function resolveLimitlessAmmOutcomeIndex(
   market: LimitlessTradingMarket,
