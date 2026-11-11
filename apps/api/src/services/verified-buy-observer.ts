@@ -23,9 +23,19 @@ import {
   parseLimitlessOrderResult,
   isLimitlessTerminalRejectedStatus,
 } from "./limitless-order-result.js";
-import { resolveLimitlessClobEvidenceIdentity } from "./limitless-clob-evidence-identity.js";
+import {
+  resolveLimitlessClobEvidenceIdentity,
+  limitlessClobSubmittedPayloads,
+} from "./limitless-clob-evidence-identity.js";
 import { resolveLimitlessReceiptFallback } from "./verified-buy-limitless-receipt.js";
 import { readLimitlessAmmMarketAddress } from "./limitless-amm-address.js";
+import type { AnchoredBuyReceiptObservation } from "./verified-buy-evm-receipt.js";
+import {
+  LIMITLESS_RECEIPT_SEARCH_KEY,
+  readLimitlessReceiptSearch,
+  type LimitlessReceiptSearchInput,
+  type LimitlessReceiptSearch,
+} from "./verified-buy-limitless-discovery.js";
 type Db = Pick<Pool, "query">;
 export type PolymarketFillCandidate = {
   provider_tx_hash: string | null;
@@ -43,12 +53,28 @@ export type VerifiedBuyObserverDependencies = {
   assertEvidenceBudget?: (minimumReads: number) => void;
   limitlessPositionContract: string;
   limitlessExchangeAddress: string;
+  readLimitlessReceipt?: (
+    hash: string,
+    anchor: { blockNumber: number; blockHash: string } | undefined,
+    anchorOnly?: boolean,
+  ) => Promise<AnchoredBuyReceiptObservation>;
+  discoverLimitlessTransactions?: (
+    input: LimitlessReceiptSearchInput,
+  ) => Promise<{
+    checkpoint: LimitlessReceiptSearch;
+    reads: number;
+    failure?: unknown;
+  }>;
   solanaCollateralMint: string;
   /** Configured-chain reader: return null unless the receipt's block is canonical and finalized. */
   readEvmReceipt: (
     chainId: number,
     hash: string,
-  ) => Promise<{ receipt: unknown; timestamp: string } | null>;
+  ) => Promise<{
+    receipt: unknown;
+    timestamp: string;
+    canonicalBlock?: { number: number; hash: string };
+  } | null>;
   readFinalizedSolanaTransaction: (signature: string) => Promise<unknown>;
   readLimitlessOrder: (input: {
     providerOrderId: string | null;
@@ -120,6 +146,8 @@ export type VerifiedBuySourceRow = {
   output_mint: string | null;
   signer_address?: string | null;
   verified_buy_facts?: unknown;
+  posted_at?: Date | null;
+  order_type?: string | null;
 };
 
 /** Only read paths are injected. This module has no API env/auth/executor imports. */
@@ -134,6 +162,7 @@ export function createVerifiedBuyObserver(
             `select purchase_row.id, purchase_row.user_id, purchase_row.venue,
           purchase_row.wallet_address, purchase_row.signer_address,purchase_row.order_hash, purchase_row.venue_order_id,
           purchase_row.token_id, purchase_row.side, purchase_row.order_payload, purchase_row.verified_buy_facts,
+          purchase_row.posted_at, purchase_row.order_type,
           coalesce(purchase_row.order_payload->>'clientOrderId',purchase_row.order_payload->'submitted'->>'clientOrderId',
             purchase_row.order_payload->'_hunchSubmitted'->>'clientOrderId') as client_order_id,
           null::text as tx_signature, token_row.market_id, token_row.side as outcome,
@@ -462,29 +491,275 @@ export async function observeVerifiedBuySource(
         marketMetadata: row.market_metadata,
         legacyExchangeAddress: deps.limitlessExchangeAddress,
       });
-      if (!fallback.ready) return pending(fallback.reason);
-      deps.assertEvidenceBudget?.(3);
-      const observed = await deps.readEvmReceipt(8453, fallback.txHash);
-      if (!observed) return pending("receipt_pending");
-      // A stale locator to a failed attempt is not a definitive rejection of
-      // this purchase while the provider itself reports absence. Retry safely.
-      const evidence = parseEvmClobBuyEvidence({
-        receipt: observed.receipt,
-        txHash: fallback.txHash,
-        owner: row.wallet_address,
-        orderHash: fallback.orderHash,
-        providerOrderId: fallback.providerOrderId,
-        exchangeAddress: fallback.exchangeAddress,
-        positionContract: deps.limitlessPositionContract,
-        tokenId: tokenId.replace(/^limitless:/, ""),
-        chainId: 8453,
-        instrument,
-        purchasedAt: observed.timestamp,
+      let search: LimitlessReceiptSearch | undefined;
+      let transactionHashes: string[];
+      const identity = fallback.ready ? fallback : fallback.discoveryIdentity;
+      if (!fallback.ready) {
+        if (
+          !identity ||
+          row.order_type !== "FOK" ||
+          !row.posted_at ||
+          !Number.isFinite(row.posted_at.getTime())
+        )
+          return pending(fallback.reason);
+        const searchInput: LimitlessReceiptSearchInput = {
+          ...identity,
+          owner: row.wallet_address,
+          tokenId,
+          generation: instrument.generation,
+          postedAt: row.posted_at.toISOString(),
+          checkpoint: limitlessClobSubmittedPayloads(payload).find((part) =>
+            Object.hasOwn(part, LIMITLESS_RECEIPT_SEARCH_KEY),
+          )?.[LIMITLESS_RECEIPT_SEARCH_KEY],
+        };
+        search = readLimitlessReceiptSearch(searchInput) ?? undefined;
+        if (!search?.transactions.length) {
+          if (!deps.discoverLimitlessTransactions)
+            return pending(fallback.reason);
+          try {
+            const discovered =
+              await deps.discoverLimitlessTransactions(searchInput);
+            search = discovered.checkpoint;
+            if (discovered.failure)
+              return {
+                ...pending(observationFailureReason(discovered.failure)),
+                limitlessReceiptSearch: search,
+              };
+          } catch (error) {
+            return {
+              ...pending(observationFailureReason(error)),
+              ...(search ? { limitlessReceiptSearch: search } : {}),
+            };
+          }
+        }
+        transactionHashes = search.transactions;
+        if (!transactionHashes.length)
+          return {
+            ...pending("receipt_locator_search_pending"),
+            limitlessReceiptSearch: search,
+          };
+      } else transactionHashes = [fallback.txHash];
+      if (!identity) return pending("signed_order_identity_missing");
+      const withSearch = (
+        observation: PurchaseObservation,
+      ): PurchaseObservation => ({
+        ...observation,
+        ...(search ? { limitlessReceiptSearch: search } : {}),
       });
-      const facts = evidence && combinePurchaseEvidence([evidence]);
-      return facts
-        ? { state: "verified", facts }
-        : pending("receipt_exact_fill_unavailable");
+      try {
+        deps.assertEvidenceBudget?.(
+          transactionHashes.reduce(
+            (sum, hash) => sum + (search?.anchorChecks.includes(hash) ? 1 : 3),
+            0,
+          ),
+        );
+      } catch (error) {
+        if (!search) throw error;
+        return withSearch(pending(observationFailureReason(error)));
+      }
+      const parts: VerifiedPurchaseEvidence[] = [];
+      let incompleteReason: string | null = null;
+      const invalidatedIds: string[] = [];
+      const rejectedLocators = new Set<string>();
+      const orphanedBlocks: number[] = [];
+      const previousProof = verifiedBuyFactsSchema.safeParse(
+        row.verified_buy_facts,
+      );
+      const previousIds = (txHash: string) =>
+        previousProof.success &&
+        previousProof.data.owner.toLowerCase() ===
+          row.wallet_address?.toLowerCase() &&
+        previousProof.data.canonicalPurchaseKey ===
+          `limitless:clob:8453:${identity.providerOrderId}` &&
+        previousProof.data.instrument.generation === instrument.generation &&
+        previousProof.data.instrument.marketId === instrument.marketId &&
+        previousProof.data.instrument.tokenId === instrument.tokenId &&
+        previousProof.data.instrument.outcome === instrument.outcome
+          ? previousProof.data.evidenceIds.filter((value) =>
+              value.startsWith(`8453:${txHash.toLowerCase()}:`),
+            )
+          : [];
+      try {
+        for (const txHash of transactionHashes) {
+          let observed;
+          try {
+            if (deps.readLimitlessReceipt) {
+              const anchored = await deps.readLimitlessReceipt(
+                txHash,
+                search?.anchors[txHash],
+                search?.anchorChecks.includes(txHash),
+              );
+              if (anchored.state === "anchor_pending" && search) {
+                search = {
+                  ...search,
+                  anchorChecks: [...new Set([...search.anchorChecks, txHash])],
+                };
+                incompleteReason ??= "receipt_anchor_check_pending";
+                continue;
+              }
+              if (search)
+                search = {
+                  ...search,
+                  anchorChecks: search.anchorChecks.filter(
+                    (hash) => hash !== txHash,
+                  ),
+                };
+              if (anchored.state === "orphaned") {
+                rejectedLocators.add(txHash);
+                invalidatedIds.push(...previousIds(txHash));
+                const anchor = search?.anchors[txHash];
+                if (anchor) orphanedBlocks.push(anchor.blockNumber);
+                continue;
+              }
+              observed = anchored.state === "finalized" ? anchored : null;
+            } else observed = await deps.readEvmReceipt(8453, txHash);
+          } catch (error) {
+            incompleteReason ??= observationFailureReason(error);
+            continue;
+          }
+          if (!observed) {
+            incompleteReason ??= "receipt_pending";
+            continue;
+          }
+          const prior = verifiedBuyFactsSchema.safeParse(
+            row.verified_buy_facts,
+          );
+          const priorIds =
+            prior.success &&
+            prior.data.owner.toLowerCase() ===
+              row.wallet_address.toLowerCase() &&
+            prior.data.canonicalPurchaseKey ===
+              `limitless:clob:8453:${identity.providerOrderId}` &&
+            prior.data.instrument.generation === instrument.generation &&
+            prior.data.instrument.marketId === instrument.marketId &&
+            prior.data.instrument.tokenId === instrument.tokenId &&
+            prior.data.instrument.outcome === instrument.outcome
+              ? prior.data.evidenceIds.filter((value) =>
+                  value.startsWith(`8453:${txHash.toLowerCase()}:`),
+                )
+              : [];
+          if (failedReceipt(observed.receipt, txHash)) {
+            invalidatedIds.push(...priorIds);
+            rejectedLocators.add(txHash);
+            const anchor = search?.anchors[txHash];
+            if (
+              anchor &&
+              observed.canonicalBlock &&
+              (anchor.blockNumber !== observed.canonicalBlock.number ||
+                anchor.blockHash !== observed.canonicalBlock.hash.toLowerCase())
+            )
+              orphanedBlocks.push(anchor.blockNumber);
+            continue;
+          }
+          // A stale locator to a failed attempt is not a definitive rejection of
+          // this purchase while the provider itself reports absence. Retry safely.
+          const evidence = parseEvmClobBuyEvidence({
+            receipt: observed.receipt,
+            txHash,
+            owner: row.wallet_address,
+            orderHash: identity.orderHash,
+            providerOrderId: identity.providerOrderId,
+            exchangeAddress: identity.exchangeAddress,
+            positionContract: deps.limitlessPositionContract,
+            tokenId: tokenId.replace(/^limitless:/, ""),
+            chainId: 8453,
+            instrument,
+            purchasedAt: observed.timestamp,
+          });
+          if (!evidence) {
+            incompleteReason ??= "receipt_exact_fill_unavailable";
+            invalidatedIds.push(...priorIds);
+            rejectedLocators.add(txHash);
+            const anchor = search?.anchors[txHash];
+            if (
+              anchor &&
+              observed.canonicalBlock &&
+              (anchor.blockNumber !== observed.canonicalBlock.number ||
+                anchor.blockHash !== observed.canonicalBlock.hash.toLowerCase())
+            )
+              orphanedBlocks.push(anchor.blockNumber);
+            continue;
+          }
+          if (
+            search &&
+            observed.canonicalBlock &&
+            Number.isSafeInteger(observed.canonicalBlock.number) &&
+            observed.canonicalBlock.number >= 0 &&
+            /^0x[0-9a-f]{64}$/i.test(observed.canonicalBlock.hash)
+          ) {
+            search = {
+              ...search,
+              anchors: {
+                ...search.anchors,
+                [txHash]: {
+                  blockNumber: observed.canonicalBlock.number,
+                  blockHash: observed.canonicalBlock.hash.toLowerCase(),
+                },
+              },
+            };
+          }
+          parts.push(evidence);
+        }
+        if (search && rejectedLocators.size) {
+          search = {
+            ...search,
+            transactions: search.transactions.filter(
+              (hash) => !rejectedLocators.has(hash),
+            ),
+            anchorChecks: search.anchorChecks.filter(
+              (hash) => !rejectedLocators.has(hash),
+            ),
+            anchors: Object.fromEntries(
+              Object.entries(search.anchors).filter(
+                ([hash]) => !rejectedLocators.has(hash),
+              ),
+            ),
+          };
+          if (!search.transactions.length && orphanedBlocks.length)
+            search = {
+              ...search,
+              phase: "restart",
+              nextBlock: Math.max(
+                search.lowerBlock,
+                Math.min(...orphanedBlocks),
+              ),
+            };
+          if (
+            !search.transactions.length &&
+            incompleteReason === "receipt_exact_fill_unavailable"
+          )
+            incompleteReason = "receipt_locator_search_pending";
+        }
+        if (incompleteReason)
+          return withSearch(pending(incompleteReason, invalidatedIds));
+        if (!parts.length)
+          return withSearch(
+            invalidatedIds.length
+              ? {
+                  state: "revoked",
+                  reason:
+                    search && !search.transactions.length
+                      ? "receipt_locator_search_pending"
+                      : "finalized_receipt_failed",
+                  invalidatedEvidenceIds: invalidatedIds,
+                }
+              : pending(
+                  search && !search.transactions.length
+                    ? "receipt_locator_search_pending"
+                    : "receipt_exact_fill_unavailable",
+                ),
+          );
+        const facts = combinePurchaseEvidence(parts);
+        return withSearch(
+          facts
+            ? { state: "verified", facts }
+            : pending("evidence_identity_conflict"),
+        );
+      } catch (error) {
+        return withSearch(
+          pending(observationFailureReason(error), invalidatedIds),
+        );
+      }
     }
     if (
       status.status !== "found" ||

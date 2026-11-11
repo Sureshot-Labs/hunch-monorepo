@@ -176,6 +176,13 @@ const staticProvider = createEvmRpcProvider(
   `http://127.0.0.1:${rpcAddress.port}`,
   8453,
   "rpc-client-factory-tests",
+  { timeoutMs: 10_000 },
+);
+assert.equal(staticProvider._getConnection().timeout, 10_000);
+assert.throws(
+  () =>
+    createEvmRpcProvider("http://127.0.0.1:1", 8453, "test", { timeoutMs: 0 }),
+  /timeout/,
 );
 try {
   const network = await staticProvider.getNetwork();

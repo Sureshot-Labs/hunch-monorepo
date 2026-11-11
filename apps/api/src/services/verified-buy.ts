@@ -7,6 +7,10 @@ import {
 } from "../schemas/social-trade.js";
 import { verifiedBuyRetrySeconds } from "./verified-buy-retry.js";
 import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
+import {
+  limitlessReceiptSearchSchema,
+  type LimitlessReceiptSearch,
+} from "./verified-buy-limitless-discovery.js";
 
 export type { PurchaseRef, VerifiedBuyFacts } from "../schemas/social-trade.js";
 type Db = Pick<Pool, "query">;
@@ -154,14 +158,15 @@ export function factsFromEvidence(
   });
 }
 
-export type PurchaseObservation =
+export type PurchaseObservation = (
   | { state: "verified"; facts: VerifiedBuyFacts }
   | {
       state: "pending" | "revoked";
       reason: string;
       /** Fresh canonical failures of exact prior proof, not provider absence. */
       invalidatedEvidenceIds?: string[];
-    };
+    }
+) & { limitlessReceiptSearch?: LimitlessReceiptSearch };
 export type ClaimedPurchase = {
   purchaseRef: PurchaseRef;
   userId: string;
@@ -294,6 +299,10 @@ export async function repairVerifiedBuys(
           observation.facts = verifiedBuyFactsSchema.parse(observation.facts);
         else if (observation.reason.startsWith("evidence_budget_exhausted:"))
           summary.budgetExhausted++;
+        if (observation.limitlessReceiptSearch)
+          limitlessReceiptSearchSchema.parse(
+            observation.limitlessReceiptSearch,
+          );
         const referenceColumn = kind === "order" ? "order_id" : "execution_id";
         const timelyPurchase = copyPurchaseIsTimelySql(
           "(stored_purchase.verified_buy_facts->>'purchasedAt')::timestamptz",
@@ -307,6 +316,24 @@ export async function repairVerifiedBuys(
             verified_buy_reason = $4, verified_buy_revision = verified_buy_revision + 1,
             verified_buy_due_at = now() + $5 * interval '1 second',
             verified_buy_lease_token = null, verified_buy_lease_until = null
+            ${
+              kind === "order"
+                ? `,order_payload = case when venue='limitless' and $9::jsonb is not null
+              then jsonb_set(coalesce(order_payload,'{}'::jsonb),'{_hunchLimitlessReceiptSearchV1}',$9::jsonb) else order_payload end,
+            status = case when venue='limitless' and side='BUY' and order_type='FOK' and $2='verified'
+              and $3::jsonb->>'canonicalPurchaseKey'='limitless:clob:8453:'||venue_order_id
+              then 'filled' else status end,
+            filled_size = case when venue='limitless' and side='BUY' and order_type='FOK' and $2='verified'
+              and $3::jsonb->>'canonicalPurchaseKey'='limitless:clob:8453:'||venue_order_id
+              then ($3::jsonb->>'grossShares')::numeric else filled_size end,
+            average_fill_price = case when venue='limitless' and side='BUY' and order_type='FOK' and $2='verified'
+              and $3::jsonb->>'canonicalPurchaseKey'='limitless:clob:8453:'||venue_order_id
+              then ($3::jsonb->>'entryPrice')::numeric else average_fill_price end,
+            filled_at = case when venue='limitless' and side='BUY' and order_type='FOK' and $2='verified'
+              and $3::jsonb->>'canonicalPurchaseKey'='limitless:clob:8453:'||venue_order_id
+              then coalesce(filled_at,($3::jsonb->>'purchasedAt')::timestamptz) else filled_at end`
+                : ""
+            }
         where id = $1 and user_id = $6 and verified_buy_lease_token = $7
           and verified_buy_lease_until > now() returning id,verified_buy_state,verified_buy_facts),
         projected_theses as (
@@ -359,6 +386,13 @@ export async function repairVerifiedBuys(
             observation.state === "verified"
               ? []
               : (observation.invalidatedEvidenceIds ?? []),
+            ...(kind === "order"
+              ? [
+                  observation.limitlessReceiptSearch
+                    ? JSON.stringify(observation.limitlessReceiptSearch)
+                    : null,
+                ]
+              : []),
           ],
         );
         if (result.rows.length) {

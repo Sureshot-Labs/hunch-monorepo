@@ -15,6 +15,11 @@ import {
   requestVerifiedBuyRefresh,
 } from "./services/verified-buy.js";
 import { SocialService } from "./services/social-service.js";
+import { expireStaleLimitlessFokOrders } from "./repos/orders-repo.js";
+import {
+  discoverLimitlessBuyTransactions,
+  LIMITLESS_RECEIPT_SEARCH_KEY,
+} from "./services/verified-buy-limitless-discovery.js";
 
 const pool = await createIntegrationTestPool({ max: 1 }),
   client = await pool.connect();
@@ -268,6 +273,171 @@ try {
   );
   assert.equal(providerReads, 2);
   assert.equal(receiptReads, 2);
+  // Accepted + DELAYED, provider absence, and no stored tx: ordinary observer
+  // resumes exact-hash discovery across worker restarts, without another Buy.
+  const delayedPayload = {
+    ...payload,
+    history: undefined,
+    marketSlug: "delayed-fixture",
+    submitted: {
+      ...payload.submitted,
+      _hunchUpstream: {
+        order: { ...signed, id: providerOrderId },
+        execution: {
+          clientOrderId,
+          settlementStatus: "DELAYED",
+          matched: false,
+        },
+      },
+    },
+  };
+  await client.query(
+    "update orders set status='submitted',order_type='FOK',posted_at='2026-11-11T12:32:06Z',order_payload=$2::jsonb where id=$1",
+    [orderId, JSON.stringify(delayedPayload)],
+  );
+  assert.equal(
+    await expireStaleLimitlessFokOrders(db, {
+      userId,
+      walletAddress: owner,
+      marketSlug: "delayed-fixture",
+      activeVenueOrderIds: [],
+      olderThanMs: 1,
+    }),
+    0,
+  );
+  finalized = false;
+  let logReads = 0,
+    locatorReady = false;
+  const discoveryDeps: VerifiedBuyObserverDependencies = {
+    ...deps,
+    discoverLimitlessTransactions: (searchInput) =>
+      discoverLimitlessBuyTransactions(
+        {
+          getBlock: async (value) => {
+            const number = value === "finalized" ? 56_000_000 : value;
+            return {
+              number,
+              timestamp:
+                Date.parse("2026-11-11T12:32:06Z") / 1000 +
+                Math.floor((number - 55_999_000) / 5),
+            };
+          },
+          getLogs: async (filter) => {
+            logReads++;
+            assert.equal(filter.address.toLowerCase(), exchange);
+            assert.equal(filter.topics[1], frozen.orderHash);
+            assert.ok(
+              filter.fromBlock <= 55_999_000 && filter.toBlock >= 55_999_000,
+            );
+            const fillLog = receipt.logs[0];
+            assert.ok(fillLog);
+            return [
+              {
+                address: exchange,
+                topics: fillLog.topics,
+                transactionHash: txHash,
+                blockNumber: 55_999_000,
+                blockHash: `0x${"c".repeat(64)}`,
+              },
+            ];
+          },
+        },
+        searchInput,
+        () => {},
+      ),
+    readEvmReceipt: async () =>
+      finalized ? { receipt, timestamp: "2026-11-11T12:32:07Z" } : null,
+  };
+  for (let pass = 0; pass < 12; pass++) {
+    await requestVerifiedBuyRefresh(db, { userId, purchaseRef: ref });
+    const partial = await repairVerifiedBuys(db, {
+      ...policy,
+      observe: createVerifiedBuyObserver(db, discoveryDeps),
+    });
+    assert.equal(partial.pending, 1);
+    const checkpointRow = (
+      await client.query(
+        "select order_payload,verified_buy_due_at>now() as scheduled,verified_buy_lease_token,status from orders where id=$1",
+        [orderId],
+      )
+    ).rows[0];
+    assert.equal(
+      checkpointRow.scheduled,
+      true,
+      "Checkpoint trigger must retain retry cadence",
+    );
+    assert.equal(checkpointRow.verified_buy_lease_token, null);
+    assert.equal(checkpointRow.status, "submitted");
+    const checkpoint =
+      checkpointRow.order_payload[LIMITLESS_RECEIPT_SEARCH_KEY];
+    assert.ok(checkpoint);
+    if (checkpoint.transactions.length) {
+      locatorReady = true;
+      break;
+    }
+  }
+  assert.equal(locatorReady, true);
+  assert.equal(logReads, 1);
+  finalized = true;
+  await requestVerifiedBuyRefresh(db, { userId, purchaseRef: ref });
+  const recovered = await repairVerifiedBuys(db, {
+    ...policy,
+    observe: createVerifiedBuyObserver(db, {
+      ...discoveryDeps,
+      discoverLimitlessTransactions: async () => {
+        throw Error("Persisted locator must not rescan");
+      },
+    }),
+  });
+  assert.equal(recovered.verified, 1);
+  const projected = (
+    await client.query(
+      "select status,filled_size,average_fill_price,verified_buy_due_at>now()+interval '59 minutes' as canonical_cadence,order_payload from orders where id=$1",
+      [orderId],
+    )
+  ).rows[0];
+  assert.equal(projected.status, "filled");
+  assert.equal(Number(projected.filled_size), 11.695903);
+  assert.ok(Number(projected.average_fill_price) > 0);
+  assert.equal(
+    projected.canonical_cadence,
+    true,
+    "Own projection must not wake itself",
+  );
+  assert.equal((await service.eligibility(userId, ref)).eligible, true);
+  const beforeWake = JSON.stringify(projected.order_payload);
+  await requestVerifiedBuyRefresh(db, { userId, purchaseRef: ref });
+  const fenced = await repairVerifiedBuys(db, {
+    ...policy,
+    observe: async (claim) => {
+      const observation = await createVerifiedBuyObserver(
+        db,
+        discoveryDeps,
+      )(claim);
+      await requestVerifiedBuyRefresh(db, { userId, purchaseRef: ref });
+      return observation;
+    },
+  });
+  assert.equal(fenced.leaseLost, 1);
+  assert.equal(
+    JSON.stringify(
+      (
+        await client.query("select order_payload from orders where id=$1", [
+          orderId,
+        ])
+      ).rows[0].order_payload,
+    ),
+    beforeWake,
+  );
+  assert.equal(
+    (
+      await client.query(
+        "select count(*)::int as total from orders where user_id=$1",
+        [userId],
+      )
+    ).rows[0].total,
+    1,
+  );
   await client.query("update unified_markets set status='CLOSED' where id=$1", [
     marketId,
   ]);

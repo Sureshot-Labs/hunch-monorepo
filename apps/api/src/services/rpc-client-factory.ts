@@ -126,8 +126,14 @@ export function createEvmRpcProvider(
   rpcUrl: string,
   chainId: number,
   source = captureRpcDiagnosticSource(),
+  options?: { timeoutMs: number },
 ): JsonRpcProvider {
   const request = new FetchRequest(rpcUrl);
+  if (options) {
+    if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0)
+      throw Error("Invalid RPC request timeout");
+    request.timeout = options.timeoutMs;
+  }
   const getUrl = FetchRequest.createGetUrlFunc();
   request.getUrlFunc = async (outgoing, signal) => {
     const startedAt = performance.now();

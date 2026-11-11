@@ -46,6 +46,7 @@ function withoutIncomingLimitlessClobContext(payload: unknown): unknown {
   if (!isRecord(payload)) return payload;
   const sanitized = { ...payload };
   delete sanitized[LIMITLESS_CLOB_CONTEXT_KEY];
+  delete sanitized._hunchLimitlessReceiptSearchV1;
   for (const key of [
     "_hunchSubmitted",
     "submitted",
@@ -1232,6 +1233,10 @@ export async function expireStaleLimitlessFokOrders(
         and venue = 'limitless'
         and order_type = 'FOK'
         and lower(coalesce(status, '')) in ('submitted', 'pending', 'open', 'live')
+        -- Absence from open orders is not no-fill evidence for an accepted
+        -- BUY. DELAYED orders can already have a matching canonical receipt.
+        -- Their ordinary evidence observer owns recovery, never re-submission.
+        and upper(coalesce(side,'')) <> 'BUY'
         and not (
           coalesce(${storedExecution}->>'matched', 'false') = 'true'
           and upper(coalesce(
