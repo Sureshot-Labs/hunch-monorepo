@@ -12,6 +12,11 @@ function text(value: unknown): string | null {
 }
 const record = (value: unknown): Record<string, unknown> =>
   isRecord(value) ? value : {};
+export type LimitlessReceiptIdentity = {
+  providerOrderId: string;
+  exchangeAddress: string;
+  orderHash: string;
+};
 type Fallback =
   | {
       ready: true;
@@ -20,7 +25,11 @@ type Fallback =
       exchangeAddress: string;
       orderHash: string;
     }
-  | { ready: false; reason: string };
+  | {
+      ready: false;
+      reason: string;
+      discoveryIdentity?: LimitlessReceiptIdentity;
+    };
 
 /** A stored transaction reference is only a locator. No history amount/status is proof. */
 export function resolveLimitlessReceiptFallback(input: {
@@ -173,6 +182,9 @@ export function resolveLimitlessReceiptFallback(input: {
       reason: hashes.size
         ? "evidence_identity_conflict"
         : "fill_transaction_identity_missing",
+      ...(hashes.size === 0
+        ? { discoveryIdentity: { providerOrderId, ...identity } }
+        : {}),
     };
   const txHash = [...hashes][0];
   if (!txHash)

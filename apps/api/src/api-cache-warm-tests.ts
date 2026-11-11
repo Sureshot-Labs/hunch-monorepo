@@ -39,6 +39,24 @@ await test("includes discovery market-map sidebar warmer when enabled", () => {
     "/market-map/sidebars?venues=polymarket,kalshi,limitless&trendingLimit=5&volumeMoversLimit=5&liquidityMoversLimit=5&topMoversLimit=5&minVolume24h=1000&volumeMoversSortBy=percent&liquidityMoversSortBy=absolute&includeVolumeSparkline=true&sparklineWindowHours=48&sparklineBucketHours=2",
   );
 });
+await test("warms the exact first/next 100-event keys, preserving 25-event targets", () => {
+  const targets = API_CACHE_WARM_TARGETS.filter(
+    (target) => target.group === "feed",
+  );
+  for (const offset of [0, 100])
+    assert.ok(
+      targets.some(
+        (target) =>
+          target.path ===
+          `/feed?limit=100&offset=${offset}&sort=trending_v2&sort_dir=desc`,
+      ),
+    );
+  assert.ok(
+    targets.some((target) =>
+      target.path.includes("limit=25&offset=0&sort=trending_v2"),
+    ),
+  );
+});
 
 await test("keeps market-map warmer independent from feed and wallet groups", () => {
   const selected = selectApiCacheWarmTargets({

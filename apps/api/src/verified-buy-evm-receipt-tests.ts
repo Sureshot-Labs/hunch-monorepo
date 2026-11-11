@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   readCanonicalFinalizedBuyReceipt,
+  readAnchoredFinalizedBuyReceipt,
   type VerifiedBuyEvmProvider,
 } from "./services/verified-buy-evm-receipt.js";
 import { EvidenceBudgetExhausted } from "./services/verified-buy.js";
@@ -52,6 +53,17 @@ async function check(
     });
   return {
     run,
+    runAnchored: () =>
+      readAnchoredFinalizedBuyReceipt(
+        provider,
+        txHash,
+        { blockNumber: 100, blockHash },
+        () => {
+          if (reads >= (input.budget ?? 3))
+            throw new EvidenceBudgetExhausted(1, 0);
+          reads++;
+        },
+      ),
     calls,
     get reads() {
       return reads;
@@ -60,6 +72,7 @@ async function check(
 }
 const good = await check();
 assert.deepEqual(await good.run(), {
+  canonicalBlock: { number: 100, hash: blockHash },
   receipt: { hash: txHash, status: 1, logs: [] },
   timestamp: "2026-11-06T19:48:27.000Z",
 });
@@ -69,6 +82,22 @@ assert.deepEqual(good.calls, [
   ["block", 100],
 ]);
 assert.equal(good.reads, 3);
+const anchored = await check();
+assert.equal((await anchored.runAnchored()).state, "finalized");
+assert.equal(anchored.reads, 3);
+const anchoredOrphan = await check({
+  canonical: { ...block, hash: otherHash },
+  budget: 3,
+});
+assert.equal((await anchoredOrphan.runAnchored()).state, "orphaned");
+assert.equal(anchoredOrphan.reads, 3);
+const missingOrphan = await check({
+  receipt: null,
+  canonical: { ...block, hash: otherHash },
+  budget: 3,
+});
+assert.equal((await missingOrphan.runAnchored()).state, "orphaned");
+assert.equal(missingOrphan.reads, 2);
 for (const input of [
   { receipt: null },
   { receipt: { ...receipt, hash: otherHash } },

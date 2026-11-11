@@ -275,7 +275,7 @@ try {
 
   // Dynamic import occurs only after verifying the explicit target. The repo
   // helper receives the fixture pool; runtime db.ts/app.ts are never imported.
-  const { fetchFeedMarkets, fetchFeedEventIds } =
+  const { fetchFeedMarkets, fetchFeedMarketsBatched, fetchFeedEventIds } =
     await import("./repos/unified-read.js");
   async function assertEquivalent(
     label: string,
@@ -853,6 +853,65 @@ try {
   await client.query("set jit = off");
   for (const { eventIds, input, expectedRows, eligibleChildren } of planCases) {
     await assertEquivalent("bounded catalog page", input, eventIds);
+    for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+      await client.query(`set plan_cache_mode = '${mode}'`);
+      const expected = await fetchFeedMarkets(fixturePool, input, eventIds);
+      const actualStatements: Array<{ sql: string; params: unknown[] }> = [];
+      const traceQuery = async (sql: string, params: unknown[] = []) => {
+        if (sql.trim().startsWith("with "))
+          actualStatements.push({ sql, params });
+        return fixtureQuery(sql, params);
+      };
+      const tracedPool = {
+        query: traceQuery,
+        connect: async () => ({ query: traceQuery, release() {} }),
+      } as unknown as InfraPool;
+      const batched = await fetchFeedMarketsBatched(
+        tracedPool,
+        input,
+        eventIds,
+      );
+      assert.deepEqual(
+        batched,
+        expected,
+        `Complete ordered batch equivalence: ${mode}, ${eventIds.length} events`,
+      );
+      if (eventIds.length > 20) {
+        assert.ok(actualStatements.length > 1);
+        let totalRows = 0,
+          totalBuffers = 0,
+          totalMs = 0;
+        for (const statement of actualStatements) {
+          assert.ok((statement.params[0] as string[]).length <= 20);
+          await client.query(
+            `prepare fixture_feed_actual_batch as ${statement.sql}`,
+          );
+          try {
+            const executed = await client.query(
+              `explain(analyze,buffers,format json) execute fixture_feed_actual_batch(${statement.params.map(sqlLiteral).join(",")})`,
+            );
+            const result = executed.rows[0]["QUERY PLAN"][0];
+            totalRows += result.Plan["Actual Rows"];
+            totalBuffers +=
+              result.Plan["Shared Hit Blocks"] +
+              result.Plan["Shared Read Blocks"];
+            totalMs += result["Execution Time"];
+          } finally {
+            await client.query("deallocate fixture_feed_actual_batch");
+          }
+        }
+        assert.equal(totalRows, expected.length);
+        console.log(
+          JSON.stringify({
+            actualHydrationBatches: actualStatements.length,
+            mode,
+            rows: totalRows,
+            bufferBlocks: totalBuffers,
+            executionMs: Math.round(totalMs * 1000) / 1000,
+          }),
+        );
+      }
+    }
     // Capture the exact application SQL, including the real cap/filter binds.
     // Empty HTTP pages deliberately short-circuit; parse an empty SQL execution
     // too by binding an empty array to the nonempty captured statement.

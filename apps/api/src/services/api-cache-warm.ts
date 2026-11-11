@@ -81,6 +81,18 @@ export const API_CACHE_WARM_TARGETS: ApiCacheWarmTarget[] = [
     path: "/feed?limit=25&offset=0&sort=change24h&sort_dir=desc",
   },
   {
+    id: "feed_trending_v2_100",
+    label: "Feed Trending V2 (100)",
+    group: "feed",
+    path: "/feed?limit=100&offset=0&sort=trending_v2&sort_dir=desc",
+  },
+  {
+    id: "feed_trending_v2_100_next",
+    label: "Feed Trending V2 (100, next page)",
+    group: "feed",
+    path: "/feed?limit=100&offset=100&sort=trending_v2&sort_dir=desc",
+  },
+  {
     id: "market_map_discovery_sidebars",
     label: "Market Map Discovery Sidebars",
     group: "market_map",

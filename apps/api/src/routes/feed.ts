@@ -21,6 +21,7 @@ import {
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
+import { createFeedSingleflight } from "../lib/feed-singleflight.js";
 import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
@@ -43,6 +44,7 @@ import {
   fetchFeedEventIds,
   fetchFeedMarketIdsForProbabilityProbe,
   fetchFeedMarkets,
+  fetchFeedMarketsBatched,
   fetchFeedMarketsByIds,
   fetchFeedMarketsDirect,
   fetchObservedCanonicalProbabilityMarketIds,
@@ -391,6 +393,12 @@ function buildFeedData(input: {
 
 export const feedRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const loadSharedFeed = createFeedSingleflight<{
+    body: string;
+    etag: string;
+    cacheControl?: string;
+    cacheHit: boolean;
+  }>();
 
   /**
    * GET /feed
@@ -476,14 +484,24 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const cacheKey = `feed:v35:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
-      const redisStatus = redisContext.status;
+      let redisStatus = redisContext.status;
+      const readCachedBody = async () => {
+        if (!cacheEnabled || !r) return null;
+        try {
+          const raw = await r.get(cacheKey);
+          return raw
+            ? filterCachedFeedBodyForVenues(raw, new Set(venues))
+            : null;
+        } catch {
+          redisStatus = "error";
+          req.log.warn("Feed cache read unavailable; using database");
+          return null;
+        }
+      };
 
       // serve from cache if present, with proper ETag/304 handling
       if (cacheEnabled && r) {
-        const rawCachedBody = await r.get(cacheKey);
-        const cachedBody = rawCachedBody
-          ? filterCachedFeedBodyForVenues(rawCachedBody, new Set(venues))
-          : null;
+        const cachedBody = await readCachedBody();
         if (cachedBody) {
           const etag = `W/"${crypto
             .createHash("sha1")
@@ -515,371 +533,412 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      // Pre-calculate now() as a parameter to allow index usage
-      const nowTs = new Date();
-      const nowParam = nowTs.toISOString();
-      const sevenDaysAgo = new Date(
-        nowTs.getTime() - 7 * 24 * 60 * 60 * 1000,
-      ).toISOString();
-      const sevenDaysFromNow = new Date(
-        nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
-      ).toISOString();
-
-      const endWithin =
-        endWithinHours != null
-          ? new Date(
-              nowTs.getTime() + endWithinHours * 60 * 60 * 1000,
-            ).toISOString()
-          : undefined;
-      const ageSince =
-        ageWithinHours != null
-          ? new Date(
-              nowTs.getTime() - ageWithinHours * 60 * 60 * 1000,
-            ).toISOString()
-          : undefined;
-
-      const inputs = {
-        limit,
-        offset,
-        minVol,
-        minLiquidity,
-        q: search,
-        view,
-        eventScope,
-        venues,
-        category,
-        categories,
-        filter,
-        sort,
-        sortDir,
-        minProb,
-        maxProb,
-        maxSpread,
-        durationMinutes,
-        endWithin,
-        ageSince,
-        nowParam,
-        sevenDaysAgo,
-        sevenDaysFromNow,
-      };
-      const hasProbabilityFilter = minProb != null || maxProb != null;
-
-      let data: FeedEvent[] = [];
-      let feedQueryPhase: FeedQueryPhase = "candidate";
-      const feedQueryStartedAt = performance.now();
-      let phaseStartedAt = feedQueryStartedAt;
-      const phaseMs: Partial<Record<FeedQueryPhase, number>> = {};
-      const phaseCalls: Partial<Record<FeedQueryPhase, number>> = {};
-      let candidateCount = 0;
-      const setFeedQueryPhase = (phase: FeedQueryPhase) => {
-        const now = performance.now();
-        phaseMs[feedQueryPhase] =
-          (phaseMs[feedQueryPhase] ?? 0) + now - phaseStartedAt;
-        feedQueryPhase = phase;
-        phaseCalls[phase] = (phaseCalls[phase] ?? 0) + 1;
-        phaseStartedAt = now;
-      };
       try {
-        let probabilityEventRows: Awaited<
-          ReturnType<typeof fetchFeedEventIds>
-        > | null = null;
-        let observedProbabilityMarketIds: string[] | null = null;
-        let usedProgressiveProbabilityMarketPage = false;
+        const loaded = await loadSharedFeed(cacheKey, async () => {
+          // A request can have read a miss just before another flight completed.
+          // Recheck Redis rather than start the same expensive hydration again.
+          const cached = await readCachedBody();
+          if (cached)
+            return {
+              body: cached,
+              etag: `W/"${crypto.createHash("sha1").update(cached).digest("hex")}"`,
+              cacheControl: `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
+              cacheHit: true,
+            };
+          // Pre-calculate now() as a parameter to allow index usage
+          const nowTs = new Date();
+          const nowParam = nowTs.toISOString();
+          const sevenDaysAgo = new Date(
+            nowTs.getTime() - 7 * 24 * 60 * 60 * 1000,
+          ).toISOString();
+          const sevenDaysFromNow = new Date(
+            nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
+          ).toISOString();
 
-        if (hasProbabilityFilter && view !== "markets") {
-          const eventProbabilityPolicy = resolveProbabilityEventProbePolicy(
+          const endWithin =
+            endWithinHours != null
+              ? new Date(
+                  nowTs.getTime() + endWithinHours * 60 * 60 * 1000,
+                ).toISOString()
+              : undefined;
+          const ageSince =
+            ageWithinHours != null
+              ? new Date(
+                  nowTs.getTime() - ageWithinHours * 60 * 60 * 1000,
+                ).toISOString()
+              : undefined;
+
+          const inputs = {
+            limit,
+            offset,
+            minVol,
+            minLiquidity,
+            q: search,
+            view,
+            eventScope,
+            venues,
+            category,
+            categories,
+            filter,
+            sort,
+            sortDir,
             minProb,
             maxProb,
-          );
-          const probabilityPage = await fetchProbabilityFeedEventPage({
-            requestedLimit: limit,
-            candidateWindowSize: eventProbabilityPolicy.candidateWindowSize,
-            probabilityBatchSize: eventProbabilityPolicy.probabilityBatchSize,
-            maxCandidates: eventProbabilityPolicy.maxCandidates,
-            fetchCandidateEvents: async ({ limit: candidateLimit, offset }) => {
-              setFeedQueryPhase("candidate");
-              const candidates = await fetchFeedEventIds(
-                pool,
-                {
-                  ...inputs,
+            maxSpread,
+            durationMinutes,
+            endWithin,
+            ageSince,
+            nowParam,
+            sevenDaysAgo,
+            sevenDaysFromNow,
+          };
+          const hasProbabilityFilter = minProb != null || maxProb != null;
+
+          let data: FeedEvent[] = [];
+          let feedQueryPhase: FeedQueryPhase = "candidate";
+          const feedQueryStartedAt = performance.now();
+          let phaseStartedAt = feedQueryStartedAt;
+          const phaseMs: Partial<Record<FeedQueryPhase, number>> = {};
+          const phaseCalls: Partial<Record<FeedQueryPhase, number>> = {};
+          let candidateCount = 0;
+          const setFeedQueryPhase = (phase: FeedQueryPhase) => {
+            const now = performance.now();
+            phaseMs[feedQueryPhase] =
+              (phaseMs[feedQueryPhase] ?? 0) + now - phaseStartedAt;
+            feedQueryPhase = phase;
+            phaseCalls[phase] = (phaseCalls[phase] ?? 0) + 1;
+            phaseStartedAt = now;
+          };
+          try {
+            let probabilityEventRows: Awaited<
+              ReturnType<typeof fetchFeedEventIds>
+            > | null = null;
+            let observedProbabilityMarketIds: string[] | null = null;
+            let usedProgressiveProbabilityMarketPage = false;
+
+            if (hasProbabilityFilter && view !== "markets") {
+              const eventProbabilityPolicy = resolveProbabilityEventProbePolicy(
+                minProb,
+                maxProb,
+              );
+              const probabilityPage = await fetchProbabilityFeedEventPage({
+                requestedLimit: limit,
+                candidateWindowSize: eventProbabilityPolicy.candidateWindowSize,
+                probabilityBatchSize:
+                  eventProbabilityPolicy.probabilityBatchSize,
+                maxCandidates: eventProbabilityPolicy.maxCandidates,
+                fetchCandidateEvents: async ({
                   limit: candidateLimit,
                   offset,
-                  minProb: undefined,
-                  maxProb: undefined,
-                  // Scope is an exact result filter, not a ranking predicate.
-                  // Applying it here counts siblings across the full market
-                  // universe for every probe window and dominates the request.
-                  eventScope: undefined,
+                }) => {
+                  setFeedQueryPhase("candidate");
+                  const candidates = await fetchFeedEventIds(
+                    pool,
+                    {
+                      ...inputs,
+                      limit: candidateLimit,
+                      offset,
+                      minProb: undefined,
+                      maxProb: undefined,
+                      // Scope is an exact result filter, not a ranking predicate.
+                      // Applying it here counts siblings across the full market
+                      // universe for every probe window and dominates the request.
+                      eventScope: undefined,
+                    },
+                    { acceptPartialMetricPage: true },
+                  );
+                  candidateCount += candidates.length;
+                  return candidates;
                 },
-                { acceptPartialMetricPage: true },
-              );
-              candidateCount += candidates.length;
-              return candidates;
-            },
-            fetchBatchProbabilityMarketIds: (candidateEventIds) => {
-              setFeedQueryPhase("probability_mapping");
-              return fetchObservedCanonicalProbabilityMarketIds(pool, {
-                ...inputs,
-                candidateEventIds,
+                fetchBatchProbabilityMarketIds: (candidateEventIds) => {
+                  setFeedQueryPhase("probability_mapping");
+                  return fetchObservedCanonicalProbabilityMarketIds(pool, {
+                    ...inputs,
+                    candidateEventIds,
+                  });
+                },
+                fetchFilteredEvents: (marketIds) => {
+                  setFeedQueryPhase("filtered_events");
+                  return fetchFeedEventIds(pool, {
+                    ...inputs,
+                    marketIds,
+                    minProb: undefined,
+                    maxProb: undefined,
+                  });
+                },
               });
-            },
-            fetchFilteredEvents: (marketIds) => {
-              setFeedQueryPhase("filtered_events");
-              return fetchFeedEventIds(pool, {
-                ...inputs,
-                marketIds,
-                minProb: undefined,
-                maxProb: undefined,
-              });
-            },
-          });
-          probabilityEventRows = probabilityPage.eventRows;
-          observedProbabilityMarketIds = probabilityPage.marketIds;
-        } else if (hasProbabilityFilter) {
-          const probabilityPage = await fetchProbabilityFeedMarketPage({
-            requestedLimit: limit,
-            requestedOffset: offset,
-            candidateWindowSize: PROBABILITY_MARKET_PROBE_WINDOW,
-            probabilityBatchSize: PROBABILITY_MARKET_PROBE_BATCH,
-            maxCandidates: PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
-            fetchCandidateMarketIds: ({
-              limit: candidateLimit,
-              offset: candidateOffset,
-            }) => {
-              setFeedQueryPhase("candidate");
-              return fetchFeedMarketIdsForProbabilityProbe(
-                pool,
-                {
-                  ...inputs,
+              probabilityEventRows = probabilityPage.eventRows;
+              observedProbabilityMarketIds = probabilityPage.marketIds;
+            } else if (hasProbabilityFilter) {
+              const probabilityPage = await fetchProbabilityFeedMarketPage({
+                requestedLimit: limit,
+                requestedOffset: offset,
+                candidateWindowSize: PROBABILITY_MARKET_PROBE_WINDOW,
+                probabilityBatchSize: PROBABILITY_MARKET_PROBE_BATCH,
+                maxCandidates: PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
+                fetchCandidateMarketIds: ({
                   limit: candidateLimit,
                   offset: candidateOffset,
+                }) => {
+                  setFeedQueryPhase("candidate");
+                  return fetchFeedMarketIdsForProbabilityProbe(
+                    pool,
+                    {
+                      ...inputs,
+                      limit: candidateLimit,
+                      offset: candidateOffset,
+                    },
+                    {
+                      onPhase: (phase) => {
+                        setFeedQueryPhase(phase);
+                      },
+                    },
+                  );
                 },
-                {
-                  onPhase: (phase) => {
-                    setFeedQueryPhase(phase);
-                  },
+                fetchBatchProbabilityMarketIds: (candidateMarketIds) => {
+                  setFeedQueryPhase("probability_mapping");
+                  return fetchObservedCanonicalProbabilityMarketIds(pool, {
+                    ...inputs,
+                    candidateMarketIds,
+                  });
                 },
-              );
-            },
-            fetchBatchProbabilityMarketIds: (candidateMarketIds) => {
-              setFeedQueryPhase("probability_mapping");
-              return fetchObservedCanonicalProbabilityMarketIds(pool, {
-                ...inputs,
-                candidateMarketIds,
               });
-            },
-          });
-          usedProgressiveProbabilityMarketPage = true;
-          observedProbabilityMarketIds = probabilityPage.marketIds;
-        }
-        const databaseInputs = hasProbabilityFilter
-          ? {
-              ...inputs,
-              marketIds: observedProbabilityMarketIds ?? [],
-              minProb: undefined,
-              maxProb: undefined,
+              usedProgressiveProbabilityMarketPage = true;
+              observedProbabilityMarketIds = probabilityPage.marketIds;
             }
-          : inputs;
+            const databaseInputs = hasProbabilityFilter
+              ? {
+                  ...inputs,
+                  marketIds: observedProbabilityMarketIds ?? [],
+                  minProb: undefined,
+                  maxProb: undefined,
+                }
+              : inputs;
 
-        if (observedProbabilityMarketIds?.length === 0) {
-          data = [];
-        } else if (view === "markets") {
-          setFeedQueryPhase(
-            usedProgressiveProbabilityMarketPage ? "hydration" : "candidate",
-          );
-          const rows = usedProgressiveProbabilityMarketPage
-            ? await fetchFeedMarketsByIds(
-                pool,
-                inputs,
-                observedProbabilityMarketIds ?? [],
-                { useCachedChange24h: true },
-              )
-            : await fetchFeedMarketsDirect(pool, databaseInputs, undefined, {
-                onPhase: (phase) => {
-                  setFeedQueryPhase(phase);
+            if (observedProbabilityMarketIds?.length === 0) {
+              data = [];
+            } else if (view === "markets") {
+              setFeedQueryPhase(
+                usedProgressiveProbabilityMarketPage
+                  ? "hydration"
+                  : "candidate",
+              );
+              const rows = usedProgressiveProbabilityMarketPage
+                ? await fetchFeedMarketsByIds(
+                    pool,
+                    inputs,
+                    observedProbabilityMarketIds ?? [],
+                    { useCachedChange24h: true },
+                  )
+                : await fetchFeedMarketsDirect(
+                    pool,
+                    databaseInputs,
+                    undefined,
+                    {
+                      onPhase: (phase) => {
+                        setFeedQueryPhase(phase);
+                      },
+                    },
+                  );
+              data = buildFeedData({ rows, eventIds: [], view });
+            } else {
+              setFeedQueryPhase("candidate");
+              const eventRows =
+                probabilityEventRows ??
+                (await fetchFeedEventIds(pool, databaseInputs));
+              const eventIds = eventRows.map((row) => row.id);
+              const useCachedChange24h = eventRows.some(
+                (row) => row.cached_change_24h === true,
+              );
+              setFeedQueryPhase("hydration");
+              const rows = eventIds.length
+                ? await fetchFeedMarketsBatched(
+                    pool,
+                    databaseInputs,
+                    eventIds,
+                    {
+                      useCachedChange24h,
+                    },
+                  )
+                : [];
+              data = buildFeedData({ rows, eventIds, view });
+            }
+          } catch (error) {
+            if (isPgStatementTimeoutError(error)) {
+              req.log.warn(
+                {
+                  error,
+                  phase: feedQueryPhase,
+                  q: search,
+                  view,
+                  sort,
+                  limit,
+                  offset,
                 },
-              });
-          data = buildFeedData({ rows, eventIds: [], view });
-        } else {
-          setFeedQueryPhase("candidate");
-          const eventRows =
-            probabilityEventRows ??
-            (await fetchFeedEventIds(pool, databaseInputs));
-          const eventIds = eventRows.map((row) => row.id);
-          const useCachedChange24h = eventRows.some(
-            (row) => row.cached_change_24h === true,
-          );
-          setFeedQueryPhase("hydration");
-          const rows = eventIds.length
-            ? await fetchFeedMarkets(pool, databaseInputs, eventIds, {
-                useCachedChange24h,
-              })
-            : [];
-          data = buildFeedData({ rows, eventIds, view });
-        }
-      } catch (error) {
-        if (isPgStatementTimeoutError(error)) {
-          req.log.warn(
-            {
-              error,
-              phase: feedQueryPhase,
-              q: search,
-              view,
-              sort,
+                search ? "Feed search timed out" : "Feed filter timed out",
+              );
+            }
+            throw error;
+          } finally {
+            const elapsedMs = performance.now() - feedQueryStartedAt;
+            phaseMs[feedQueryPhase] =
+              (phaseMs[feedQueryPhase] ?? 0) +
+              performance.now() -
+              phaseStartedAt;
+            if (elapsedMs >= 1_500) {
+              req.log.warn(
+                {
+                  elapsedMs: Math.round(elapsedMs),
+                  phaseMs,
+                  phaseCalls,
+                  candidateCount,
+                  cacheHit: false,
+                  view,
+                  sort,
+                  limit,
+                  offset,
+                  venues,
+                  minProb,
+                  maxProb,
+                  endWithinHours,
+                  eventCount: data.length,
+                },
+                "Feed query slow",
+              );
+            }
+          }
+
+          if (!data.length) {
+            const payload = {
+              count: 0,
               limit,
               offset,
-            },
-            search ? "Feed search timed out" : "Feed filter timed out",
-          );
+              minVolume24h: minVol,
+              data: [],
+            };
+            const body = JSON.stringify(payload);
+            const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
+            return { body, etag, cacheHit: false };
+          }
+
+          if (
+            view === "events" &&
+            r &&
+            !search &&
+            (sort === "trending" || sort === "trending_v2")
+          ) {
+            const uniqueTokenIds: string[] = [];
+            const seen = new Set<string>();
+
+            for (const event of data) {
+              for (const market of event.markets) {
+                const tokenId = market.tokens?.yes;
+                if (!tokenId) continue;
+                if (seen.has(tokenId)) continue;
+                seen.add(tokenId);
+                uniqueTokenIds.push(tokenId);
+              }
+            }
+
+            if (uniqueTokenIds.length) {
+              const topKeys = uniqueTokenIds.map((id) => `top:${id}`);
+              const tops = await r.mGet(topKeys).catch(() => []);
+              const hotTokenIds = new Set<string>();
+              for (let i = 0; i < uniqueTokenIds.length; i += 1) {
+                if (tops[i] != null) hotTokenIds.add(uniqueTokenIds[i]);
+              }
+
+              if (hotTokenIds.size) {
+                for (const event of data) {
+                  if (event.markets.length < 2) continue;
+
+                  const hotMarkets: FeedEvent["markets"] = [];
+                  const coldMarkets: FeedEvent["markets"] = [];
+                  for (const market of event.markets) {
+                    const tokenId = market.tokens?.yes;
+                    if (tokenId && hotTokenIds.has(tokenId))
+                      hotMarkets.push(market);
+                    else coldMarkets.push(market);
+                  }
+
+                  if (hotMarkets.length && coldMarkets.length) {
+                    event.markets = [...hotMarkets, ...coldMarkets];
+                  }
+                }
+
+                const eventMeta = data.map((event, index) => {
+                  const hotCount =
+                    event.markets.reduce((acc, market) => {
+                      const tokenId = market.tokens?.yes;
+                      return (
+                        acc + (tokenId && hotTokenIds.has(tokenId) ? 1 : 0)
+                      );
+                    }, 0) ?? 0;
+                  return { event, index, hotCount };
+                });
+
+                eventMeta.sort((a, b) => {
+                  const byHot = b.hotCount - a.hotCount;
+                  if (byHot) return byHot;
+                  return a.index - b.index;
+                });
+                data = eventMeta.map((meta) => meta.event);
+              }
+            }
+          }
+
+          const payload = {
+            count: data.length,
+            limit,
+            offset,
+            minVolume24h: minVol,
+            data,
+          };
+
+          enqueueFeedMarketRefreshForData(data);
+
+          // serialize once, hash those exact bytes for ETag, then cache/send same bytes
+          const body = JSON.stringify(payload);
+          const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
+
+          if (cacheEnabled && r) {
+            // Use longer cache TTL for better performance
+            await r.set(cacheKey, body, { EX: cacheTtl }).catch(() => {
+              redisStatus = "error";
+              req.log.warn("Feed cache write unavailable; response retained");
+            });
+          }
+          return {
+            body,
+            etag,
+            cacheHit: false,
+            cacheControl: cacheEnabled
+              ? `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`
+              : "no-store",
+          };
+        });
+        applyFeedCacheHeaders({
+          reply,
+          hit: loaded.cacheHit,
+          cacheStatus: redisStatus,
+        });
+        reply.header("ETag", loaded.etag);
+        if (loaded.cacheControl)
+          reply.header("Cache-Control", loaded.cacheControl);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        if (loaded.cacheHit) {
+          enqueueFeedMarketRefreshForBody(loaded.body);
+          if (req.headers["if-none-match"] === loaded.etag)
+            return reply.code(304).send();
+        }
+        return reply.send(loaded.body);
+      } catch (error) {
+        if (isPgStatementTimeoutError(error))
           return reply
             .code(504)
             .send({ error: search ? "Search timed out" : "Feed timed out" });
-        }
         throw error;
-      } finally {
-        const elapsedMs = performance.now() - feedQueryStartedAt;
-        phaseMs[feedQueryPhase] =
-          (phaseMs[feedQueryPhase] ?? 0) + performance.now() - phaseStartedAt;
-        if (elapsedMs >= 1_500) {
-          req.log.warn(
-            {
-              elapsedMs: Math.round(elapsedMs),
-              phaseMs,
-              phaseCalls,
-              candidateCount,
-              cacheHit: false,
-              view,
-              sort,
-              limit,
-              offset,
-              venues,
-              minProb,
-              maxProb,
-              endWithinHours,
-              eventCount: data.length,
-            },
-            "Feed query slow",
-          );
-        }
       }
-
-      if (!data.length) {
-        const payload = {
-          count: 0,
-          limit,
-          offset,
-          minVolume24h: minVol,
-          data: [],
-        };
-        const body = JSON.stringify(payload);
-        const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
-        applyFeedCacheHeaders({
-          reply,
-          hit: false,
-          cacheStatus: redisStatus,
-        });
-        reply.header("ETag", etag);
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send(body);
-      }
-
-      if (
-        view === "events" &&
-        r &&
-        !search &&
-        (sort === "trending" || sort === "trending_v2")
-      ) {
-        const uniqueTokenIds: string[] = [];
-        const seen = new Set<string>();
-
-        for (const event of data) {
-          for (const market of event.markets) {
-            const tokenId = market.tokens?.yes;
-            if (!tokenId) continue;
-            if (seen.has(tokenId)) continue;
-            seen.add(tokenId);
-            uniqueTokenIds.push(tokenId);
-          }
-        }
-
-        if (uniqueTokenIds.length) {
-          const topKeys = uniqueTokenIds.map((id) => `top:${id}`);
-          const tops = await r.mGet(topKeys);
-          const hotTokenIds = new Set<string>();
-          for (let i = 0; i < uniqueTokenIds.length; i += 1) {
-            if (tops[i] != null) hotTokenIds.add(uniqueTokenIds[i]);
-          }
-
-          if (hotTokenIds.size) {
-            for (const event of data) {
-              if (event.markets.length < 2) continue;
-
-              const hotMarkets: FeedEvent["markets"] = [];
-              const coldMarkets: FeedEvent["markets"] = [];
-              for (const market of event.markets) {
-                const tokenId = market.tokens?.yes;
-                if (tokenId && hotTokenIds.has(tokenId))
-                  hotMarkets.push(market);
-                else coldMarkets.push(market);
-              }
-
-              if (hotMarkets.length && coldMarkets.length) {
-                event.markets = [...hotMarkets, ...coldMarkets];
-              }
-            }
-
-            const eventMeta = data.map((event, index) => {
-              const hotCount =
-                event.markets.reduce((acc, market) => {
-                  const tokenId = market.tokens?.yes;
-                  return acc + (tokenId && hotTokenIds.has(tokenId) ? 1 : 0);
-                }, 0) ?? 0;
-              return { event, index, hotCount };
-            });
-
-            eventMeta.sort((a, b) => {
-              const byHot = b.hotCount - a.hotCount;
-              if (byHot) return byHot;
-              return a.index - b.index;
-            });
-            data = eventMeta.map((meta) => meta.event);
-          }
-        }
-      }
-
-      const payload = {
-        count: data.length,
-        limit,
-        offset,
-        minVolume24h: minVol,
-        data,
-      };
-
-      enqueueFeedMarketRefreshForData(data);
-
-      // serialize once, hash those exact bytes for ETag, then cache/send same bytes
-      const body = JSON.stringify(payload);
-      const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
-
-      if (cacheEnabled && r) {
-        // Use longer cache TTL for better performance
-        await r.set(cacheKey, body, { EX: cacheTtl });
-      }
-      applyFeedCacheHeaders({
-        reply,
-        hit: false,
-        cacheStatus: redisStatus,
-      });
-
-      reply.header("ETag", etag);
-      reply.header(
-        "Cache-Control",
-        cacheEnabled
-          ? `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`
-          : "no-store",
-      );
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(body);
     },
   );
 

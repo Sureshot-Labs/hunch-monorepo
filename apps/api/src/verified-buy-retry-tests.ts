@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { verifiedBuyRetrySeconds } from "./services/verified-buy-retry.js";
+async function test(name: string, run: () => void | Promise<void>) {
+  await run();
+  console.log(`ok - ${name}`);
+}
 
 for (const reason of [
   "provider_settlement_pending",
@@ -16,7 +19,12 @@ for (const reason of [
           retrySeconds: 30,
           verifiedRecheckSeconds: 3600,
         }),
-        attempts <= 3 ? 5 : 30,
+        attempts <= 3
+          ? 5
+          : Math.min(
+              3600,
+              30 * 2 ** Math.min(12, Math.floor((attempts - 4) / 4)),
+            ),
       );
     });
 for (const reason of [
@@ -72,6 +80,18 @@ await test("Verified and provider-only revoked purchases retain their policies",
       state: "revoked",
       reason: "provider_fill_failed",
       attempts: 1,
+      retrySeconds: 30,
+      verifiedRecheckSeconds: 3600,
+    }),
+    30,
+  );
+});
+await test("resumable locator progress is not slowed by legacy attempt count", () => {
+  assert.equal(
+    verifiedBuyRetrySeconds({
+      state: "pending",
+      reason: "receipt_locator_search_pending",
+      attempts: 5000,
       retrySeconds: 30,
       verifiedRecheckSeconds: 3600,
     }),

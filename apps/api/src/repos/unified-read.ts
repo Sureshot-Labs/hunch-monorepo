@@ -1,4 +1,4 @@
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 import {
   buildObservedCanonicalMarketTop,
   type PolymarketAssetContext,
@@ -2964,20 +2964,27 @@ export async function queryRowsWithLocalSettings<T extends QueryResultRow>(
     workMem?: string | null;
     statementTimeoutMs?: number | null;
     jitOff?: boolean;
+    transactionClient?: PoolClient;
   },
 ): Promise<T[]> {
   const useSearchHint = options?.useSearchHint ?? false;
   const workMem = options?.workMem ?? null;
   const statementTimeoutMs = options?.statementTimeoutMs ?? null;
   const jitOff = options?.jitOff ?? false;
-  if (!useSearchHint && !workMem && !statementTimeoutMs && !jitOff) {
+  if (
+    !useSearchHint &&
+    !workMem &&
+    !statementTimeoutMs &&
+    !jitOff &&
+    !options?.transactionClient
+  ) {
     const { rows } = await pool.query<T>(sql, params);
     return rows;
   }
 
-  const client = await pool.connect();
+  const client = options?.transactionClient ?? (await pool.connect());
   try {
-    await client.query("BEGIN");
+    if (!options?.transactionClient) await client.query("BEGIN");
     if (useSearchHint) {
       await client.query("SET LOCAL enable_seqscan = off");
     }
@@ -3001,17 +3008,17 @@ export async function queryRowsWithLocalSettings<T extends QueryResultRow>(
       );
     }
     const { rows } = await client.query<T>(sql, params);
-    await client.query("COMMIT");
+    if (!options?.transactionClient) await client.query("COMMIT");
     return rows;
   } catch (error) {
     try {
-      await client.query("ROLLBACK");
+      if (!options?.transactionClient) await client.query("ROLLBACK");
     } catch {
       // Best-effort rollback for failed search hints.
     }
     throw error;
   } finally {
-    client.release();
+    if (!options?.transactionClient) client.release();
   }
 }
 
@@ -3700,7 +3707,12 @@ export async function fetchFeedMarkets(
   pool: Pool,
   inputs: FeedInputs,
   eventIds: string[],
-  options?: { useCachedChange24h?: boolean; directTokenLookup?: boolean },
+  options?: {
+    useCachedChange24h?: boolean;
+    directTokenLookup?: boolean;
+    transactionClient?: PoolClient;
+    statementTimeoutMs?: number;
+  },
 ): Promise<FeedMarketRow[]> {
   if (eventIds.length === 0) return [];
   const directTokenLookup = options?.directTokenLookup ?? true;
@@ -4253,10 +4265,61 @@ export async function fetchFeedMarkets(
     params,
     {
       workMem: FEED_HEAVY_QUERY_WORK_MEM,
-      statementTimeoutMs: feedFilterStatementTimeoutMs(),
+      statementTimeoutMs:
+        options?.statementTimeoutMs ?? feedFilterStatementTimeoutMs(),
       jitOff: true,
+      transactionClient: options?.transactionClient,
     },
   );
+}
+
+/** Bound event fanout, not returned data. One snapshot/as-of and one overall
+ * SQL budget retain the original rows, order, per-event cap and freshness.
+ * Small/default and duplicate-ID callers retain their single-query behavior. */
+export async function fetchFeedMarketsBatched(
+  pool: Pool,
+  inputs: FeedInputs,
+  eventIds: string[],
+  options?: { useCachedChange24h?: boolean },
+): Promise<FeedMarketRow[]> {
+  const batchSize = 20;
+  if (
+    eventIds.length <= batchSize ||
+    new Set(eventIds).size !== eventIds.length
+  )
+    return fetchFeedMarkets(pool, inputs, eventIds, options);
+  const client = await pool.connect();
+  const deadline = performance.now() + feedFilterStatementTimeoutMs();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const rows: FeedMarketRow[] = [];
+    for (let start = 0; start < eventIds.length; start += batchSize) {
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining <= 0)
+        throw Object.assign(new Error("Feed hydration budget exhausted"), {
+          code: "57014",
+        });
+      rows.push(
+        ...(await fetchFeedMarkets(
+          pool,
+          inputs,
+          eventIds.slice(start, start + batchSize),
+          {
+            ...options,
+            transactionClient: client,
+            statementTimeoutMs: remaining,
+          },
+        )),
+      );
+    }
+    await client.query("COMMIT");
+    return rows;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 type FeedMarketIdPageRow = {

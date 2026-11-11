@@ -8,6 +8,14 @@ import {
   type VerifiedBuySourceRow,
 } from "./services/verified-buy-observer.js";
 import { EvidenceBudgetExhausted } from "./services/verified-buy.js";
+import {
+  readAnchoredFinalizedBuyReceipt,
+  type VerifiedBuyEvmProvider,
+} from "./services/verified-buy-evm-receipt.js";
+import {
+  LIMITLESS_RECEIPT_SEARCH_KEY,
+  limitlessReceiptSearchIdentity,
+} from "./services/verified-buy-limitless-discovery.js";
 
 const owner = `0x${"1".repeat(40)}`,
   exchange = `0x${"2".repeat(40)}`,
@@ -114,8 +122,19 @@ type Options = {
   receipt?: unknown | null;
   readError?: Error;
   budget?: number;
+  discover?: VerifiedBuyObserverDependencies["discoverLimitlessTransactions"];
+  receiptObservation?: VerifiedBuyObserverDependencies["readLimitlessReceipt"];
+  anchoredProvider?: VerifiedBuyEvmProvider;
+  sharedBudget?: number;
+  receiptHash?: string;
+  receiptBlock?: { number: number; hash: string };
 };
 async function observe(options: Options = {}) {
+  let available = options.sharedBudget ?? Number.POSITIVE_INFINITY;
+  const consume = () => {
+    if (available <= 0) throw new EvidenceBudgetExhausted(1, 0);
+    available--;
+  };
   let providerReads = 0,
     receiptReads = 0,
     reserved = 0;
@@ -123,13 +142,27 @@ async function observe(options: Options = {}) {
     maxEvidenceItems: 10,
     limitlessPositionContract: position,
     limitlessExchangeAddress: exchange,
+    discoverLimitlessTransactions: options.discover,
+    readLimitlessReceipt: options.anchoredProvider
+      ? (hash, anchor, anchorOnly) =>
+          readAnchoredFinalizedBuyReceipt(
+            options.anchoredProvider as VerifiedBuyEvmProvider,
+            hash,
+            anchor,
+            consume,
+            { anchorOnly: anchorOnly === true },
+          )
+      : options.receiptObservation,
     solanaCollateralMint: "unused",
     assertEvidenceBudget: (needed) => {
       reserved += needed;
       if (needed > (options.budget ?? 100))
         throw new EvidenceBudgetExhausted(needed, options.budget ?? 100);
+      if (needed > available)
+        throw new EvidenceBudgetExhausted(needed, available);
     },
     readLimitlessOrder: async () => {
+      consume();
       providerReads++;
       if (options.readError) throw options.readError;
       return Object.hasOwn(options, "status") ? options.status : absent();
@@ -137,12 +170,13 @@ async function observe(options: Options = {}) {
     readEvmReceipt: async (chain, hash) => {
       receiptReads++;
       assert.equal(chain, 8453);
-      assert.equal(hash, txHash);
+      assert.equal(hash, options.receiptHash ?? txHash);
       return options.receipt === null
         ? null
         : {
             receipt: options.receipt ?? receipt(),
             timestamp: "2026-11-06T19:48:27.000Z",
+            canonicalBlock: options.receiptBlock,
           };
     },
     readFinalizedSolanaTransaction: async () => {
@@ -548,6 +582,261 @@ await test("found terminal failures and zero-fill remain authoritative, not rece
     assert.equal(observed.result.state, "revoked");
     assert.equal(observed.receiptReads, 0);
   }
+});
+await test("a newly failed canonical receipt invalidates its own previous proof, not an unrelated purchase", async () => {
+  const previous = await observe();
+  assert.equal(previous.result.state, "verified");
+  if (previous.result.state !== "verified") throw Error("Expected proof");
+  const current = { ...row(), verified_buy_facts: previous.result.facts };
+  const invalid = await observe({
+    row: current,
+    receipt: { ...receipt(), status: 0 },
+  });
+  assert.equal(invalid.result.state, "revoked");
+  assert.deepEqual(
+    invalid.result.invalidatedEvidenceIds,
+    previous.result.facts.evidenceIds,
+  );
+  const foreign = await observe({
+    row: {
+      ...current,
+      verified_buy_facts: { ...previous.result.facts, owner: other },
+    },
+    receipt: { ...receipt(), status: 0 },
+  });
+  assert.equal(foreign.result.state, "pending");
+});
+await test("conflicting provider identity and non-FOK orders never start chain discovery", async () => {
+  const current = {
+    ...row(),
+    order_payload: { ...payload(), history: undefined },
+    posted_at: new Date("2026-11-11T12:32:06Z"),
+    order_type: "FOK",
+  };
+  const discover = async () => {
+    throw Error("Unexpected discovery");
+  };
+  assert.equal(
+    (
+      await observe({
+        row: current,
+        status: { ...absent(), clientOrderId: "wrong" },
+        discover,
+      })
+    ).result.state,
+    "pending",
+  );
+  assert.equal(
+    (await observe({ row: { ...current, order_type: "GTC" }, discover })).result
+      .state,
+    "pending",
+  );
+});
+await test("orphaned persisted locator resumes discovery and recovers replacement receipt after restart", async () => {
+  const previous = await observe();
+  assert.equal(previous.result.state, "verified");
+  const postedAt = "2026-11-11T12:32:06.000Z";
+  const identity = {
+    exchangeAddress: exchange,
+    orderHash: frozen.orderHash,
+    providerOrderId: "provider-order",
+    owner,
+    tokenId: "limitless:123",
+    generation: previous.result.facts.instrument.generation,
+    postedAt,
+    checkpoint: null,
+  };
+  const checkpoint = {
+    version: 1 as const,
+    identityKey: limitlessReceiptSearchIdentity(identity),
+    phase: "scan" as const,
+    targetBlock: 2000,
+    lowerBlock: 100,
+    upperBlock: 100,
+    nextBlock: 2001,
+    transactions: [txHash],
+    anchorChecks: [] as string[],
+    anchors: {
+      [txHash]: { blockNumber: 1000, blockHash: `0x${"c".repeat(64)}` },
+    },
+  };
+  const current = {
+    ...row(),
+    order_type: "FOK",
+    posted_at: new Date(postedAt),
+    order_payload: {
+      ...payload(),
+      history: undefined,
+      [LIMITLESS_RECEIPT_SEARCH_KEY]: checkpoint,
+    },
+    verified_buy_facts: previous.result.facts,
+  };
+  const unavailable = await observe({
+    row: current,
+    receipt: null,
+    receiptObservation: async () => ({ state: "pending" }),
+  });
+  assert.equal(unavailable.result.state, "pending");
+  assert.deepEqual(
+    unavailable.result.limitlessReceiptSearch?.transactions,
+    [txHash],
+    "RPC absence is not canonical failure",
+  );
+  const orphaned = await observe({
+    row: current,
+    receipt: null,
+    sharedBudget: 4,
+    anchoredProvider: {
+      getBlock: async (value) => ({
+        number: typeof value === "number" ? value : 2001,
+        hash: `0x${"d".repeat(64)}`,
+        timestamp: Date.parse(postedAt) / 1000,
+      }),
+      getTransactionReceipt: async () => {
+        return {
+          ...receipt(),
+          blockNumber: 1000,
+          blockHash: checkpoint.anchors[txHash].blockHash,
+        };
+      },
+    },
+  });
+  assert.equal(orphaned.result.state, "revoked");
+  assert.deepEqual(orphaned.result.limitlessReceiptSearch?.transactions, []);
+  assert.equal(orphaned.result.limitlessReceiptSearch?.nextBlock, 1000);
+  assert.deepEqual(
+    orphaned.result.invalidatedEvidenceIds,
+    previous.result.facts.evidenceIds,
+  );
+  const reincluded = await observe({
+    row: current,
+    sharedBudget: 4,
+    anchoredProvider: {
+      getTransactionReceipt: async () => ({
+        ...receipt(),
+        status: 0,
+        logs: [],
+        blockNumber: 1001,
+        blockHash: `0x${"d".repeat(64)}`,
+      }),
+      getBlock: async (value) => ({
+        number: typeof value === "number" ? value : 2010,
+        hash: `0x${"d".repeat(64)}`,
+        timestamp: Date.parse(postedAt) / 1000,
+      }),
+    },
+  });
+  assert.equal(reincluded.result.state, "revoked");
+  assert.equal(
+    reincluded.result.limitlessReceiptSearch?.nextBlock,
+    1000,
+    "A canonically re-included FAILED transaction must rewind to its original anchor",
+  );
+  assert.deepEqual(
+    reincluded.result.invalidatedEvidenceIds,
+    previous.result.facts.evidenceIds,
+  );
+  const staleProvider: VerifiedBuyEvmProvider = {
+    getTransactionReceipt: async () => ({
+      ...receipt(),
+      blockNumber: 1001,
+      blockHash: checkpoint.anchors[txHash].blockHash,
+    }),
+    getBlock: async (value) => ({
+      number: typeof value === "number" ? value : 2010,
+      hash: `0x${"d".repeat(64)}`,
+      timestamp: Date.parse(postedAt) / 1000,
+    }),
+  };
+  const differentHeight = await observe({
+    row: current,
+    sharedBudget: 4,
+    anchoredProvider: staleProvider,
+  });
+  assert.equal(differentHeight.result.state, "pending");
+  assert.deepEqual(
+    differentHeight.result.limitlessReceiptSearch?.anchorChecks,
+    [txHash],
+  );
+  const resumedAnchor = await observe({
+    row: {
+      ...current,
+      order_payload: {
+        ...current.order_payload,
+        [LIMITLESS_RECEIPT_SEARCH_KEY]:
+          differentHeight.result.limitlessReceiptSearch,
+      },
+    },
+    sharedBudget: 4,
+    anchoredProvider: staleProvider,
+  });
+  assert.equal(resumedAnchor.result.state, "revoked");
+  assert.deepEqual(
+    resumedAnchor.result.invalidatedEvidenceIds,
+    previous.result.facts.evidenceIds,
+  );
+  assert.equal(resumedAnchor.result.limitlessReceiptSearch?.phase, "restart");
+  const wrongReceipt = receipt();
+  wrongReceipt.logs[0] = {
+    ...(wrongReceipt.logs[0] as (typeof wrongReceipt.logs)[0]),
+    address: other,
+  };
+  const rejected = await observe({ row: current, receipt: wrongReceipt });
+  assert.equal(rejected.result.state, "pending");
+  assert.equal(
+    rejected.result.limitlessReceiptSearch?.nextBlock,
+    2001,
+    "A canonically unsuitable candidate must not rewind to the same page forever",
+  );
+  let searches = 0;
+  const recovered = await observe({
+    row: {
+      ...current,
+      order_payload: {
+        ...current.order_payload,
+        [LIMITLESS_RECEIPT_SEARCH_KEY]: orphaned.result.limitlessReceiptSearch,
+      },
+    },
+    receiptHash: otherHash,
+    receipt: { ...receipt(), hash: otherHash },
+    discover: async (searchInput) => {
+      searches++;
+      assert.equal(
+        (searchInput.checkpoint as typeof checkpoint).nextBlock,
+        1000,
+      );
+      return {
+        reads: 1,
+        checkpoint: {
+          ...checkpoint,
+          transactions: [otherHash],
+          anchors: {
+            [otherHash]: {
+              blockNumber: 1000,
+              blockHash: `0x${"d".repeat(64)}`,
+            },
+          },
+        },
+      };
+    },
+  });
+  assert.equal(searches, 1);
+  assert.equal(recovered.result.state, "verified");
+  assert.ok(
+    recovered.result.facts.evidenceIds.every((value) =>
+      value.includes(otherHash),
+    ),
+  );
+  const moved = await observe({
+    row: current,
+    receiptBlock: { number: 1001, hash: `0x${"e".repeat(64)}` },
+  });
+  assert.equal(moved.result.state, "verified");
+  assert.deepEqual(
+    moved.result.limitlessReceiptSearch?.anchors[txHash],
+    { blockNumber: 1001, blockHash: `0x${"e".repeat(64)}` },
+    "A re-included transaction must refresh its canonical anchor",
+  );
 });
 console.log(
   `Limitless not_found receipt fallback: ${checks} grouped checks passed`,

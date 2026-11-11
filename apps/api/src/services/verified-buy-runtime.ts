@@ -11,7 +11,14 @@ import { EvidenceBudgetExhausted, repairVerifiedBuys } from "./verified-buy.js";
 import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import { fetchSolanaParsedTransaction } from "./solana-rpc.js";
 import { fetchLimitlessVerifiedBuyOrderStatus } from "./limitless-order-status.js";
-import { readCanonicalFinalizedBuyReceipt } from "./verified-buy-evm-receipt.js";
+import {
+  readCanonicalFinalizedBuyReceipt,
+  readAnchoredFinalizedBuyReceipt,
+} from "./verified-buy-evm-receipt.js";
+import {
+  discoverLimitlessBuyTransactions,
+  LIMITLESS_RECEIPT_SEARCH_READS,
+} from "./verified-buy-limitless-discovery.js";
 import { fetchKalshiNormalizedOrderStatus } from "./kalshi-executions.js";
 import { recoverCopyPurchaseLinks } from "./social-copy.js";
 import { AuthService } from "../auth.js";
@@ -39,6 +46,24 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
     budget--;
   };
   const providers = new Map<number, ReturnType<typeof createEvmRpcProvider>>();
+  const providerFor = (chainId: number) => {
+    if (chainId !== 137 && chainId !== 8453)
+      throw new Error("Unsupported observation chain");
+    let provider = providers.get(chainId);
+    if (!provider) {
+      provider = createEvmRpcProvider(
+        chainId === 137 ? env.polygonRpcUrl : env.baseRpcUrl,
+        chainId,
+        undefined,
+        {
+          timeoutMs:
+            chainId === 137 ? env.polygonRpcTimeoutMs : env.baseRpcTimeoutMs,
+        },
+      );
+      providers.set(chainId, provider);
+    }
+    return provider;
+  };
   const dependencies: VerifiedBuyObserverDependencies = {
     maxEvidenceItems: policy.repairProviderRequestBudget,
     assertEvidenceBudget: (needed) => {
@@ -47,18 +72,29 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
     limitlessPositionContract: env.limitlessConditionalTokensAddress,
     limitlessExchangeAddress: env.limitlessClobAddress,
     solanaCollateralMint: env.solanaUsdcMint,
+    readLimitlessReceipt: (hash, anchor, anchorOnly) =>
+      readAnchoredFinalizedBuyReceipt(
+        providerFor(8453),
+        hash,
+        anchor,
+        consume,
+        { anchorOnly: anchorOnly === true },
+      ),
     readEvmReceipt: async (chainId, hash) => {
-      let provider = providers.get(chainId);
-      if (!provider) {
-        if (chainId !== 137 && chainId !== 8453)
-          throw new Error("Unsupported observation chain");
-        provider = createEvmRpcProvider(
-          chainId === 137 ? env.polygonRpcUrl : env.baseRpcUrl,
-          chainId,
-        );
-        providers.set(chainId, provider);
-      }
-      return readCanonicalFinalizedBuyReceipt(provider, hash, consume);
+      return readCanonicalFinalizedBuyReceipt(
+        providerFor(chainId),
+        hash,
+        consume,
+      );
+    },
+    discoverLimitlessTransactions: async (input) => {
+      if (budget < 1) throw new EvidenceBudgetExhausted(1, budget);
+      return discoverLimitlessBuyTransactions(
+        providerFor(8453),
+        input,
+        consume,
+        { maxReads: Math.min(budget, LIMITLESS_RECEIPT_SEARCH_READS) },
+      );
     },
     readFinalizedSolanaTransaction: async (signature) => {
       consume();
