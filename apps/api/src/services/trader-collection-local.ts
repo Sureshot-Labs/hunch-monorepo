@@ -53,6 +53,7 @@ type Leg = {
   observedBasis?: boolean;
 };
 export type LocalCalc = {
+  profileOnly?: true;
   end: number;
   stamp: string;
   id: string;
@@ -87,7 +88,7 @@ function balance(l: Leg, at: number, shares: number, day: number) {
   } else l.balances.push([at, shares]);
 }
 export function advanceLocalCalc(s: LocalCalc, rows: LocalActivity[]) {
-  const day = s.end - DAY;
+  const day = s.profileOnly ? Infinity : s.end - DAY;
   for (const r of rows) {
     s.stamp = r.stamp;
     s.id = r.id;
@@ -101,10 +102,13 @@ export function advanceLocalCalc(s: LocalCalc, rows: LocalActivity[]) {
     const at = r.observed_seconds,
       token = r.token,
       idx = r.side === "YES" ? 0 : r.side === "NO" ? 1 : -1;
-    if (at <= s.end - 30 * DAY || at > s.end) continue;
+    if ((!s.profileOnly && at <= s.end - 30 * DAY) || at > s.end) continue;
     s.first = Math.min(s.first, at);
     if (!token || !/^\d{1,78}$/.test(token) || idx < 0) {
-      if (!s.unmapped.includes(r.market_id)) s.unmapped.push(r.market_id);
+      if (s.profileOnly) {
+        if (!s.unmapped.length) s.unmapped.push(r.market_id);
+      } else if (!s.unmapped.includes(r.market_id))
+        s.unmapped.push(r.market_id);
       continue;
     }
     const k = assetKey({ condition: r.market_id, token, index: idx });
@@ -224,7 +228,7 @@ export function advanceLocalCalc(s: LocalCalc, rows: LocalActivity[]) {
     if (after > before) {
       l.stake += qty * price;
       l.bought += qty;
-      if (at > day && r.has_prior_snapshot)
+      if (!s.profileOnly && at > day && r.has_prior_snapshot)
         l.moves.push([at, before, after, price]);
     } else {
       if (l.known) {
@@ -232,7 +236,11 @@ export function advanceLocalCalc(s: LocalCalc, rows: LocalActivity[]) {
         l.net30 += pnl;
         if (at > day) l.net24 += pnl;
         l.episodeNet += pnl;
-        if (after === 0) l.closes.push([at, l.episodeNet, l.stake, l.bought]);
+        if (after === 0) {
+          l.closes.push([at, l.episodeNet, l.stake, l.bought]);
+          // Each instrument contributes at most ten entries to a profile.
+          if (s.profileOnly && l.closes.length > 10) l.closes.shift();
+        }
       } else {
         l.unknown = at;
         if (after === 0) {
@@ -247,7 +255,7 @@ export function advanceLocalCalc(s: LocalCalc, rows: LocalActivity[]) {
         l.episodeNet = 0;
       }
     }
-    balance(l, at, after, day);
+    if (!s.profileOnly) balance(l, at, after, day);
     l.last = at;
     l.price = price;
   }
@@ -298,13 +306,16 @@ export async function localEvidence(
       );
     }
     if (l.observedBasis) evidence.observedBasis = true;
-    const closed = l.closes.map(([at, net, stake, amount]) => ({
-      at,
-      net: u(net),
-      stake: u(stake),
-      shares: u(amount),
-      instrument: m.instrument,
-    }));
+    const closed: Ledger["closes"] = l.closes.map(
+      ([at, net, stake, amount]) => ({
+        at,
+        net: u(net),
+        stake: u(stake),
+        shares: u(amount),
+        instrument: m.instrument,
+        basis: "observed_exit",
+      }),
+    );
     let net30 = l.net30,
       net24 = l.net24,
       held = shares;
@@ -324,6 +335,7 @@ export async function localEvidence(
         net30 += pnl;
         if (resolved > day) net24 += pnl;
         closed.push({
+          basis: "inferred_settlement",
           at: resolved,
           net: u(l.episodeNet + pnl),
           stake: u(l.stake),

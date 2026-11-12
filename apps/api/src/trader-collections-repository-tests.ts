@@ -36,7 +36,7 @@ try {
     create temp table polymarket_asset_bindings(chain_id int,asset_id text,condition_id text,outcome_index int,market_id text,protocol_version text,position_contract text);
     create temp table unified_market_tokens(market_id text,token_id text,venue text,outcome_side text,updated_at timestamptz);
     create temp table unified_markets(id text primary key,venue text,title text,event_id text,category text,condition_id text,metadata jsonb,resolved_outcome text,resolved_outcome_pct numeric,status text,expiration_time timestamptz,close_time timestamptz,venue_market_id text,resolution_observed_at timestamptz);
-    create temp table unified_events(id text primary key,category text);
+    create temp table unified_events(id text primary key,category text,title text);
     create temp table polymarket_markets(id text primary key,accepting_orders boolean,active boolean,closed boolean,archived boolean);
     create temp table unified_token_top_latest(token_id text primary key,venue text,ts timestamptz,best_ask numeric,best_bid numeric);
     insert into wallets select md5(n::text)::uuid,'0x'||repeat(n::text,40),case n when 6 then 'base' else 'polygon' end,'{}','Private label' from generate_series(1,7) n;
@@ -48,7 +48,7 @@ try {
     update wallets set metadata=jsonb_build_object('ownerAddress','0x'||repeat('1',40),'identityNames',jsonb_build_object('polymarket',jsonb_build_object('status','ok','username','0x'||repeat('3',40)))) where id=md5('3')::uuid;
     update wallets set metadata='{"identityNames":{"polymarket":{"status":"ok","username":"public-name"}}}' where id=md5('1')::uuid;
     update wallets set metadata='{"identityNames":{"primary":{"source":"polymarket","name":"formerly-public"},"polymarket":{"status":"not_found"}}}' where id=md5('5')::uuid;
-    insert into unified_events values('e','Sports');
+    insert into unified_events values('e','Sports','Full event title');
     insert into polymarket_markets values('p',true,true,false,false);
   `);
   await pool.query(
@@ -188,6 +188,14 @@ try {
   assert.ok(boundMarket);
   const localKey = { ...yes, condition: boundMarket };
   const localMarkets = await repo.markets([localKey], end, undefined, true);
+  assert.equal(
+    localMarkets.get(assetKey(localKey))?.instrument.eventTitle,
+    "Full event title",
+  );
+  assert.equal(
+    matches.get(assetKey(yes))?.instrument.eventTitle,
+    "Full event title",
+  );
   assert.equal(
     localMarkets.get(assetKey(localKey))?.instrument.marketId,
     boundMarket,
