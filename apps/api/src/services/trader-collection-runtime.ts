@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../db.js";
-import { env } from "../env.js";
+import { deflateRaw, inflateRaw } from "node:zlib";
+import { promisify } from "node:util";
+import {
+  advanceLocalCalc,
+  startLocalCalc,
+  localEvidence,
+  type LocalCalc,
+} from "./trader-collection-local.js";
 import { discardDedicatedRedis, getDedicatedRedis } from "../redis.js";
 import { TraderRepository } from "../repos/trader-collections.js";
 import { discoveryReadOnly } from "../repos/discovery.js";
@@ -8,7 +15,6 @@ import {
   collections,
   collectionSchema,
   type Collection,
-  type SourceFailure,
 } from "../schemas/trader-collections.js";
 import { resolveWalletIntelRefreshPolicy } from "./runtime-policies.js";
 import {
@@ -27,13 +33,13 @@ import {
   sweepSnapshots,
   walletFailure,
 } from "./trader-collection-sweep.js";
-import {
-  collectEvidence,
-  providerPages,
-  type ActivityCache,
-} from "./trader-collection-source.js";
+
 import {
   SNAPSHOT_TTL,
+  HANDOFF_SECONDS,
+  TRADER_START,
+  TRADER_SAVE_CALC,
+  servingWindow,
   NORMAL_INTERVAL,
   SLICE_SECONDS,
   TICK_SECONDS,
@@ -45,16 +51,8 @@ import {
   traderRedisCommand,
   traderSliceAction,
 } from "./trader-collection-service.js";
-import { PolymarketDataApiV2Error } from "./polymarket-data-api-v2.js";
-import {
-  JournalUnavailable,
-  PageContinuation,
-  SAVE_PAGE,
-  WalletPageJournal,
-  journalKey,
-} from "./trader-collection-page-journal.js";
 
-const prefix = "intel:trader-collections:v1:",
+const prefix = "intel:trader-collections:local-v2:",
   lock = prefix + "lease",
   leaseMs = 60000;
 const redisFor = (lane: string) =>
@@ -63,26 +61,21 @@ export async function loadTraderCollection(k: Collection) {
   const name = "trader-collections-read",
     redis = await redisFor(name);
   if (!redis) return null;
-  const raw = await traderRedisCommand(
-    () => redis.get(prefix + k),
+  const [raw, marker] = await traderRedisCommand(
+    () => redis.mGet([prefix + k, prefix + "preparing"]),
     () => discardDedicatedRedis(name, redis),
     850,
   );
-  return raw ? collectionSchema.parse(JSON.parse(raw)) : null;
+  return servingWindow(
+    raw ? collectionSchema.parse(JSON.parse(raw)) : null,
+    Number(marker),
+    k,
+    Math.floor(Date.now() / 1000),
+  );
 }
-const activities = new Map<string, ActivityCache>();
-const progressKey = prefix + "build:v2";
-function trimActivityCache() {
-  // Oldest wallet first. Eviction loses only a speed-up, never published facts.
-  let rows = 0;
-  for (const [key, c] of [...activities].reverse()) {
-    rows +=
-      c.rows.length +
-      (c.pending?.rows.length ?? 0) +
-      [...(c.carry?.values() ?? [])].reduce((n, v) => n + v.rows.length, 0);
-    if (rows > 60000) activities.delete(key);
-  }
-}
+const progressKey = prefix + "build";
+const pack = promisify(deflateRaw),
+  unpack = promisify(inflateRaw);
 let timer: ReturnType<typeof setInterval> | null = null,
   ongoing: Promise<void> | null = null,
   stopper: AbortController | null = null,
@@ -101,11 +94,11 @@ async function cycle(signal: AbortSignal) {
   )
     return;
   const lost = new AbortController();
-  const cooldown = new AbortController();
+
   const stop = AbortSignal.any([
     signal,
     lost.signal,
-    cooldown.signal,
+
     AbortSignal.timeout(SLICE_SECONDS * 1000),
   ]);
   const renewal = setInterval(() => {
@@ -160,183 +153,102 @@ async function cycle(signal: AbortSignal) {
         offset = rotation % Math.max(1, shortlist.length);
       state = createSweep(shortlist, now, offset, previous);
       state.previousSnapshotExpiresAt = expiresAt;
-      if (Number(await save(encodeSweep(state))) !== 1) return;
+      const starting = encodeSweep(state);
+      if (
+        Number(
+          await command(() =>
+            redis.eval(TRADER_START, {
+              keys: [lock, progressKey, prefix + "preparing"],
+              arguments: [owner, starting, String(now), String(SNAPSHOT_TTL)],
+            }),
+          ),
+        ) !== 1
+      )
+        return;
     }
     const sweep = state;
     const { end, owners } = sweep,
       cats = new Set(state.categories);
-    const addresses = new Set(owners.map((o) => o.address));
-    for (const a of activities.keys())
-      if (!addresses.has(a)) activities.delete(a);
     let errors = 0,
-      providerRequests = 0;
+      pages = 0;
     const reasons: Record<string, number> = {};
-    const pages = { saved: 0, replayed: 0 };
-    const transport = providerPages(env.polymarketDataApiBase);
-    const read: typeof transport = (...args) => {
-      if (providerRequests >= 128) throw Error("cycle_request_budget");
-      providerRequests++;
-      return transport(...args);
-    };
     const index = await visitSweepSlice(
       sweep,
-      () => !stop.aborted && providerRequests < 128,
+      () => !stop.aborted && pages < 128,
       async (ordinal) => {
-        const o = owners[ordinal];
-        const old = activities.get(o.address);
-        if (old) {
-          activities.delete(o.address);
-          activities.set(o.address, old);
-        }
-        const walletTimer = AbortSignal.timeout(45000);
-        const key = journalKey(
-          prefix,
-          env.polymarketDataApiBase,
-          o.id,
-          o.address,
-          end,
-        );
-        const journal = new WalletPageJournal(
-          {
-            get: (field) => command(() => redis.hGet(key, field)),
-            write: async (mode, field, value, decodedBytes) =>
-              Number(
-                await command(() =>
-                  redis.eval(SAVE_PAGE, {
-                    keys: [lock, key],
-                    arguments: [
-                      owner,
-                      String(end + SNAPSHOT_TTL),
-                      mode,
-                      field,
-                      value,
-                      String(decodedBytes),
-                    ],
-                  }),
-                ),
-              ),
-          },
-          o.address,
-        );
+        const o = owners[ordinal],
+          key = prefix + "calc:" + end + ":" + o.id;
+        let scanning = true;
         try {
-          const e = await collectEvidence(
-            o,
-            end,
-            read,
-            async (a, t, s) => {
-              try {
-                return await repo.markets(a, t, s);
-              } catch (err) {
-                if (
-                  err instanceof Error &&
-                  "code" in err &&
-                  err.code === "57014" &&
-                  err.message.includes("statement timeout")
-                )
-                  throw Error("market_lookup_timeout");
-                throw err;
-              }
-            },
-            AbortSignal.any([stop, walletTimer]),
-            activities,
-            journal,
-          );
-          for (const v of e.ledgers) cats.add(v.market.category);
-          for (const v of e.supplemental ?? []) cats.add(v.category);
-          for (const g of e.gaps)
-            if (g !== "*" && g !== "outside_catalog") cats.add(g);
-          // Position/activity windows are frozen across slices. Latest quotes
-          // are observed separately and age against the actual observation time.
-          const evaluation = evaluateTrader(
-            e,
-            end,
-            undefined,
-            Math.floor(Date.now() / 1000),
-          );
-          // Only one card per owner/segment can win. Bound the checkpoint, not the
-          // number of source fills or the evidence used to choose that card.
-          recordEvaluation(sweep, ordinal, evaluation);
+          const raw = await command(() => redis.get(key));
+          const calc: LocalCalc = raw
+            ? JSON.parse(
+                (
+                  await unpack(Buffer.from(raw, "base64"), {
+                    maxOutputLength: 24 * 1024 * 1024,
+                  })
+                ).toString(),
+              )
+            : startLocalCalc(end);
+          if (calc.end !== end) throw Error("wrong_local_window");
+          for (let n = 0; n < 8 && !stop.aborted && pages < 128; n++) {
+            pages++;
+            const rows = await repo.localPage(o.id, calc.stamp, calc.id, end);
+            advanceLocalCalc(calc, rows);
+            if (rows.length < 1000) {
+              scanning = false;
+              const e = await localEvidence(calc, o, repo, stop);
+              for (const leg of e.ledgers) cats.add(leg.market.category);
+              recordEvaluation(
+                sweep,
+                ordinal,
+                evaluateTrader(
+                  e,
+                  end,
+                  undefined,
+                  Math.floor(Date.now() / 1000),
+                ),
+              );
+              retired.add(key);
+              return "done";
+            }
+          }
+          const body = JSON.stringify(calc);
+          if (Buffer.byteLength(body) > 24 * 1024 * 1024)
+            throw Error("wallet_page_capacity");
+          const encoded = (await pack(body, { level: 1 })).toString("base64");
+          if (encoded.length > 4 * 1024 * 1024)
+            throw Error("wallet_page_capacity");
+          if (
+            !Number(
+              await command(() =>
+                redis.eval(TRADER_SAVE_CALC, {
+                  keys: [lock, key],
+                  arguments: [owner, String(end + SNAPSHOT_TTL), encoded],
+                }),
+              ),
+            )
+          )
+            lost.abort();
+          return "retry";
+        } catch (err) {
+          if (stop.aborted) return "retry";
+          const why =
+            err instanceof Error && err.message === "wallet_page_capacity"
+              ? "wallet_page_capacity"
+              : err instanceof Error && "code" in err && err.code === "57014"
+                ? scanning
+                  ? "local_activity_timeout"
+                  : "market_lookup_timeout"
+                : "source_unavailable";
+          if (
+            walletFailure(sweep, ordinal, why, why !== "wallet_page_capacity")
+          )
+            return "retry";
+          errors++;
+          reasons[why] = (reasons[why] ?? 0) + 1;
           retired.add(key);
           return "done";
-        } catch (err) {
-          if (err instanceof JournalUnavailable) {
-            lost.abort();
-            return "retry";
-          }
-          if (
-            err instanceof PageContinuation ||
-            (walletTimer.aborted &&
-              err === walletTimer.reason &&
-              journal.saved > 0 &&
-              !stop.aborted)
-          ) {
-            reasons.page_continuation = (reasons.page_continuation ?? 0) + 1;
-            return "retry";
-          }
-          errors++;
-          const reason =
-            err instanceof PolymarketDataApiV2Error
-              ? `provider_${err.status}`
-              : err instanceof Error &&
-                  /^(activity_checkpoint|wallet_activity_capacity|wallet_page_capacity|market_lookup_timeout|incomplete_pages|repeated_cursor|owner_mismatch|wallet_request_budget|cycle_request_budget)$/.test(
-                    err.message,
-                  )
-                ? err.message
-                : "unavailable";
-          reasons[reason] = (reasons[reason] ?? 0) + 1;
-          if (
-            err instanceof PolymarketDataApiV2Error &&
-            err.reason === "invalid_cursor"
-          ) {
-            const entry = activities.get(o.address);
-            if (entry) delete entry.pending;
-          }
-          if (
-            err instanceof PolymarketDataApiV2Error &&
-            (err.status === 429 ||
-              (err.status === 503 && err.retryAfterMs !== null) ||
-              err.reason === "coordination_unavailable")
-          ) {
-            next = Math.max(
-              next,
-              Date.now() + Math.max(30000, err.retryAfterMs ?? 0),
-            );
-            cooldown.abort();
-          }
-          if (reason === "cycle_request_budget" || stop.aborted) {
-            return "retry";
-          } else {
-            const why: SourceFailure = walletTimer.aborted
-              ? "wallet_timeout"
-              : err instanceof PolymarketDataApiV2Error
-                ? err.reason === "invalid_cursor"
-                  ? "invalid_cursor"
-                  : err.reason === "protocol_contract"
-                    ? "provider_protocol_contract"
-                    : "provider_error"
-                : reason === "incomplete_pages" ||
-                    reason === "owner_mismatch" ||
-                    reason === "repeated_cursor" ||
-                    reason === "wallet_request_budget" ||
-                    reason === "wallet_activity_capacity" ||
-                    reason === "wallet_page_capacity" ||
-                    reason === "market_lookup_timeout"
-                  ? reason
-                  : "source_unavailable";
-            const transient =
-              why === "wallet_timeout" ||
-              why === "invalid_cursor" ||
-              why === "source_unavailable" ||
-              why === "market_lookup_timeout" ||
-              (err instanceof PolymarketDataApiV2Error && err.retryable);
-            if (walletFailure(sweep, ordinal, why, transient)) return "retry";
-            retired.add(key);
-            return "done";
-          }
-        } finally {
-          pages.saved += journal.saved;
-          pages.replayed += journal.replayed;
-          trimActivityCache();
         }
       },
     );
@@ -347,7 +259,7 @@ async function cycle(signal: AbortSignal) {
     const decision = traderSliceAction({
       stopped: signal.aborted,
       lostLease: lost.signal.aborted,
-      cooling: cooldown.signal.aborted,
+      cooling: false,
       remaining: state.queue.length,
       sincePublication: finishedAt - (state.publishedAt || end),
       replaceExpiring:
@@ -364,14 +276,13 @@ async function cycle(signal: AbortSignal) {
         : decision;
     if (action === "checkpoint") {
       const saved = await save(encodeSweep(state));
-      if (Number(saved) === 1 && pages.saved + pages.replayed > 0)
+      if (Number(saved) === 1 && pages > 0)
         console.info("[trader-collections] checkpoint", {
           pages,
           reasons,
           pending: sweep.queue.length,
         });
-      if (Number(saved) === 1 && !cooldown.signal.aborted)
-        next = Date.now() + 15000;
+      if (Number(saved) === 1) next = Date.now() + 15000;
       return;
     }
     // Explicit coverage on budget expiry. An actual provider cooldown, service
@@ -380,6 +291,7 @@ async function cycle(signal: AbortSignal) {
       return;
     }
     if (action === "finish_without_publication") {
+      retired.add(prefix + "preparing");
       if (Number(await save("")) === 1) {
         if (expediteNextSweep(observed, end, finishedAt)) next = Date.now();
         console.warn(
@@ -390,6 +302,7 @@ async function cycle(signal: AbortSignal) {
       return;
     }
     const snapshots = sweepSnapshots(state, owner, finishedAt);
+    if (!state.queue.length) retired.add(prefix + "preparing");
     state.publishedAt = finishedAt;
     const published = await command(() =>
       redis.eval(TRADER_PUBLISH, {
@@ -402,7 +315,7 @@ async function cycle(signal: AbortSignal) {
         arguments: [
           owner,
           ...collections.map((k) => JSON.stringify(snapshots[k])),
-          String(SNAPSHOT_TTL),
+          String(SNAPSHOT_TTL + HANDOFF_SECONDS),
           state.queue.length ? encodeSweep(state) : "",
         ],
       }),
@@ -451,5 +364,4 @@ export async function stopTraderCollections() {
   timer = null;
   stopper?.abort();
   await ongoing;
-  activities.clear();
 }

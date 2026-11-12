@@ -10,6 +10,44 @@ export const PARTIAL_INTERVAL = 210,
   NORMAL_INTERVAL = 90,
   SLICE_SECONDS = 150,
   TICK_SECONDS = 15;
+export const HANDOFF_SECONDS = PARTIAL_INTERVAL + SLICE_SECONDS + TICK_SECONDS;
+export const TRADER_SAVE_CALC = `if redis.call('GET',KEYS[1])~=ARGV[1] or tonumber(redis.call('TIME')[1])>=tonumber(ARGV[2]) then return 0 end
+redis.call('SET',KEYS[2],ARGV[3],'EXAT',ARGV[2]);return 1`;
+export const TRADER_START = `if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
+redis.call('SET',KEYS[2],ARGV[2],'EX',604800)
+redis.call('SET',KEYS[3],ARGV[3],'EX',ARGV[4])
+return 1`;
+export function servingWindow(
+  body: CollectionResponse | null,
+  nextEnd: number,
+  k: Collection,
+  now: number,
+): CollectionResponse | null {
+  const end = body ? Date.parse(body.windowEnd) / 1000 : 0;
+  if (body && now - end < SNAPSHOT_TTL) return body;
+  if (
+    Number.isSafeInteger(nextEnd) &&
+    nextEnd > 0 &&
+    nextEnd > end &&
+    nextEnd <= now &&
+    now - nextEnd < SNAPSHOT_TTL
+  ) {
+    const iso = (at: number) => new Date(at * 1000).toISOString();
+    return {
+      collection: k,
+      snapshotId: "preparing:" + nextEnd,
+      generatedAt: iso(nextEnd),
+      windowEnd: iso(nextEnd),
+      windowStart: k === "winning-streaks" ? null : iso(nextEnd - 86400),
+      policyVersion: 1,
+      methodologyVersion: 2,
+      freshness: "stale",
+      availability: "preparing",
+      groups: [],
+    };
+  }
+  return body;
+}
 // Never defer a replacement just because an old-window final snapshot was
 // generated recently. Budget for the first normal partial and a running slice.
 export const replacementDue = (expiresAt: number, now: number) =>
@@ -103,7 +141,13 @@ export async function readCollection(
   const body = await load(k);
   if (!body || body.collection !== k) return null;
   const age = now - Date.parse(body.windowEnd) / 1000;
-  if (!Number.isFinite(age) || age < -60 || age >= SNAPSHOT_TTL) return null;
+  if (
+    !Number.isFinite(age) ||
+    age < -60 ||
+    age >= SNAPSHOT_TTL + HANDOFF_SECONDS
+  )
+    return null;
+  const handoff = age >= SNAPSHOT_TTL || body.availability === "preparing";
   // A cached book observation cannot certify a live future price. Discard the
   // opportunity immediately at a known market expiry, even if the ask is young.
   const visibleQuote = (quote: { asOf: string; validUntil: string }) =>
@@ -136,7 +180,7 @@ export async function readCollection(
             : g.status,
       };
     });
-  if (category && !groups.length)
+  if (!handoff && category && !groups.length)
     groups.push({
       category,
       status: "unsupported",
@@ -148,10 +192,10 @@ export async function readCollection(
         venues: ["polymarket"],
         basis:
           k === "big-moves"
-            ? "verified_fills"
+            ? "observed_position_deltas"
             : k === "winning-streaks"
-              ? "verified_episodes"
-              : "verified_realizations",
+              ? "inferred_closed_positions"
+              : "estimated_realizations",
         selectedWallets: 0,
         observedWallets: 0,
         eligibleWallets: 0,
@@ -159,8 +203,11 @@ export async function readCollection(
     });
   const response: CollectionResponse = {
     ...body,
-    freshness: age > FRESH_FOR ? "stale" : "fresh",
-    groups,
+    freshness: handoff || age > FRESH_FOR ? "stale" : "fresh",
+    availability:
+      age >= SNAPSHOT_TTL ? "between_windows" : (body.availability ?? "ranked"),
+    ...(handoff ? { diagnostics: undefined } : {}),
+    groups: handoff ? [] : groups,
   };
   const etag =
     '"' +

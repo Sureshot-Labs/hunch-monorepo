@@ -251,7 +251,7 @@ assert.equal(
 for (const [sequence, full, expected] of [
   [closed.slice(1), false, "streak_boundary_unknown"],
   [[closed[0]], true, "streak_interrupted_by_loss"],
-  [[closed[1]], true, "too_few_verified_wins"],
+  [[closed[1]], true, "too_few_observed_wins"],
   [[closed[1], { ...closed[1], net: -1n }], true, "streak_order_ambiguous"],
 ] as const) {
   const reasons: string[] = [];
@@ -608,7 +608,7 @@ for (const allNative of [false, true]) {
   assert.equal(cards["big-moves"].length, 0);
   const earned = cards["top-earners-today"][0]?.item.achievement;
   assert.ok(earned?.kind === "top_earner_24h");
-  assert.equal(earned.netRealized24hUsd, "95");
+  assert.equal(earned.estimatedNetPnl24hUsd, "95");
 }
 const openRow = rawPos.find((r) => r.status === "OPEN");
 assert.ok(openRow);
@@ -1034,7 +1034,7 @@ const knownDaily = {
 const dailyCard = candidates(knownDaily, end)["top-earners-today"][0]?.item
   .achievement;
 assert.ok(dailyCard?.kind === "top_earner_24h");
-assert.equal(dailyCard.netRealized24hUsd, "69");
+assert.equal(dailyCard.estimatedNetPnl24hUsd, "69");
 assert.equal(dailyCard.closeDetailsComplete, false);
 assert.equal(dailyCard.completedPositionCount24h, null);
 assert.equal(dailyCard.largestProfitableClose, null);
@@ -1112,7 +1112,7 @@ const sub = evaluateTrader(
   },
   end,
 );
-assert.equal(sub.rejected["winning-streaks"], "too_few_verified_wins");
+assert.equal(sub.rejected["winning-streaks"], "too_few_observed_wins");
 assert.equal(sub.rejected["top-earners-today"], "daily_profit_unknown");
 const tiny = evaluateTrader(evidence, end, {
   ...DEFAULT_TRADER_POLICY,
@@ -1221,6 +1221,16 @@ try {
     null,
   );
   clock = end + 1800;
+  for (const k of collections) {
+    const gap = await app.inject("/intel/traders/" + k + "?category=sports");
+    assert.equal(gap.statusCode, 200);
+    assert.equal(gap.json().availability, "between_windows");
+    assert.equal(gap.json().freshness, "stale");
+    assert.deepEqual(gap.json().groups, []);
+    assert.equal(gap.json().diagnostics, undefined);
+    assert.equal(gap.json().windowEnd, snapshots[k].windowEnd);
+  }
+  clock = end + 2200;
   assert.equal(
     (await app.inject("/intel/traders/winning-streaks")).statusCode,
     503,

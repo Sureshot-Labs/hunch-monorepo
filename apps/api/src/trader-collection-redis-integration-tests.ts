@@ -5,6 +5,8 @@ import { createClient } from "redis";
 import {
   TRADER_PUBLISH,
   TRADER_CHECKPOINT,
+  TRADER_SAVE_CALC,
+  TRADER_START,
 } from "./services/trader-collection-service.js";
 import {
   createSweep,
@@ -54,6 +56,34 @@ assert.notEqual(pages, journalKey(prefix, "test", "2", "addr", end));
 assert.equal(await redis.exists(pages), 0);
 try {
   await redis.set(lock, "a");
+  {
+    const calcKey = prefix + "localcalc",
+      nextKey = prefix + "preparing",
+      expires = Math.floor(Date.now() / 1000) + 30;
+    const start = (lease: string) =>
+      redis.eval(TRADER_START, {
+        keys: [lock, checkpoint, nextKey],
+        arguments: [lease, "frozen originals", String(expires - 30), "30"],
+      });
+    const calc = (lease: string, until: number, value: string) =>
+      redis.eval(TRADER_SAVE_CALC, {
+        keys: [lock, calcKey],
+        arguments: [lease, String(until), value],
+      });
+    try {
+      assert.equal(await start("stale"), 0);
+      assert.equal(await start("a"), 1);
+      assert.equal(await redis.get(nextKey), String(expires - 30));
+      assert.equal(await redis.get(checkpoint), "frozen originals");
+      assert.equal(await calc("a", expires, "cursor+calculation"), 1);
+      assert.equal(await calc("stale", expires, "bogus"), 0);
+      assert.equal(await calc("a", expires - 31, "expired"), 0);
+      assert.equal(await redis.get(calcKey), "cursor+calculation");
+      assert.ok((await redis.ttl(calcKey)) > 0);
+    } finally {
+      await redis.del([calcKey, nextKey, checkpoint]);
+    }
+  }
   {
     const expires = Math.floor(Date.now() / 1000) + 30;
     const open = (lease = "a") =>
