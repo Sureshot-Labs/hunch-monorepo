@@ -49,6 +49,8 @@ import { walletIntelRoutes } from "./wallet-intel.js";
 import { watchlistRoutes } from "./watchlist.js";
 import { env } from "../env.js";
 import { createDiscoveryRoutes } from "./discovery.js";
+import { createTraderCollectionRoutes } from "./trader-collections.js";
+import { loadTraderCollection } from "../services/trader-collection-runtime.js";
 import { discoveryService } from "../services/discovery-runtime.js";
 import { createRecommendedSpendRoutes } from "./recommended-spend.js";
 import { recommendedSpendService } from "../services/recommended-spend-runtime.js";
@@ -104,6 +106,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(nativeNotificationsRoutes);
   await app.register(feedRoutes);
   await app.register(createDiscoveryRoutes(discoveryService));
+  await app.register(createTraderCollectionRoutes(loadTraderCollection));
   await app.register(specialRoutes);
   await app.register(marketMapRoutes);
   await app.register(holdersRoutes);
