@@ -8,19 +8,25 @@ import {
   collections,
   collectionSchema,
   type Collection,
+  type SourceFailure,
 } from "../schemas/trader-collections.js";
 import { resolveWalletIntelRefreshPolicy } from "./runtime-policies.js";
 import {
   renewHolderResearchRunLock,
   releaseHolderResearchRunLock,
 } from "./holder-research-run-lock.js";
+import { evaluateTrader } from "./trader-collection-ranking.js";
 import {
-  assemble,
-  candidates,
-  priorityOrder,
-  type CandidateMap,
-  type Owner,
-} from "./trader-collection-ranking.js";
+  createSweep,
+  decodeSweep,
+  encodeSweep,
+  progress,
+  recordEvaluation,
+  visitSweepSlice,
+  sweepExpired,
+  sweepSnapshots,
+  walletFailure,
+} from "./trader-collection-sweep.js";
 import {
   collectEvidence,
   providerPages,
@@ -28,6 +34,12 @@ import {
 } from "./trader-collection-source.js";
 import {
   SNAPSHOT_TTL,
+  NORMAL_INTERVAL,
+  SLICE_SECONDS,
+  TICK_SECONDS,
+  delayNewSweep,
+  expediteNextSweep,
+  replacementDue,
   TRADER_PUBLISH,
   TRADER_CHECKPOINT,
   traderRedisCommand,
@@ -52,15 +64,7 @@ export async function loadTraderCollection(k: Collection) {
   return raw ? collectionSchema.parse(JSON.parse(raw)) : null;
 }
 const activities = new Map<string, ActivityCache>();
-type Build = {
-  end: number;
-  owners: Owner[];
-  queue: number[];
-  sets: CandidateMap[];
-  categories: string[];
-  attempts: number;
-};
-const progressKey = prefix + "build";
+const progressKey = prefix + "build:v2";
 function trimActivityCache() {
   // Oldest wallet first. Eviction loses only a speed-up, never published facts.
   let rows = 0;
@@ -95,7 +99,7 @@ async function cycle(signal: AbortSignal) {
     signal,
     lost.signal,
     cooldown.signal,
-    AbortSignal.timeout(150000),
+    AbortSignal.timeout(SLICE_SECONDS * 1000),
   ]);
   const renewal = setInterval(() => {
     void command(() =>
@@ -116,14 +120,26 @@ async function cycle(signal: AbortSignal) {
     const repo = new TraderRepository(pool),
       now = Math.floor(Date.now() / 1000);
     const raw = await command(() => redis.get(progressKey));
-    let state: Build | null = raw
-      ? JSON.parse(raw, (k, v) =>
-          k === "priority" && Array.isArray(v) ? v.map(BigInt) : v,
-        )
-      : null;
-    if (!state || now - state.end >= 600) {
+    const previous = raw ? decodeSweep(raw) : undefined;
+    const save = (encoded: string) =>
+      command(() =>
+        redis.eval(TRADER_CHECKPOINT, {
+          keys: [lock, progressKey],
+          arguments: [owner, encoded],
+        }),
+      );
+    let state = previous;
+    if (!state || sweepExpired(state, now)) {
       const last = await command(() => redis.get(prefix + collections[0]));
-      if (last && Date.now() - Date.parse(JSON.parse(last).generatedAt) < 90000)
+      const prior = last ? JSON.parse(last) : null;
+      const expiresAt = prior
+        ? Date.parse(prior.windowEnd) / 1000 + SNAPSHOT_TTL
+        : 0;
+      if (
+        !state &&
+        prior &&
+        delayNewSweep(Date.parse(prior.generatedAt) / 1000, expiresAt, now)
+      )
         return;
       stop.throwIfAborted();
       const whale = await discoveryReadOnly(
@@ -134,24 +150,17 @@ async function cycle(signal: AbortSignal) {
       stop.throwIfAborted();
       const shortlist = await repo.owners(now, whale),
         offset = rotation % Math.max(1, shortlist.length);
-      state = {
-        end: now,
-        owners: shortlist,
-        queue: shortlist.map((_, i) => (offset + i) % shortlist.length),
-        sets: [],
-        categories: [],
-        attempts: 0,
-      };
+      state = createSweep(shortlist, now, offset, previous);
+      state.previousSnapshotExpiresAt = expiresAt;
+      if (Number(await save(encodeSweep(state))) !== 1) return;
     }
-    const { end, owners, sets } = state,
-      cats = new Set(state.categories),
-      retry: number[] = [];
+    const sweep = state;
+    const { end, owners } = sweep,
+      cats = new Set(state.categories);
     const addresses = new Set(owners.map((o) => o.address));
     for (const a of activities.keys())
       if (!addresses.has(a)) activities.delete(a);
-    const queue = state.queue;
-    let index = 0,
-      errors = 0,
+    let errors = 0,
       providerRequests = 0;
     const reasons: Record<string, number> = {};
     const transport = providerPages(env.polymarketDataApiBase);
@@ -160,22 +169,24 @@ async function cycle(signal: AbortSignal) {
       providerRequests++;
       return transport(...args);
     };
-    async function consume() {
-      while (!stop.aborted && providerRequests < 128 && index < queue.length) {
-        const ordinal = queue[index++],
-          o = owners[ordinal];
+    const index = await visitSweepSlice(
+      sweep,
+      () => !stop.aborted && providerRequests < 128,
+      async (ordinal) => {
+        const o = owners[ordinal];
         const old = activities.get(o.address);
         if (old) {
           activities.delete(o.address);
           activities.set(o.address, old);
         }
+        const walletTimer = AbortSignal.timeout(45000);
         try {
           const e = await collectEvidence(
             o,
             end,
             read,
             (a, t, s) => repo.markets(a, t, s),
-            AbortSignal.any([stop, AbortSignal.timeout(45000)]),
+            AbortSignal.any([stop, walletTimer]),
             activities,
           );
           for (const v of e.ledgers) cats.add(v.market.category);
@@ -184,7 +195,7 @@ async function cycle(signal: AbortSignal) {
             if (g !== "*" && g !== "outside_catalog") cats.add(g);
           // Position/activity windows are frozen across slices. Latest quotes
           // are observed separately and age against the actual observation time.
-          const cs = candidates(
+          const evaluation = evaluateTrader(
             e,
             end,
             undefined,
@@ -192,16 +203,8 @@ async function cycle(signal: AbortSignal) {
           );
           // Only one card per owner/segment can win. Bound the checkpoint, not the
           // number of source fills or the evidence used to choose that card.
-          for (const k of collections) {
-            const byCategory = new Map<string, (typeof cs)[typeof k][number]>();
-            for (const choice of cs[k]) {
-              const old = byCategory.get(choice.category);
-              if (!old || priorityOrder(choice.priority, old.priority) < 0)
-                byCategory.set(choice.category, choice);
-            }
-            cs[k] = [...byCategory.values()];
-          }
-          sets.push(cs);
+          recordEvaluation(sweep, ordinal, evaluation);
+          return "done";
         } catch (err) {
           errors++;
           const reason =
@@ -233,44 +236,62 @@ async function cycle(signal: AbortSignal) {
             );
             cooldown.abort();
           }
-          if (
-            reason === "activity_checkpoint" ||
-            reason === "cycle_request_budget" ||
-            stop.aborted
-          )
-            retry.push(ordinal);
+          if (reason === "cycle_request_budget" || stop.aborted) {
+            return reason === "cycle_request_budget"
+              ? "shared_budget"
+              : "retry";
+          } else {
+            const why: SourceFailure = walletTimer.aborted
+              ? "wallet_timeout"
+              : err instanceof PolymarketDataApiV2Error
+                ? err.reason === "invalid_cursor"
+                  ? "invalid_cursor"
+                  : "provider_error"
+                : reason === "incomplete_pages" ||
+                    reason === "owner_mismatch" ||
+                    reason === "repeated_cursor" ||
+                    reason === "wallet_request_budget" ||
+                    reason === "wallet_activity_capacity"
+                  ? reason
+                  : "source_unavailable";
+            const transient =
+              why === "wallet_timeout" ||
+              why === "invalid_cursor" ||
+              why === "source_unavailable" ||
+              (err instanceof PolymarketDataApiV2Error && err.retryable);
+            return walletFailure(sweep, ordinal, why, transient)
+              ? "retry"
+              : "done";
+          }
         } finally {
           trimActivityCache();
         }
-      }
-    }
-    await Promise.all([consume(), consume()]);
+      },
+    );
     rotation = (rotation + index) % Math.max(1, owners.length);
-    state.queue = [...queue.slice(index), ...retry];
-    state.attempts += index;
     state.categories = [...cats];
-    const action = traderSliceAction({
+    const finishedAt = Math.floor(Date.now() / 1000);
+    const observed = Object.keys(state.evaluated).length;
+    const decision = traderSliceAction({
       stopped: signal.aborted,
       lostLease: lost.signal.aborted,
       cooling: cooldown.signal.aborted,
       remaining: state.queue.length,
-      ageSeconds: Date.now() / 1000 - end,
-      attempts: state.attempts,
+      sincePublication: finishedAt - (state.publishedAt || end),
+      replaceExpiring:
+        !state.publishedAt &&
+        replacementDue(state.previousSnapshotExpiresAt, finishedAt),
       selected: owners.length,
-      observed: sets.length,
+      observed,
     });
+    const action =
+      decision === "publish" && sweepExpired(state, finishedAt)
+        ? state.queue.length
+          ? "checkpoint"
+          : "finish_without_publication"
+        : decision;
     if (action === "checkpoint") {
-      const saved = await command(() =>
-        redis.eval(TRADER_CHECKPOINT, {
-          keys: [lock, progressKey],
-          arguments: [
-            owner,
-            JSON.stringify(state, (_, v) =>
-              typeof v === "bigint" ? v.toString() : v,
-            ),
-          ],
-        }),
-      );
+      const saved = await save(encodeSweep(state));
       if (Number(saved) === 1 && !cooldown.signal.aborted)
         next = Date.now() + 15000;
       return;
@@ -278,20 +299,20 @@ async function cycle(signal: AbortSignal) {
     // Explicit coverage on budget expiry. An actual provider cooldown, service
     // stop, empty observation or lost lease cannot replace a good snapshot.
     if (action === "retain") {
-      console.warn(
-        "[trader-collections] incomplete build; retaining previous version",
-        { selected: owners.length, observed: sets.length, errors, reasons },
-      );
       return;
     }
-    const snapshots = assemble(
-      sets,
-      end,
-      owner,
-      owners.length,
-      cats,
-      Math.floor(Date.now() / 1000),
-    );
+    if (action === "finish_without_publication") {
+      if (Number(await save("")) === 1) {
+        if (expediteNextSweep(observed, end, finishedAt)) next = Date.now();
+        console.warn(
+          "[trader-collections] sweep finished without a servable observation",
+          { ...progress(state), errors, reasons },
+        );
+      }
+      return;
+    }
+    const snapshots = sweepSnapshots(state, owner, finishedAt);
+    state.publishedAt = finishedAt;
     const published = await command(() =>
       redis.eval(TRADER_PUBLISH, {
         keys: [lock, ...collections.map((k) => prefix + k), progressKey],
@@ -299,16 +320,21 @@ async function cycle(signal: AbortSignal) {
           owner,
           ...collections.map((k) => JSON.stringify(snapshots[k])),
           String(SNAPSHOT_TTL),
+          state.queue.length ? encodeSweep(state) : "",
         ],
       }),
     );
-    if (Number(published) === 1)
+    if (Number(published) === 1) {
+      if (state.queue.length) next = Date.now() + TICK_SECONDS * 1000;
+      else if (expediteNextSweep(observed, end, finishedAt)) next = Date.now();
       console.info("[trader-collections] snapshot", {
         selected: owners.length,
-        observed: sets.length,
+        observed,
+        coverage: progress(state),
         errors,
         reasons,
       });
+    }
   } finally {
     clearInterval(renewal);
     await command(() =>
@@ -322,7 +348,7 @@ export function startTraderCollections() {
   const signal = stopper.signal;
   const run = () => {
     if (!ongoing && Date.now() >= next) {
-      next = Date.now() + 90000;
+      next = Date.now() + NORMAL_INTERVAL * 1000;
       ongoing = cycle(signal)
         .catch(() => {
           console.warn("[trader-collections] refresh unavailable");
@@ -332,7 +358,7 @@ export function startTraderCollections() {
         });
     }
   };
-  timer = setInterval(run, 15000);
+  timer = setInterval(run, TICK_SECONDS * 1000);
   timer.unref();
   run();
 }

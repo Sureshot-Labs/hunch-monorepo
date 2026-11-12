@@ -20,10 +20,17 @@ import {
 } from "./services/trader-collection-ledger.js";
 import {
   candidates,
-  assemble,
+  evaluateTrader,
   DEFAULT_TRADER_POLICY,
   winningRun,
 } from "./services/trader-collection-ranking.js";
+import {
+  createSweep,
+  recordEvaluation,
+  sweepSnapshots,
+  decodeSweep,
+  encodeSweep,
+} from "./services/trader-collection-sweep.js";
 import {
   collectEvidence,
   type ReadPage,
@@ -241,6 +248,21 @@ assert.equal(
   ),
   null,
 );
+for (const [sequence, full, expected] of [
+  [closed.slice(1), false, "streak_boundary_unknown"],
+  [[closed[0]], true, "streak_interrupted_by_loss"],
+  [[closed[1]], true, "too_few_verified_wins"],
+  [[closed[1], { ...closed[1], net: -1n }], true, "streak_order_ambiguous"],
+] as const) {
+  const reasons: string[] = [];
+  assert.equal(
+    winningRun([...sequence], DEFAULT_TRADER_POLICY, full, (k) =>
+      reasons.push(k),
+    ),
+    null,
+  );
+  assert.deepEqual(reasons, [expected]);
+}
 const markets = new Map<string, Market>();
 const raw: Record<string, unknown>[] = [],
   rawPos: Record<string, unknown>[] = [];
@@ -735,7 +757,92 @@ for (const skew of [-3, 3]) {
   assert.equal(ranked["big-moves"].length, 0);
   assert.equal(ranked["top-earners-today"].length, skew < 0 ? 0 : 1);
 }
-const snapshots = assemble([cs, cs], end, "snap", 2, ["sports", "mentions"]);
+const sweep = createSweep([owner, { ...owner, id: "other-fixture" }], end);
+sweep.queue = [];
+sweep.categories = ["sports", "mentions"];
+sweep.attempts = [1, 1];
+recordEvaluation(sweep, 0, evaluateTrader(evidence, end));
+recordEvaluation(sweep, 1, evaluateTrader(evidence, end));
+const snapshots = sweepSnapshots(decodeSweep(encodeSweep(sweep)), "snap", end);
+const later = sweepSnapshots(sweep, "later", end + 301);
+assert.deepEqual(later["big-moves"].diagnostics?.exclusions, [
+  { code: "quote_expired_before_publication", wallets: 2 },
+]);
+assert.equal(later["top-earners-today"].diagnostics?.qualifiedWallets, 2);
+const { diagnostics: _, ...legacy } = snapshots["big-moves"];
+assert.ok(collectionSchema.safeParse(legacy).success);
+const unknowable = evaluateTrader({ ...evidence, gaps: new Set(["*"]) }, end);
+assert.deepEqual(
+  Object.values(unknowable.rejected),
+  Array(3).fill("unclassified_evidence"),
+);
+for (const [gap, reason] of [
+  ["sports", "category_evidence_gap"],
+  ["outside_catalog", "no_catalog_category"],
+]) {
+  const v = evaluateTrader(
+    {
+      ...evidence,
+      distinctClosed: 20,
+      ledgers: [],
+      supplemental: [],
+      gaps: new Set([gap]),
+    },
+    end,
+  );
+  assert.deepEqual(Object.values(v.rejected), Array(3).fill(reason));
+}
+const sub = evaluateTrader(
+  {
+    ...evidence,
+    supplemental: [
+      {
+        category: "sports",
+        net30: units(1),
+        net24: null,
+        openLoss: 0n,
+        uncertainClose: end,
+      },
+    ],
+  },
+  end,
+);
+assert.equal(sub.rejected["winning-streaks"], "too_few_verified_wins");
+assert.equal(sub.rejected["top-earners-today"], "daily_profit_unknown");
+const tiny = evaluateTrader(evidence, end, {
+  ...DEFAULT_TRADER_POLICY,
+  minMove: units(9999999),
+});
+assert.equal(tiny.rejected["big-moves"], "move_below_minimum");
+for (const small of [false, true]) {
+  for (const noQuote of [false, true]) {
+    // A retained buy still exists even if the book is unavailable or the
+    // remaining position is below dust. Don't claim no purchase occurred.
+    const e = {
+      ...evidence,
+      ledgers: evidence.ledgers.map((x) => ({
+        ...x,
+        market: { ...x.market, ask: noQuote ? null : x.market.ask },
+        ledger: {
+          ...x.ledger,
+          current: x.ledger.current > 0n ? 1n : x.ledger.current,
+        },
+      })),
+    };
+    const v = evaluateTrader(e, end, {
+      ...DEFAULT_TRADER_POLICY,
+      minMove: small ? units(9999999) : DEFAULT_TRADER_POLICY.minMove,
+    });
+    assert.equal(
+      v.rejected["big-moves"],
+      small
+        ? "move_below_minimum"
+        : noQuote
+          ? "market_or_quote_unavailable"
+          : "remaining_position_dust",
+    );
+  }
+}
 const app = Fastify();
 app.setValidatorCompiler(validatorCompiler);
 app.setSerializerCompiler(serializerCompiler);
@@ -768,6 +875,8 @@ try {
     assert.equal(body.groups[0].items[0].rank, 1);
     assert.equal(body.groups[0].coverage.eligibleWallets, 1);
     assert.equal(body.snapshotId, "snap");
+    assert.equal(body.diagnostics?.qualifiedWallets, 2); // families deduplicated only in public ranking
+    assert.deepEqual(body.diagnostics?.exclusions, []);
     assert.ok(!first.body.includes(owner.address));
     const unchanged = await app.inject({
       url: url + "?category=sports",

@@ -14,6 +14,19 @@ Read `windowEnd`, `freshness` and each group's `coverage`: `selectedWallets` is 
 
 Each result has a public trader identifier, optional public name, category-specific achievement, observed history, realized performance, evidence timestamp, flags and a separately selected `latestOpenPosition` or `null`. Decimal amounts and ratios are strings in USDC/shares, prices are dollars per share. `relativeToTypical="2"` means twice the trader's median historical completed stake in the category. `sharesAfter` is immediately after the purchase, not today's balance. `latestOpenPosition.shares` is the reconciled holding; `entryPrice` here is the most recent qualifying increase's fill VWAP, **not** the cost basis of the entire holding. `completedPositions` is a lower bound: the greater of reconstructed economic closes and distinct supported venue-confirmed closed positions, not a lifetime provider counter. A missing, partial wallet-wide total stays null. Top-of-book is indicative for one share, not an executable quote for the entire amount; depth and 30-day ROI are null when not established.
 
+### Progress and exclusion reasons
+
+Partial publications no longer end the sweep. They atomically publish all three tabs and checkpoint the frozen shortlist, its time window, the remaining queue, completed candidates and reasons. Later snapshots can share a `windowEnd` while coverage increases. Check `snapshotId` or ETag for a new publication. A replacement process can continue the sweep; it may reread pages of an unfinished wallet. No raw provider pages or wallet addresses are included in the public diagnostics.
+
+New snapshots include `diagnostics` for **this tab across the entire shortlist**, even with a category filter. Older cache entries may omit it. For example, `selectedWallets:50, attemptedWallets:18, pendingWallets:34, observedWallets:14, qualifiedWallets:3` is consistent with two terminal source failures and eleven exclusions. Pending includes both untouched wallets and scheduled retries. Counts satisfy:
+
+- selected = observed + pending + wallets in `sourceFailures`;
+- observed = qualified + wallets in `exclusions`.
+
+Each observed wallet with no candidate for the tab contributes **one** reason: the furthest qualification check reached across its categories. For example, `typical_stake_unknown` is different from `below_typical_stake`; `daily_profit_unknown` is different from `daily_profit_not_positive`; `streak_boundary_unknown` is not a loss. Source failures such as `incomplete_pages` never count as filters or as a financial result. Counts are at publication, before family deduplication, category filtering and the three-card cap. Expired Big Moves are removed before publication; the HTTP read may also hide a quote that has expired since publication.
+
+Normal completion reaches every wallet, not necessarily 50 successful observations: page limits, timeouts and identity errors are reported honestly. Venue cooldown preserves unfinished work and does not replace a good snapshot. If the frozen window has become unservable (30 minutes), a fresh selection prioritizes still-eligible unfinished wallets and does not carry old candidate evidence into a new window. A normally finished queue is deleted; abandoned private progress expires after the seven-day selection horizon.
+
 ## Evidence and ranking
 
 `coverage.resultScope=servable_hunch_catalog_positions` is the universe for the reported numbers. An unmapped contract is not a zero and can make the wallet-wide observed total unavailable. The venue's positions projection can omit inactive markets even with archived markets enabled; the API is not an account statement. Open and redeemable-loss walks include archived markets and use a zero dust floor. A historical immutable instrument may support a past result after migration, but cannot supply a live price unless the current contract and outcome still match. Related controller/proxy wallets share one ranking slot.
