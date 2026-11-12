@@ -16,9 +16,14 @@ import {
 } from "./services/trader-collection-ledger.js";
 import {
   candidates,
+  evaluateTrader,
   type Evidence,
   iso,
 } from "./services/trader-collection-ranking.js";
+import {
+  collectEvidence,
+  type ReadPage,
+} from "./services/trader-collection-source.js";
 
 const end = 1800000000,
   first = end - 3000;
@@ -539,6 +544,249 @@ for (const offset of [-10, 10]) {
       ),
       null,
     );
+}
+
+// One proven lifetime sale, not a redistribution of fees among episodes.
+// Check the actual position/activity parser and ranking, including a loss at
+// the head of the series. The daily income must not appear a second time as
+// a supplemental native total.
+async function soleSaleFixture(
+  lastIsLoss = false,
+  duplicateStates?: Record<string, unknown>[],
+) {
+  const activity: Record<string, unknown>[] = [],
+    positions: Record<string, unknown>[] = [];
+  const instruments = new Map<string, Market>();
+  for (let i = 0; i < 20; i++) {
+    const condition = "0x" + String(i + 1).padStart(64, "0"),
+      token = String(i + 1);
+    const bought = end - (22 - i) * DAY,
+      sold = i === 19 ? end - 60 : bought + 3600;
+    const losing = i === 0 || (i === 19 && lastIsLoss);
+    const key = {
+      proxy_wallet: owner.address,
+      condition_id: condition,
+      token_id: token,
+      outcome_index: 0,
+      outcome: "YES",
+    };
+    activity.push(
+      {
+        ...key,
+        type: "TRADE",
+        side: "BUY",
+        timestamp: bought,
+        size: 250,
+        usdc_size: 100,
+        transaction_hash: "0x" + String(i * 2 + 1).padStart(64, "0"),
+      },
+      {
+        ...key,
+        type: "TRADE",
+        side: "SELL",
+        timestamp: sold,
+        size: 250,
+        usdc_size: losing ? 99 : 111,
+        transaction_hash: "0x" + String(i * 2 + 2).padStart(64, "0"),
+      },
+    );
+    positions.push({
+      ...key,
+      status: "CLOSED",
+      redeemable: false,
+      current_size: 0,
+      total_size: 250,
+      entry_cost_usdc: 0,
+      entry_fees_usdc: 1,
+      total_cost_usdc: 1,
+      realized_pnl: losing ? -2 : 10,
+      unrealized_pnl: 0,
+      first_entry_at: bought,
+      last_event_at: sold,
+    });
+    instruments.set(condition + ":" + token + ":0", {
+      ...market,
+      condition,
+      instrument: { ...market.instrument, tokenId: token },
+    });
+  }
+  if (duplicateStates) {
+    const last = positions.pop();
+    assert.ok(last);
+    positions.push(...duplicateStates.map((state) => ({ ...last, ...state })));
+  }
+  const read: ReadPage = async (ep, params) => ({
+    data:
+      ep === "positions" && params.status === "CLOSED"
+        ? positions
+        : ep === "activity"
+          ? params.limit === "1"
+            ? [activity[0]]
+            : [...activity].sort(
+                (a, b) => Number(b.timestamp) - Number(a.timestamp),
+              )
+          : [],
+    nextCursor: null,
+  });
+  const e = await collectEvidence(
+    owner,
+    end,
+    read,
+    async () => instruments,
+    new AbortController().signal,
+  );
+  return e;
+}
+const flat = { redeemable: false };
+const matchedSales = await soleSaleFixture(false, [flat, flat]);
+assert.equal(matchedSales.supplemental?.length, 0);
+assert.equal(matchedSales.ledgers.flatMap((x) => x.ledger.closes).length, 20);
+const soleWins = evaluateTrader(matchedSales, end);
+const streak = soleWins.choices["winning-streaks"][0]?.item.achievement;
+assert.ok(streak?.kind === "winning_streak");
+assert.equal(streak.currentLength, 19);
+assert.equal(streak.streakNetRealizedUsd, "190");
+const earnedToday = soleWins.choices["top-earners-today"][0]?.item.achievement;
+assert.ok(earnedToday?.kind === "top_earner_24h");
+assert.equal(earnedToday.netRealized24hUsd, "10");
+assert.equal(earnedToday.completedPositionCount24h, 1);
+assert.equal(earnedToday.largestProfitableClose?.episodeNetRealizedUsd, "10");
+const soleLoss = evaluateTrader(await soleSaleFixture(true), end);
+assert.equal(soleLoss.choices["winning-streaks"].length, 0);
+assert.equal(
+  soleLoss.rejected["winning-streaks"],
+  "streak_interrupted_by_loss",
+);
+assert.equal(soleLoss.choices["top-earners-today"].length, 0);
+const missingFlag = await soleSaleFixture(false, [{ redeemable: null }]);
+assert.equal(missingFlag.ledgers.flatMap((x) => x.ledger.closes).length, 19);
+assert.equal(missingFlag.supplemental?.length, 1);
+for (const disputedState of [{ redeemable: true }, { status: "OPEN" }]) {
+  for (const states of [
+    [disputedState, flat],
+    [flat, disputedState],
+  ]) {
+    const disputed = await soleSaleFixture(false, states);
+    assert.equal(disputed.ledgers.flatMap((x) => x.ledger.closes).length, 19);
+    assert.ok(disputed.gaps.has("sports"));
+    assert.equal(disputed.distinctClosed, 19);
+    assert.equal(
+      evaluateTrader(disputed, end).choices["winning-streaks"].length,
+      0,
+    );
+  }
+}
+
+// A broken balance replay may still be a provable buy-only tail via native
+// total_size = current_size. Every duplicate must support that identity.
+async function buyOnlyDay(sizes: number[]) {
+  const condition = "0x" + "a".repeat(64),
+    bought = end - 2 * DAY,
+    latest = end - 20;
+  const key = {
+    proxy_wallet: owner.address,
+    condition_id: condition,
+    token_id: "1",
+    outcome_index: 0,
+    outcome: "Yes",
+  };
+  const rows = sizes.map((n) => ({
+    ...key,
+    status: "OPEN",
+    redeemable: false,
+    current_size: 250,
+    total_size: n,
+    realized_pnl: 0,
+    unrealized_pnl: 0,
+    first_entry_at: bought,
+    last_event_at: latest,
+  }));
+  const buys = [latest, bought].map((timestamp) => ({
+    ...key,
+    type: "TRADE",
+    side: "BUY",
+    size: 100,
+    usdc_size: 40,
+    timestamp,
+    transaction_hash: "0x" + String(timestamp).padStart(64, "0"),
+  }));
+  const read: ReadPage = async (ep, p) => ({
+    data:
+      ep === "activity"
+        ? p.limit === "1"
+          ? [buys[1]]
+          : buys
+        : ep === "positions" && p.status === "OPEN"
+          ? rows
+          : [],
+    nextCursor: null,
+  });
+  const e = await collectEvidence(
+    owner,
+    end,
+    read,
+    async () => new Map([[condition + ":1:0", { ...market, condition }]]),
+    new AbortController().signal,
+  );
+  assert.equal(e.supplemental?.length, 1);
+  return e.supplemental[0].net24;
+}
+assert.equal(await buyOnlyDay([250, 250]), 0n);
+assert.equal(await buyOnlyDay([300, 250]), null);
+assert.equal(await buyOnlyDay([250, 300]), null);
+
+const saleAt = first + 20,
+  fullSale = sale(saleAt, 2000, 1200);
+const disclosedSale: Position = {
+  ...position(0, 199, saleAt),
+  closedBoughtShares: 2000n * UNIT,
+  remainingCost: { entry: 0n, total: UNIT, fees: UNIT },
+};
+assert.equal(
+  replayed([buy, fullSale], disclosedSale, market, undefined, 1, end).closes[0]
+    .net,
+  199n * UNIT,
+);
+for (const [acts, observed, m, res] of [
+  [
+    [buy, fullSale],
+    { ...disclosedSale, remainingCost: undefined },
+    market,
+    undefined,
+  ],
+  [[buy, fullSale], { ...disclosedSale, pnl: 198n * UNIT }, market, undefined],
+  [
+    [buy, fullSale],
+    { ...disclosedSale, closedBoughtShares: undefined },
+    market,
+    undefined,
+  ],
+  [
+    [buy, fullSale],
+    { ...disclosedSale, closedBoughtShares: 2001n * UNIT },
+    market,
+    undefined,
+  ],
+  [[buy, fullSale], { ...disclosedSale, shares: 1n }, market, undefined],
+  [[buy, fullSale], { ...disclosedSale, last: saleAt + 1 }, market, undefined],
+  [[buy, { ...fullSale, tx: buy.tx }], disclosedSale, market, undefined],
+  [[buy, fullSale], { ...disclosedSale, redeemable: true }, market, undefined],
+  [[buy, fullSale], disclosedSale, { ...market, terminal: true }, undefined],
+  [[buy, fullSale], disclosedSale, market, resolved],
+  [
+    [buy, sale(first + 1, 1000, 600), sale(saleAt, 1000, 600)],
+    disclosedSale,
+    market,
+    undefined,
+  ],
+  [
+    [buy, sale(first + 1, 2000, 1200), trade(first + 2, 2000, 1000), fullSale],
+    { ...disclosedSale, pnl: 399n * UNIT, closedBoughtShares: 4000n * UNIT },
+    market,
+    undefined,
+  ],
+] as [Action[], Position, Market, Resolution | undefined][]) {
+  assert.equal(replay(acts, observed, m, res, 1, end), null);
 }
 
 // Realistic upper-size regression: measure accesses to source stakes, not

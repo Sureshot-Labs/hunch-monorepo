@@ -111,6 +111,20 @@ const end = 1800000000,
     name: null,
   }));
 let state = createSweep(owners, end);
+{
+  const legacy = createSweep(owners.slice(0, 4), end);
+  delete legacy.pageJournal;
+  legacy.queue = [3];
+  legacy.failed = {
+    0: "incomplete_pages",
+    1: "owner_mismatch",
+    2: "wallet_request_budget",
+  };
+  const rescued = decodeSweep(encodeSweep(legacy));
+  assert.deepEqual(rescued.queue, [3, 0, 2]);
+  assert.deepEqual(rescued.failed, { 1: "owner_mismatch" });
+  assert.deepEqual(decodeSweep(encodeSweep(rescued)), rescued);
+}
 const obs = {
   choices: emptyChoices(),
   rejected: {

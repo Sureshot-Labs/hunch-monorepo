@@ -53,6 +53,8 @@ export type Position = {
   shares: bigint;
   pnl: bigint;
   unrealized: bigint;
+  /** Native CLOSED projection's lifetime bought shares, not current balance. */
+  closedBoughtShares?: bigint;
   remainingCost?: { total: bigint; entry: bigint; fees: bigint };
   first: number;
   last: number;
@@ -356,7 +358,38 @@ export function replay(
         x.shares === held ? cost : (cost * x.shares + held / 2n) / held;
       held -= x.shares;
       cost -= basis;
-      const delta = x.cash - basis;
+      const gross = x.cash - basis;
+      // A complete lifetime with precisely one purchase and one final sale
+      // needs no fee allocation. Require the CLOSED projection to agree on
+      // quantity, flat basis, both clocks, and the entire gross-to-native
+      // difference via disclosed BUY fees. Unknown sell fees, reopens and
+      // settlement are intentionally left to the usual fallback.
+      const native = p.remainingCost,
+        buy = a[0];
+      const soleSale =
+        !res &&
+        !m.terminal &&
+        !p.redeemable &&
+        a.length === 2 &&
+        x === a[1] &&
+        buy.side === "BUY" &&
+        buy.time < x.time &&
+        x.time === p.last &&
+        buy.tx !== x.tx &&
+        buy.cash <= buy.shares &&
+        x.cash > 0n &&
+        x.cash <= x.shares &&
+        buy.shares === x.shares &&
+        buy.shares === p.closedBoughtShares &&
+        held === 0n &&
+        p.shares === 0n &&
+        p.unrealized === 0n &&
+        native &&
+        native.entry === 0n &&
+        native.fees > 0n &&
+        native.total === native.fees &&
+        abs(gross - native.fees - p.pnl) <= 100n;
+      const delta = soleSale ? p.pnl : gross;
       reported += delta;
       realize(x.time, delta);
       if (!held) close(x.time);

@@ -46,6 +46,13 @@ import {
   traderSliceAction,
 } from "./trader-collection-service.js";
 import { PolymarketDataApiV2Error } from "./polymarket-data-api-v2.js";
+import {
+  JournalUnavailable,
+  PageContinuation,
+  SAVE_PAGE,
+  WalletPageJournal,
+  journalKey,
+} from "./trader-collection-page-journal.js";
 
 const prefix = "intel:trader-collections:v1:",
   lock = prefix + "lease",
@@ -121,10 +128,11 @@ async function cycle(signal: AbortSignal) {
       now = Math.floor(Date.now() / 1000);
     const raw = await command(() => redis.get(progressKey));
     const previous = raw ? decodeSweep(raw) : undefined;
+    const retired = new Set<string>();
     const save = (encoded: string) =>
       command(() =>
         redis.eval(TRADER_CHECKPOINT, {
-          keys: [lock, progressKey],
+          keys: [lock, progressKey, ...retired],
           arguments: [owner, encoded],
         }),
       );
@@ -163,6 +171,7 @@ async function cycle(signal: AbortSignal) {
     let errors = 0,
       providerRequests = 0;
     const reasons: Record<string, number> = {};
+    const pages = { saved: 0, replayed: 0 };
     const transport = providerPages(env.polymarketDataApiBase);
     const read: typeof transport = (...args) => {
       if (providerRequests >= 128) throw Error("cycle_request_budget");
@@ -180,14 +189,57 @@ async function cycle(signal: AbortSignal) {
           activities.set(o.address, old);
         }
         const walletTimer = AbortSignal.timeout(45000);
+        const key = journalKey(
+          prefix,
+          env.polymarketDataApiBase,
+          o.id,
+          o.address,
+          end,
+        );
+        const journal = new WalletPageJournal(
+          {
+            get: (field) => command(() => redis.hGet(key, field)),
+            write: async (mode, field, value, decodedBytes) =>
+              Number(
+                await command(() =>
+                  redis.eval(SAVE_PAGE, {
+                    keys: [lock, key],
+                    arguments: [
+                      owner,
+                      String(end + SNAPSHOT_TTL),
+                      mode,
+                      field,
+                      value,
+                      String(decodedBytes),
+                    ],
+                  }),
+                ),
+              ),
+          },
+          o.address,
+        );
         try {
           const e = await collectEvidence(
             o,
             end,
             read,
-            (a, t, s) => repo.markets(a, t, s),
+            async (a, t, s) => {
+              try {
+                return await repo.markets(a, t, s);
+              } catch (err) {
+                if (
+                  err instanceof Error &&
+                  "code" in err &&
+                  err.code === "57014" &&
+                  err.message.includes("statement timeout")
+                )
+                  throw Error("market_lookup_timeout");
+                throw err;
+              }
+            },
             AbortSignal.any([stop, walletTimer]),
             activities,
+            journal,
           );
           for (const v of e.ledgers) cats.add(v.market.category);
           for (const v of e.supplemental ?? []) cats.add(v.category);
@@ -204,14 +256,29 @@ async function cycle(signal: AbortSignal) {
           // Only one card per owner/segment can win. Bound the checkpoint, not the
           // number of source fills or the evidence used to choose that card.
           recordEvaluation(sweep, ordinal, evaluation);
+          retired.add(key);
           return "done";
         } catch (err) {
+          if (err instanceof JournalUnavailable) {
+            lost.abort();
+            return "retry";
+          }
+          if (
+            err instanceof PageContinuation ||
+            (walletTimer.aborted &&
+              err === walletTimer.reason &&
+              journal.saved > 0 &&
+              !stop.aborted)
+          ) {
+            reasons.page_continuation = (reasons.page_continuation ?? 0) + 1;
+            return "retry";
+          }
           errors++;
           const reason =
             err instanceof PolymarketDataApiV2Error
               ? `provider_${err.status}`
               : err instanceof Error &&
-                  /^(activity_checkpoint|wallet_activity_capacity|incomplete_pages|repeated_cursor|owner_mismatch|wallet_request_budget|cycle_request_budget)$/.test(
+                  /^(activity_checkpoint|wallet_activity_capacity|wallet_page_capacity|market_lookup_timeout|incomplete_pages|repeated_cursor|owner_mismatch|wallet_request_budget|cycle_request_budget)$/.test(
                     err.message,
                   )
                 ? err.message
@@ -237,33 +304,38 @@ async function cycle(signal: AbortSignal) {
             cooldown.abort();
           }
           if (reason === "cycle_request_budget" || stop.aborted) {
-            return reason === "cycle_request_budget"
-              ? "shared_budget"
-              : "retry";
+            return "retry";
           } else {
             const why: SourceFailure = walletTimer.aborted
               ? "wallet_timeout"
               : err instanceof PolymarketDataApiV2Error
                 ? err.reason === "invalid_cursor"
                   ? "invalid_cursor"
-                  : "provider_error"
+                  : err.reason === "protocol_contract"
+                    ? "provider_protocol_contract"
+                    : "provider_error"
                 : reason === "incomplete_pages" ||
                     reason === "owner_mismatch" ||
                     reason === "repeated_cursor" ||
                     reason === "wallet_request_budget" ||
-                    reason === "wallet_activity_capacity"
+                    reason === "wallet_activity_capacity" ||
+                    reason === "wallet_page_capacity" ||
+                    reason === "market_lookup_timeout"
                   ? reason
                   : "source_unavailable";
             const transient =
               why === "wallet_timeout" ||
               why === "invalid_cursor" ||
               why === "source_unavailable" ||
+              why === "market_lookup_timeout" ||
               (err instanceof PolymarketDataApiV2Error && err.retryable);
-            return walletFailure(sweep, ordinal, why, transient)
-              ? "retry"
-              : "done";
+            if (walletFailure(sweep, ordinal, why, transient)) return "retry";
+            retired.add(key);
+            return "done";
           }
         } finally {
+          pages.saved += journal.saved;
+          pages.replayed += journal.replayed;
           trimActivityCache();
         }
       },
@@ -292,6 +364,12 @@ async function cycle(signal: AbortSignal) {
         : decision;
     if (action === "checkpoint") {
       const saved = await save(encodeSweep(state));
+      if (Number(saved) === 1 && pages.saved + pages.replayed > 0)
+        console.info("[trader-collections] checkpoint", {
+          pages,
+          reasons,
+          pending: sweep.queue.length,
+        });
       if (Number(saved) === 1 && !cooldown.signal.aborted)
         next = Date.now() + 15000;
       return;
@@ -315,7 +393,12 @@ async function cycle(signal: AbortSignal) {
     state.publishedAt = finishedAt;
     const published = await command(() =>
       redis.eval(TRADER_PUBLISH, {
-        keys: [lock, ...collections.map((k) => prefix + k), progressKey],
+        keys: [
+          lock,
+          ...collections.map((k) => prefix + k),
+          progressKey,
+          ...retired,
+        ],
         arguments: [
           owner,
           ...collections.map((k) => JSON.stringify(snapshots[k])),
@@ -333,6 +416,7 @@ async function cycle(signal: AbortSignal) {
         coverage: progress(state),
         errors,
         reasons,
+        pages,
       });
     }
   } finally {

@@ -2,6 +2,7 @@ import type { Pool } from "@hunch/infra";
 import { discoveryReadOnly } from "./discovery.js";
 import { canonicalMarketTokenIdSql } from "./canonical-market-token-sql.js";
 import { buildWalletMmSuspectedSql } from "../services/wallet-intel-mm.js";
+import { walletIntelProtocolAddresses } from "../services/wallet-intel-protocol-addresses.js";
 import { buildWalletOwnerResolutionJoinSql } from "../services/wallet-owner-resolution-sql.js";
 import { publicHolderLabel } from "../services/hunch-public-presentation.js";
 import { units, type Market } from "../services/trader-collection-ledger.js";
@@ -19,33 +20,42 @@ export const TRADER_COHORT_SQL = `WITH recent_wallets AS MATERIALIZED (
  FROM recent_wallets s JOIN wallets w ON w.id=s.wallet_id LEFT JOIN wallet_onchain_state ws ON ws.wallet_id=w.id
  ${buildWalletOwnerResolutionJoinSql(true, "resolved_owner")}
  WHERE w.chain='polygon' AND w.address ~ '^0x[0-9a-fA-F]{40}$'
+ AND NOT (lower(w.address)=ANY($3::text[]))
  AND s.metrics_pnl_30d>0 AND s.metrics_resolved_edge_sample_count_30d>=20
  AND EXISTS(SELECT 1 FROM wallet_tracking_subjects sub WHERE sub.wallet_id=w.id AND sub.venue='polymarket'
  AND sub.status='active' AND sub.source IN ('recent_top_holder','whale','signal_candidate'))
  AND NOT ${buildWalletMmSuspectedSql({ exposureUsdSql: "s.exposure_usd", hedgedNotionalUsdSql: "s.hedged_notional_usd", hedgeRatioSql: "s.hedge_ratio", twoSidedMarketsSql: "s.two_sided_markets", exposureThresholdSql: "$2::numeric" })}
  ORDER BY s.last_activity_at DESC,s.wallet_id DESC LIMIT 50`;
+// Check frozen bindings for every asset, including historical instruments.
+// Defer event/category and venue checks, extract the protocol JSON only once,
+// and look up a quote only when it can actually be exposed by markets().
 export const TRADER_MARKETS_SQL = `WITH requested_assets AS MATERIALIZED (
  SELECT * FROM jsonb_to_recordset($1::jsonb) AS input_assets(t text,c text,i integer)
 ), mapped_assets AS MATERIALIZED (
  SELECT k.t,k.c,k.i,min(b.market_id) AS market_id,min(b.protocol_version) AS protocol_version,min(b.position_contract) AS position_contract
  FROM requested_assets k JOIN polymarket_asset_bindings b ON b.chain_id=137 AND b.asset_id=k.t AND b.condition_id=k.c AND b.outcome_index=k.i
- GROUP BY k.t,k.c,k.i HAVING count(*)=1)
- SELECT k.t,k.c,k.i,'137:'||k.position_contract||':'||k.protocol_version AS generation,m.id,m.title,m.event_id,coalesce(nullif(lower(m.category),''),nullif(lower(e.category),''),'other') AS category,
+ GROUP BY k.t,k.c,k.i HAVING count(*)=1), enriched_assets AS MATERIALIZED (
+ SELECT k.t,k.c,k.i,'137:'||k.position_contract||':'||k.protocol_version AS generation,m.id,m.title,m.event_id,
+ coalesce(nullif(lower(m.category),''),(SELECT nullif(lower(e.category),'') FROM unified_events e WHERE e.id=m.event_id),'other') AS category,
  CASE k.i WHEN 0 THEN 'YES' WHEN 1 THEN 'NO' END AS side,
  extract(epoch FROM least(m.close_time,m.expiration_time))::float8 AS tradable_until,
  (lower(m.condition_id)=k.c AND (m.resolved_outcome IS NOT NULL OR m.resolved_outcome_pct IS NOT NULL)) AS terminal,
- (m.status='ACTIVE' AND m.resolved_outcome IS NULL AND m.resolved_outcome_pct IS NULL AND pm.accepting_orders AND pm.active AND NOT pm.closed AND NOT pm.archived
+ (m.status='ACTIVE' AND m.resolved_outcome IS NULL AND m.resolved_outcome_pct IS NULL
+ AND (SELECT pm.accepting_orders AND pm.active AND NOT pm.closed AND NOT pm.archived FROM polymarket_markets pm WHERE pm.id=m.venue_market_id)
  AND (m.expiration_time IS NULL OR m.expiration_time>$2::timestamptz)
  AND (m.close_time IS NULL OR m.close_time>$2::timestamptz)
- AND lower(m.condition_id)=k.c AND m.metadata#>>'{polymarketProtocol,conditionId}'=k.c
- AND m.metadata#>>'{polymarketProtocol,protocolVersion}'=k.protocol_version
- AND lower(m.metadata#>>'{polymarketProtocol,positionContract}')=k.position_contract
- AND (m.metadata#>'{polymarketProtocol,assets}'->>k.i)=k.t
- AND k.t=CASE k.i WHEN 0 THEN ${canonicalMarketTokenIdSql("m", "YES")} WHEN 1 THEN ${canonicalMarketTokenIdSql("m", "NO")} END) AS active,
- q.best_ask::text AS ask,extract(epoch FROM q.ts)::bigint::text AS quote_at
+ AND lower(m.condition_id)=k.c AND protocol_row.protocol_doc->>'conditionId'=k.c
+ AND protocol_row.protocol_doc->>'protocolVersion'=k.protocol_version
+ AND lower(protocol_row.protocol_doc->>'positionContract')=k.position_contract
+ AND (protocol_row.protocol_doc->'assets'->>k.i)=k.t
+ AND k.t=CASE k.i WHEN 0 THEN ${canonicalMarketTokenIdSql("m", "YES")} WHEN 1 THEN ${canonicalMarketTokenIdSql("m", "NO")} END) AS active
  FROM mapped_assets k JOIN unified_markets m ON m.id=k.market_id AND m.venue='polymarket'
- LEFT JOIN unified_events e ON e.id=m.event_id LEFT JOIN polymarket_markets pm ON pm.id=m.venue_market_id
- LEFT JOIN unified_token_top_latest q ON q.token_id=k.t AND q.venue='polymarket'`;
+ CROSS JOIN LATERAL (SELECT CASE WHEN m.status='ACTIVE' THEN m.metadata->'polymarketProtocol' END AS protocol_doc OFFSET 0) protocol_row
+ ) SELECT enriched.*,q.best_ask::text AS ask,extract(epoch FROM q.ts)::bigint::text AS quote_at
+ FROM enriched_assets enriched LEFT JOIN LATERAL (
+ SELECT q.best_ask,q.ts FROM unified_token_top_latest q
+ WHERE enriched.active IS TRUE AND q.token_id=enriched.t AND q.venue='polymarket' OFFSET 0
+ ) q ON true`;
 export type Asset = {
   token: string;
   condition: string;
@@ -69,7 +79,11 @@ export class TraderRepository {
           address: string;
           owner_family: string;
           venue_name: string | null;
-        }>(TRADER_COHORT_SQL, [new Date(end * 1000), whaleUsd])
+        }>(TRADER_COHORT_SQL, [
+          new Date(end * 1000),
+          whaleUsd,
+          walletIntelProtocolAddresses(),
+        ])
       ).rows.map((r) => ({
         id: r.id,
         address: r.address,

@@ -87,6 +87,28 @@ try {
   assert.equal(owner(2).name, null); // no private label fallback
   assert.equal(owner(3).name, null); // raw address is never a display name
   assert.equal(owner(5).name, null); // stale primary no longer verified public
+  // A known protocol address can have stronger wallet metrics than a trader.
+  // Exclude it case-insensitively before the final cap, never by contract type.
+  const burnAddress = "0xa5ef39c3d3e10d0b270233af41cac69796b12966";
+  await pool.query(
+    `insert into wallets
+     select md5('new-'||n)::uuid,case when n=0 then '0x'||upper(substr($1::text,3)) else '0x'||lpad(to_hex(n),40,'0') end,
+       'polygon','{"kind":"safe"}',null from generate_series(0,50) n`,
+    [burnAddress],
+  );
+  await pool.query(`
+    insert into wallet_intel_selector_snapshot
+     select md5('new-'||n)::uuid,timestamptz '2026-11-12T11:30:00Z'-n*interval '1 second',0,0,0,1,100,21 from generate_series(0,50) n;
+    insert into wallet_tracking_subjects
+     select md5('new-'||n)::uuid,'polymarket','active','whale' from generate_series(0,50) n`);
+  const traderRoster = await repo.owners(end, 1000);
+  assert.deepEqual(
+    traderRoster.map((entry) => entry.address),
+    Array.from(
+      { length: 50 },
+      (_, i) => "0x" + (i + 1).toString(16).padStart(40, "0"),
+    ),
+  );
   const yes = asset("10", 0),
     no = asset("11", 1),
     old = asset("12", 1, previous);
@@ -101,6 +123,8 @@ try {
   assert.equal(matches.has(assetKey(ambiguous)), false);
   assert.equal(matches.get(assetKey(yes))?.active, true);
   assert.equal(matches.get(assetKey(yes))?.ask, 400000n);
+  assert.equal(matches.get(assetKey(yes))?.quoteAt, end - 60);
+  assert.equal((await repo.markets([], end)).size, 0);
   assert.equal(
     matches.get(assetKey(yes))?.tradableUntil,
     Date.parse("2026-11-13T00:00Z") / 1000,
@@ -114,6 +138,28 @@ try {
   assert.equal(history.instrument.generation, `137:${contract}:v1`);
   assert.equal(history.active, false);
   assert.equal(history.ask, null);
+  assert.equal(history.quoteAt, null);
+  const sparse = [
+    ...Array.from({ length: 249 }, (_, i) => asset(String(1000 + i), 0)),
+    yes,
+  ];
+  assert.deepEqual(
+    [...(await repo.markets(sparse, end))],
+    [[assetKey(yes), matches.get(assetKey(yes))]],
+  );
+  await pool.query("update unified_markets set category='FiNaNcE'");
+  await pool.query("update polymarket_markets set accepting_orders=false");
+  const paused = (await repo.markets([yes], end)).get(assetKey(yes));
+  assert.equal(paused?.category, "finance");
+  assert.equal(paused?.active, false);
+  assert.equal(paused?.ask, null);
+  assert.equal(paused?.quoteAt, null);
+  await pool.query("update polymarket_markets set accepting_orders=true");
+  await pool.query("delete from unified_token_top_latest where token_id='11'");
+  const unquoted = (await repo.markets([no], end)).get(assetKey(no));
+  assert.equal(unquoted?.active, true);
+  assert.equal(unquoted?.ask, null);
+  assert.equal(unquoted?.quoteAt, null);
   await pool.query(
     "update unified_market_tokens set outcome_side='NO' where token_id='10'",
   );
