@@ -6,12 +6,38 @@ import type {
 export const SNAPSHOT_TTL = 30 * 60,
   FRESH_FOR = 5 * 60,
   QUOTE_TTL = 300;
+export const PARTIAL_INTERVAL = 210,
+  NORMAL_INTERVAL = 90,
+  SLICE_SECONDS = 150,
+  TICK_SECONDS = 15;
+// Never defer a replacement just because an old-window final snapshot was
+// generated recently. Budget for the first normal partial and a running slice.
+export const replacementDue = (expiresAt: number, now: number) =>
+  expiresAt - now <= PARTIAL_INTERVAL + SLICE_SECONDS + TICK_SECONDS;
+export const delayNewSweep = (
+  generatedAt: number,
+  expiresAt: number,
+  now: number,
+) =>
+  now - generatedAt < NORMAL_INTERVAL &&
+  !replacementDue(expiresAt, now + NORMAL_INTERVAL);
+// Both sides of window expiry need the same prompt handoff, including when the
+// final valid evaluation finished too late to publish. Empty/unavailable
+// sweeps keep the normal backoff.
+export const expediteNextSweep = (
+  observed: number,
+  windowEnd: number,
+  now: number,
+) => observed > 0 && replacementDue(windowEnd + SNAPSHOT_TTL, now);
+// One bounded private queue; idle GC after the existing 7-day shortlist horizon.
+const SAVE_PROGRESS = `if ARGV[#ARGV]=='' then redis.call('DEL',KEYS[#KEYS])
+else redis.call('SET',KEYS[#KEYS],ARGV[#ARGV],'EX',604800) end`;
 export const TRADER_PUBLISH = `if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
 for i=2,4 do redis.call('SET',KEYS[i],ARGV[i],'EX',ARGV[5]) end
-if KEYS[5] then redis.call('DEL',KEYS[5]) end
+${SAVE_PROGRESS}
 return 1`;
 export const TRADER_CHECKPOINT = `if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
-redis.call('SET',KEYS[2],ARGV[2],'EX',600);return 1`;
+${SAVE_PROGRESS};return 1`;
 
 /** A connected Redis socket can stop responding or queue work while reconnecting.
  * On timeout discard only this lane's client, including any queued late command.
@@ -42,22 +68,24 @@ export function traderSliceAction(slice: {
   lostLease: boolean;
   cooling: boolean;
   remaining: number;
-  ageSeconds: number;
-  attempts: number;
+  sincePublication: number;
+  replaceExpiring?: boolean;
   selected: number;
   observed: number;
-}): "checkpoint" | "publish" | "retain" {
+}): "checkpoint" | "publish" | "retain" | "finish_without_publication" {
   if (slice.stopped || slice.lostLease) return "retain";
   // A venue cooldown is NOT a lost Redis lease. Keep the good observations and
   // unprocessed owners for a later holder; don't replace the public snapshot.
   if (slice.cooling) return slice.remaining ? "checkpoint" : "retain";
   if (
     slice.remaining &&
-    slice.ageSeconds < 210 &&
-    slice.attempts < 3 * slice.selected
+    ((!slice.replaceExpiring && slice.sincePublication < PARTIAL_INTERVAL) ||
+      !slice.observed)
   )
     return "checkpoint";
-  return slice.selected && !slice.observed ? "retain" : "publish";
+  return slice.selected && !slice.observed
+    ? "finish_without_publication"
+    : "publish";
 }
 export type LoadCollection = (
   k: Collection,

@@ -1,5 +1,7 @@
 import {
   collections,
+  rejectionCodes,
+  type RejectionCode,
   type Collection,
   type CollectionResponse,
   type TraderItem,
@@ -120,6 +122,7 @@ export function winningRun(
   closes: Close[],
   policy: TraderPolicy,
   full: boolean,
+  rejected?: (code: RejectionCode) => void,
 ) {
   const eligible = closes
     .filter(
@@ -137,7 +140,14 @@ export function winningRun(
     while (j < eligible.length && eligible[j].at === eligible[i].at) j++;
     const cohort = eligible.slice(i, j);
     if (cohort.some((c) => c.net < 0n)) {
-      if (cohort.some((c) => c.net > 0n)) return null;
+      if (cohort.some((c) => c.net > 0n)) {
+        rejected?.("streak_order_ambiguous");
+        return null;
+      }
+      if (n < 5) {
+        rejected?.("streak_interrupted_by_loss");
+        return null;
+      }
       boundary = true;
       break;
     }
@@ -145,9 +155,15 @@ export function winningRun(
     profit += sum(cohort.map((c) => c.net));
     i = j;
   }
-  return boundary && n >= 5
-    ? { n, profit, latest: eligible[0].at, count: eligible.length }
-    : null;
+  if (n < 5) {
+    rejected?.("too_few_verified_wins");
+    return null;
+  }
+  if (!boundary) {
+    rejected?.("streak_boundary_unknown");
+    return null;
+  }
+  return { n, profit, latest: eligible[0].at, count: eligible.length };
 }
 type Choice = {
   category: string;
@@ -167,9 +183,36 @@ export function candidates(
   policy = DEFAULT_TRADER_POLICY,
   quoteClock = end,
 ): CandidateMap {
+  return evaluateTrader(e, end, policy, quoteClock).choices;
+}
+export type Evaluation = {
+  choices: CandidateMap;
+  rejected: Partial<Record<Collection, RejectionCode>>;
+};
+const stages = new Map(rejectionCodes.map((key, i) => [key, i]));
+export function evaluateTrader(
+  e: Evidence,
+  end: number,
+  policy = DEFAULT_TRADER_POLICY,
+  quoteClock = end,
+): Evaluation {
   const out = emptyChoices(),
     floor = end - 30 * DAY,
     day = end - DAY;
+  const rejected: Evaluation["rejected"] = {};
+  const note = (key: Collection, code: RejectionCode) => {
+    const prev = rejected[key];
+    if (!prev || (stages.get(code) ?? -1) > (stages.get(prev) ?? -1))
+      rejected[key] = code;
+  };
+  const shared = (code: RejectionCode) => {
+    for (const key of collections) note(key, code);
+  };
+  const result = () => {
+    for (const key of collections) if (out[key].length) delete rejected[key];
+    return { choices: out, rejected };
+  };
+  shared("no_catalog_category");
   const historyDays = Math.floor((end - e.historyStart) / DAY);
   const extra = e.supplemental ?? [];
   const global =
@@ -181,27 +224,45 @@ export function candidates(
           ),
         ) + sum(extra.map((v) => v.net30 ?? 0n));
   // An unclassified economic gap could belong to any segment.
-  if (
-    e.gaps.has("*") ||
-    historyDays < policy.minDays ||
-    (global !== null && global <= 0n)
-  )
-    return out;
+  const globalReason = e.gaps.has("*")
+    ? "unclassified_evidence"
+    : historyDays < policy.minDays
+      ? "history_too_short"
+      : global !== null && global <= 0n
+        ? "wallet_profit_not_positive"
+        : null;
+  if (globalReason) {
+    shared(globalReason);
+    return result();
+  }
   const allClosed = e.ledgers.flatMap((x) => x.ledger.closes);
   const completed = Math.max(allClosed.length, e.distinctClosed ?? 0);
-  if (completed < policy.minCloses) return out;
+  if (completed < policy.minCloses) {
+    shared("too_few_closes");
+    return result();
+  }
+  // Conflicting catalog evidence can leave only a named gap, without any
+  // usable ledger or supplemental row in that category.
+  if ([...e.gaps].some((g) => g !== "outside_catalog" && g !== "*"))
+    shared("category_evidence_gap");
   const paired = indexPairedExposure(e.ledgers);
   for (const category of new Set([
     ...e.ledgers.map((x) => x.market.category),
     ...extra.map((x) => x.category),
   ])) {
-    if (e.gaps.has(category)) continue;
+    if (e.gaps.has(category)) {
+      shared("category_evidence_gap");
+      continue;
+    }
     const ls = e.ledgers.filter((x) => x.market.category === category),
       closes = ls.flatMap((x) => x.ledger.closes);
     const past = closes.filter((c) => c.at > floor),
       today = past.filter((c) => c.at > day);
     const others = extra.filter((v) => v.category === category);
-    if (others.some((v) => v.net30 === null)) continue;
+    if (others.some((v) => v.net30 === null)) {
+      shared("unknown_category_profit_30d");
+      continue;
+    }
     const inc = ls.flatMap((x) => x.ledger.income),
       p30 =
         sum(inc.filter((r) => r.at > floor).map((r) => r.net)) +
@@ -209,14 +270,22 @@ export function candidates(
       p24 =
         sum(inc.filter((r) => r.at > day).map((r) => r.net)) +
         sum(others.map((v) => v.net24 ?? 0n));
-    if (
-      p30 <= 0n ||
-      sum(ls.map((x) => x.ledger.openLoss)) +
-        sum(others.map((v) => v.openLoss)) >=
-        p30 ||
-      (!past.length && !others.some((v) => v.nativeClosedInWindow))
-    )
+    const categoryReason =
+      p30 <= 0n
+        ? "category_profit_not_positive"
+        : sum(ls.map((x) => x.ledger.openLoss)) +
+              sum(others.map((v) => v.openLoss)) >=
+            p30
+          ? "open_losses_offset_profit"
+          : !past.length && !others.some((v) => v.nativeClosedInWindow)
+            ? "no_completed_position_in_window"
+            : null;
+    if (categoryReason) {
+      shared(categoryReason);
       continue;
+    }
+    const moveReason = (code: RejectionCode) => note("big-moves", code);
+    moveReason("no_recent_retained_buy");
     let median: ReturnType<typeof priorStakeMedian> | undefined;
     // A native accounting fallback may prove a completed stake even without
     // a fee-complete episode. An unknown qualifying stake anywhere in the
@@ -233,10 +302,26 @@ export function candidates(
     );
     const suitable = ls
       .flatMap(({ market: m, ledger: l }) => {
+        const retained = (v: (typeof l.moves)[number]) =>
+          v.at > end - policy.moveSeconds &&
+          v.at <= end &&
+          l.current > v.before;
+        const uncertain =
+          e.uncertainExposureConditions?.has(m.condition) ||
+          e.uncertainExposureConditions?.has(exposureKey(m));
+        const explainSkipped = (code: RejectionCode) => {
+          for (const v of l.moves) {
+            if (!retained(v)) continue;
+            if (v.cash >= policy.minMove) {
+              moveReason(code);
+              return;
+            }
+            moveReason("move_below_minimum");
+          }
+        };
         if (
           !m.active ||
-          e.uncertainExposureConditions?.has(m.condition) ||
-          e.uncertainExposureConditions?.has(exposureKey(m)) ||
+          uncertain ||
           (m.tradableUntil != null && m.tradableUntil <= quoteClock) ||
           !m.ask ||
           m.ask >= UNIT ||
@@ -244,10 +329,17 @@ export function candidates(
           m.quoteAt < quoteClock - policy.quoteSeconds ||
           m.quoteAt > quoteClock + 60 ||
           l.current <= 0n
-        )
+        ) {
+          explainSkipped(
+            uncertain ? "exposure_uncertain" : "market_or_quote_unavailable",
+          );
           return [];
+        }
         const ask = m.ask;
-        if (l.current * ask < policy.dust * UNIT) return [];
+        if (l.current * ask < policy.dust * UNIT) {
+          explainSkipped("remaining_position_dust");
+          return [];
+        }
         const quote = {
           ask: fmt(ask),
           asOf: iso(m.quoteAt),
@@ -263,12 +355,9 @@ export function candidates(
         // Most recent first also preserves the observed ordering of two
         // increases in the same instrument/second after the stable time sort.
         return [...l.moves].reverse().flatMap((latest) => {
-          if (
-            latest.at <= end - policy.moveSeconds ||
-            latest.at > end ||
-            l.current <= latest.before ||
-            (latest.cash < policy.dust && latest.cash < policy.minMove)
-          )
+          if (!retained(latest)) return [];
+          if (latest.cash < policy.minMove) moveReason("move_below_minimum");
+          if (latest.cash < policy.dust && latest.cash < policy.minMove)
             return [];
           const price = ratio(latest.cash, latest.shares);
           const drift = ask > price ? ask - price : price - ask;
@@ -276,10 +365,16 @@ export function candidates(
             price <= 0n ||
             price >= UNIT ||
             drift > policy.maxDrift ||
-            drift * 10n > price ||
-            paired(m, latest, price, policy.dust)
-          )
+            drift * 10n > price
+          ) {
+            if (latest.cash >= policy.minMove)
+              moveReason("price_not_comparable");
             return [];
+          }
+          if (paired(m, latest, price, policy.dust)) {
+            if (latest.cash >= policy.minMove) moveReason("paired_exposure");
+            return [];
+          }
           // Small suitable entries may be the latest opportunity but need no
           // typical-stake calculation when they cannot qualify as a Big Move.
           const typical =
@@ -289,13 +384,18 @@ export function candidates(
                   policy.dust,
                 ))(latest.at)
               : 0n;
+          const relative = ratio(latest.cash, typical);
+          if (latest.cash >= policy.minMove && relative < policy.minRelative)
+            moveReason(
+              typical === 0n ? "typical_stake_unknown" : "below_typical_stake",
+            );
           return [
             {
               l,
               m,
               latest,
               price,
-              relative: ratio(latest.cash, typical),
+              relative,
               quote,
             },
           ];
@@ -359,6 +459,7 @@ export function candidates(
       past.filter((c) => c.at > fence),
       policy,
       e.completeLifetime && !fence,
+      (code) => note("winning-streaks", code),
     );
     if (run)
       add(
@@ -373,7 +474,13 @@ export function candidates(
         `${run.n} qualifying wins, +$${fmt(run.profit)} realized.`,
         [BigInt(run.n), run.profit, BigInt(closes.length), p30],
       );
-    if (p24 > 0n && others.every((v) => v.net24 !== null)) {
+    const dailyKnown = others.every((v) => v.net24 !== null);
+    if (!dailyKnown || p24 <= 0n)
+      note(
+        "top-earners-today",
+        dailyKnown ? "daily_profit_not_positive" : "daily_profit_unknown",
+      );
+    if (p24 > 0n && dailyKnown) {
       const closeDetailsComplete = fence <= day;
       const best = today
         .filter((c) => c.net > 0n)
@@ -442,7 +549,7 @@ export function candidates(
       );
     }
   }
-  return out;
+  return result();
 }
 export function assemble(
   sets: CandidateMap[],
