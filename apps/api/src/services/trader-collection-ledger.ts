@@ -67,6 +67,9 @@ export type Market = {
   index: number;
   active: boolean;
   terminal?: boolean;
+  winner?: "YES" | "NO" | null;
+  resolvedAt?: number | null;
+  markBid?: bigint | null;
   tradableUntil?: number | null;
   ask: bigint | null;
   quoteAt: number | null;
@@ -89,6 +92,8 @@ export type Increase = {
   retained?: bigint;
 };
 export type Ledger = {
+  positionAsOf?: number;
+  unmarkedBasis?: bigint;
   closes: Close[];
   income: { at: number; net: bigint }[];
   moves: Increase[];

@@ -154,12 +154,12 @@ const after = choices(held);
 assert.equal(before["big-moves"].length, 1);
 assert.equal(after["big-moves"].length, 1);
 assert.equal(
-  after["big-moves"][0].item.latestOpenPosition?.lastConfirmedIncreaseAt,
+  after["big-moves"][0].item.latestOpenPosition?.lastObservedIncreaseAt,
   iso(first),
 );
 const achievement = after["big-moves"][0].item.achievement;
 assert.ok(achievement.kind === "big_move");
-assert.equal(achievement.committedUsd, "1000");
+assert.equal(achievement.estimatedIncreaseUsd, "1000");
 assert.equal(achievement.relativeToTypical, "2");
 // Evidence is frozen at end; asks collected by later work slices use the
 // live observation clock, with their own explicit freshness/market expiry.
@@ -226,12 +226,12 @@ const two = choices(
   ),
 );
 assert.equal(
-  two["big-moves"][0].item.latestOpenPosition?.lastConfirmedIncreaseAt,
+  two["big-moves"][0].item.latestOpenPosition?.lastObservedIncreaseAt,
   iso(biggerTopup.time),
 );
 assert.equal(
   two["big-moves"][0].item.achievement.kind === "big_move" &&
-    two["big-moves"][0].item.achievement.transactionAt,
+    two["big-moves"][0].item.achievement.observedAt,
   iso(first),
 );
 // The large increase from 100 to 2,100 shares was completely unwound. A
@@ -339,10 +339,7 @@ assert.equal(unpriced["big-moves"].length, 0);
 // when daily amount, close count and largest episode metadata are established.
 const daily = unpriced["top-earners-today"][0];
 assert.ok(daily);
-assert.equal(
-  daily.item.latestOpenPosition?.lastConfirmedIncreaseAt,
-  iso(first),
-);
+assert.equal(daily.item.latestOpenPosition?.lastObservedIncreaseAt, iso(first));
 const afterFill = fallbackRanks([
   {
     ...fixtureFallback,
@@ -462,8 +459,8 @@ const asIncrement = directional(inventory.ledger, [
   leg(opposite, [trade(first - 10, 1000, 500)]),
 ])["big-moves"][0].item.achievement;
 assert.ok(asIncrement.kind === "big_move");
-assert.equal(asIncrement.transactionAt, iso(first));
-assert.equal(asIncrement.committedUsd, "1000");
+assert.equal(asIncrement.observedAt, iso(first));
+assert.equal(asIncrement.estimatedIncreaseUsd, "1000");
 for (const key of [
   market.condition,
   market.condition + ":" + market.instrument.generation,
@@ -645,12 +642,12 @@ const soleWins = evaluateTrader(matchedSales, end);
 const streak = soleWins.choices["winning-streaks"][0]?.item.achievement;
 assert.ok(streak?.kind === "winning_streak");
 assert.equal(streak.currentLength, 19);
-assert.equal(streak.streakNetRealizedUsd, "190");
+assert.equal(streak.estimatedStreakPnlUsd, "190");
 const earnedToday = soleWins.choices["top-earners-today"][0]?.item.achievement;
 assert.ok(earnedToday?.kind === "top_earner_24h");
-assert.equal(earnedToday.netRealized24hUsd, "10");
+assert.equal(earnedToday.estimatedNetPnl24hUsd, "10");
 assert.equal(earnedToday.completedPositionCount24h, 1);
-assert.equal(earnedToday.largestProfitableClose?.episodeNetRealizedUsd, "10");
+assert.equal(earnedToday.largestProfitableClose?.estimatedEpisodePnlUsd, "10");
 const soleLoss = evaluateTrader(await soleSaleFixture(true), end);
 assert.equal(soleLoss.choices["winning-streaks"].length, 0);
 assert.equal(

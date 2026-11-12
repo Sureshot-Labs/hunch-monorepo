@@ -45,6 +45,10 @@ export type Supplemental = {
   uncertainClose: number;
 };
 export type Evidence = {
+  observedWindow?: boolean;
+  exposureUncertainThrough?: Map<string, number>;
+  observedBasis?: boolean;
+  estimatedIncomplete?: boolean;
   uncertainExposureConditions?: Set<string>;
   distinctClosed?: number;
   positionWindowFallback?: boolean;
@@ -123,6 +127,7 @@ export function winningRun(
   policy: TraderPolicy,
   full: boolean,
   rejected?: (code: RejectionCode) => void,
+  observedWindow = false,
 ) {
   const eligible = closes
     .filter(
@@ -156,14 +161,20 @@ export function winningRun(
     i = j;
   }
   if (n < 5) {
-    rejected?.("too_few_verified_wins");
+    rejected?.("too_few_observed_wins");
     return null;
   }
-  if (!boundary) {
+  if (!boundary && !observedWindow) {
     rejected?.("streak_boundary_unknown");
     return null;
   }
-  return { n, profit, latest: eligible[0].at, count: eligible.length };
+  return {
+    n,
+    profit,
+    latest: eligible[0].at,
+    count: eligible.length,
+    lowerBound: !boundary,
+  };
 }
 type Choice = {
   category: string;
@@ -270,22 +281,25 @@ export function evaluateTrader(
       p24 =
         sum(inc.filter((r) => r.at > day).map((r) => r.net)) +
         sum(others.map((v) => v.net24 ?? 0n));
+    const openLoss =
+      sum(ls.map((x) => x.ledger.openLoss)) +
+      sum(others.map((v) => v.openLoss));
     const categoryReason =
       p30 <= 0n
         ? "category_profit_not_positive"
-        : sum(ls.map((x) => x.ledger.openLoss)) +
-              sum(others.map((v) => v.openLoss)) >=
-            p30
+        : openLoss >= p30
           ? "open_losses_offset_profit"
-          : !past.length && !others.some((v) => v.nativeClosedInWindow)
-            ? "no_completed_position_in_window"
-            : null;
+          : openLoss + sum(ls.map((x) => x.ledger.unmarkedBasis ?? 0n)) >= p30
+            ? "open_loss_mark_unavailable"
+            : !past.length && !others.some((v) => v.nativeClosedInWindow)
+              ? "no_completed_position_in_window"
+              : null;
     if (categoryReason) {
       shared(categoryReason);
       continue;
     }
     const moveReason = (code: RejectionCode) => note("big-moves", code);
-    moveReason("no_recent_retained_buy");
+    moveReason("no_recent_position_increase");
     let median: ReturnType<typeof priorStakeMedian> | undefined;
     // A native accounting fallback may prove a completed stake even without
     // a fee-complete episode. An unknown qualifying stake anywhere in the
@@ -356,6 +370,13 @@ export function evaluateTrader(
         // increases in the same instrument/second after the stable time sort.
         return [...l.moves].reverse().flatMap((latest) => {
           if (!retained(latest)) return [];
+          if (
+            latest.at <=
+            (e.exposureUncertainThrough?.get(exposureKey(m)) ?? -Infinity)
+          ) {
+            if (latest.cash >= policy.minMove) moveReason("exposure_uncertain");
+            return [];
+          }
           if (latest.cash < policy.minMove) moveReason("move_below_minimum");
           if (latest.cash < policy.dust && latest.cash < policy.minMove)
             return [];
@@ -411,10 +432,10 @@ export function evaluateTrader(
       ? {
           instrument: current.m.instrument,
           shares: fmt(current.l.current),
-          entryPrice: fmt(current.price),
+          observedPrice: fmt(current.price),
           quote: current.quote,
-          positionAsOf: iso(end),
-          lastConfirmedIncreaseAt: iso(current.latest.at),
+          positionAsOf: iso(current.l.positionAsOf ?? end),
+          lastObservedIncreaseAt: iso(current.latest.at),
           liquidityUsd: null,
           priceDrift: "within_policy",
         }
@@ -436,8 +457,8 @@ export function evaluateTrader(
             displayName: e.owner.name,
           },
           rank: 1,
-          realized30dUsd: global === null ? null : fmt(global),
-          categoryRealized30dUsd: fmt(p30),
+          estimatedClosedPnl30dUsd: global === null ? null : fmt(global),
+          estimatedCategoryClosedPnl30dUsd: fmt(p30),
           completedPositions: completed,
           historyDays,
           latestOpenPosition,
@@ -445,6 +466,9 @@ export function evaluateTrader(
           evidenceAsOf: iso(end),
           flags: [
             "catalog_scoped",
+            "wallet_intel_estimate",
+            ...(e.observedBasis ? ["snapshot_mark_basis"] : []),
+            ...(e.estimatedIncomplete ? ["unknown_cost_basis_omitted"] : []),
             ...(e.positionWindowFallback ? ["position_window_reconciled"] : []),
             ...(global === null ? ["wallet_total_incomplete"] : []),
             ...(current ? ["depth_not_verified"] : []),
@@ -460,6 +484,7 @@ export function evaluateTrader(
       policy,
       e.completeLifetime && !fence,
       (code) => note("winning-streaks", code),
+      e.observedWindow,
     );
     if (run)
       add(
@@ -467,11 +492,12 @@ export function evaluateTrader(
         {
           kind: "winning_streak",
           currentLength: run.n,
-          streakNetRealizedUsd: fmt(run.profit),
+          lengthIsLowerBound: run.lowerBound,
+          estimatedStreakPnlUsd: fmt(run.profit),
           qualifyingCompletedPositions: run.count,
           latestWinAt: iso(run.latest),
         },
-        `${run.n} qualifying wins, +$${fmt(run.profit)} realized.`,
+        `${run.lowerBound ? "At least " : ""}${run.n} observed wins, approximately +$${fmt(run.profit)} across these positions.`,
         [BigInt(run.n), run.profit, BigInt(closes.length), p30],
       );
     const dailyKnown = others.every((v) => v.net24 !== null);
@@ -489,20 +515,20 @@ export function evaluateTrader(
         "top-earners-today",
         {
           kind: "top_earner_24h",
-          netRealized24hUsd: fmt(p24),
+          estimatedNetPnl24hUsd: fmt(p24),
           closeDetailsComplete,
           completedPositionCount24h: closeDetailsComplete ? today.length : null,
           largestProfitableClose:
             closeDetailsComplete && best
               ? {
                   instrument: best.instrument,
-                  episodeNetRealizedUsd: fmt(best.net),
+                  estimatedEpisodePnlUsd: fmt(best.net),
                   completedAt: iso(best.at),
                 }
               : null,
           roi30d: null,
         },
-        `+$${fmt(p24)} realized in the past 24 hours.`,
+        `Estimated +$${fmt(p24)} on observed positions in the past 24 hours.`,
         [p24, BigInt(closes.length), p30],
       );
     }
@@ -516,7 +542,7 @@ export function evaluateTrader(
       p30,
       x.relative,
       x.latest.cash,
-      BigInt(x.latest.at),
+      BigInt(Math.round(x.latest.at * 1e6)),
     ];
     const x = significant.reduce<(typeof suitable)[number] | undefined>(
       (best, candidate) =>
@@ -533,18 +559,18 @@ export function evaluateTrader(
           eventType:
             x.latest.before === 0n ? "new_position" : "position_increased",
           instrument: x.m.instrument,
-          committedUsd: fmt(x.latest.cash),
+          estimatedIncreaseUsd: fmt(x.latest.cash),
           sharesBefore: fmt(x.latest.before),
           sharesAfter: fmt(x.latest.after),
-          fillVwap: fmt(x.price),
-          transactionAt: iso(x.latest.at),
-          positionAsOf: iso(end),
-          stillOpen: true,
+          observationPrice: fmt(x.price),
+          observedAt: iso(x.latest.at),
+          positionAsOf: iso(x.l.positionAsOf ?? end),
+          openAtLastObservation: true,
           quote: x.quote,
           liquidityUsd: null,
           relativeToTypical: fmt(x.relative),
         },
-        `Bought $${fmt(x.latest.cash)} at ${fmt(x.price * 100n)}¢; still holding.`,
+        `Position grew by approximately $${fmt(x.latest.cash)}.`,
         movePriority(x),
       );
     }
@@ -595,10 +621,10 @@ export function assemble(
             eligibleWallets: families.size,
             basis:
               collection === "big-moves"
-                ? ("verified_fills" as const)
+                ? ("observed_position_deltas" as const)
                 : collection === "winning-streaks"
-                  ? ("verified_episodes" as const)
-                  : ("verified_realizations" as const),
+                  ? ("inferred_closed_positions" as const)
+                  : ("estimated_realizations" as const),
           },
           sourceAsOf: iso(end),
           items,
@@ -611,7 +637,7 @@ export function assemble(
         windowStart: collection === "winning-streaks" ? null : iso(end - DAY),
         windowEnd: iso(end),
         policyVersion: 1,
-        methodologyVersion: 1,
+        methodologyVersion: 2,
         freshness: "fresh",
         groups,
       };

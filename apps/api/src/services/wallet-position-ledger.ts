@@ -92,7 +92,7 @@ function parseNumber(value: unknown): number | null {
   return null;
 }
 
-function emptyLedgerState(): WalletPositionLedgerState {
+export function emptyLedgerState(): WalletPositionLedgerState {
   return {
     remainingShares: 0,
     remainingBasisUsd: 0,
@@ -139,9 +139,8 @@ export function sharesApproximatelyMatch(
 
 export function replayWalletPositionLedgerRows(
   rows: WalletPositionLedgerRow[],
+  state: WalletPositionLedgerState = emptyLedgerState(),
 ): WalletPositionLedgerState {
-  const state = emptyLedgerState();
-
   for (const row of rows) {
     if (!state.lastActivityAt || row.occurredAt > state.lastActivityAt) {
       state.lastActivityAt = row.occurredAt;

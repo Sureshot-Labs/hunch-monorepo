@@ -25,16 +25,19 @@ try {
   );
   await pool.query(`
     set search_path=pg_temp,pg_catalog;
-    create temp table wallets(id uuid primary key,address text,chain text,metadata jsonb,label text);
+    create temp table wallets(id uuid primary key,address text,chain text,metadata jsonb,label text,first_seen_at timestamptz);
     create temp table wallet_onchain_state(wallet_id uuid primary key,owner_wallet_id uuid);
     create temp table wallet_tracking_subjects(wallet_id uuid,venue text,status text,source text);
+    create temp table wallet_activity_events(id uuid primary key,wallet_id uuid,occurred_at timestamptz,venue text,activity_type text,action text,metadata jsonb,size_usd numeric,source text,delta_shares numeric,market_id text,outcome_side text,price numeric,created_at timestamptz);
+    create index on wallet_activity_events(wallet_id, occurred_at desc);
+    create temp table wallet_position_snapshots(wallet_id uuid,venue text,market_id text,outcome_side text,snapshot_at timestamptz,shares numeric,metadata jsonb,price numeric);
     create temp table wallet_intel_selector_snapshot(wallet_id uuid primary key,last_activity_at timestamptz,hedge_ratio numeric,hedged_notional_usd numeric,two_sided_markets int,exposure_usd numeric,metrics_pnl_30d numeric,metrics_resolved_edge_sample_count_30d int);
     create temp table polymarket_asset_bindings(chain_id int,asset_id text,condition_id text,outcome_index int,market_id text,protocol_version text,position_contract text);
     create temp table unified_market_tokens(market_id text,token_id text,venue text,outcome_side text,updated_at timestamptz);
-    create temp table unified_markets(id text primary key,venue text,title text,event_id text,category text,condition_id text,metadata jsonb,resolved_outcome text,resolved_outcome_pct numeric,status text,expiration_time timestamptz,close_time timestamptz,venue_market_id text);
+    create temp table unified_markets(id text primary key,venue text,title text,event_id text,category text,condition_id text,metadata jsonb,resolved_outcome text,resolved_outcome_pct numeric,status text,expiration_time timestamptz,close_time timestamptz,venue_market_id text,resolution_observed_at timestamptz);
     create temp table unified_events(id text primary key,category text);
     create temp table polymarket_markets(id text primary key,accepting_orders boolean,active boolean,closed boolean,archived boolean);
-    create temp table unified_token_top_latest(token_id text primary key,venue text,ts timestamptz,best_ask numeric);
+    create temp table unified_token_top_latest(token_id text primary key,venue text,ts timestamptz,best_ask numeric,best_bid numeric);
     insert into wallets select md5(n::text)::uuid,'0x'||repeat(n::text,40),case n when 6 then 'base' else 'polygon' end,'{}','Private label' from generate_series(1,7) n;
     insert into wallet_intel_selector_snapshot select id,'2026-11-12T11:00Z',0,0,0,1,100,21 from wallets;
     insert into wallet_tracking_subjects select id,'polymarket',case when id=md5('7')::uuid then 'paused' else 'active' end,'whale' from wallets where id<>md5('4')::uuid;
@@ -109,6 +112,30 @@ try {
       (_, i) => "0x" + (i + 1).toString(16).padStart(40, "0"),
     ),
   );
+  await pool.query(`insert into wallet_activity_events values
+    (md5('close')::uuid,md5('1')::uuid,'2026-11-12T10:15Z','polymarket','delta','SELL','{"snapshotSource":"polymarket","prevShares":"3.5","currShares":"0.000"}',12,'snapshot_delta',3.5,'m','YES'),
+    (md5('buy')::uuid,md5('2')::uuid,'2026-11-12T11:15Z','polymarket','delta','BUY','{"snapshotSource":"polymarket"}',505,'snapshot_delta',1010,'m','YES'),
+    (md5('private')::uuid,md5('3')::uuid,'2026-11-12T11:15Z','polymarket','trade','BUY','{}',99999,'hunch_order_fill',200000,'m','YES'),
+    (md5('synthetic')::uuid,md5('5')::uuid,'2026-11-12T11:15Z','polymarket','delta','SELL','{"snapshotSource":"polymarket","prevShares":"2","currShares":"0"}',99999,'snapshot_delta',2,'m','YES');
+    insert into wallet_position_snapshots values(md5('1')::uuid,'polymarket','m','YES','2026-11-12T10:15Z',0,'{"source":"polymarket","tokenId":"10"}'),
+    (md5('5')::uuid,'polymarket','m','YES','2026-11-12T11:15Z',0,'{"source":"snapshot_zero","tokenId":"10"}')`);
+  const hinted = await repo.owners(end, 1000);
+  assert.equal(hinted.length, 50);
+  assert.equal(new Set(hinted.map((o) => o.id)).size, 50);
+  assert.deepEqual(
+    hinted.slice(0, 2).map((o) => o.address),
+    [addr(1), addr(2)],
+  );
+  assert.ok(
+    !hinted.some((o) => o.address === addr(3) || o.address === addr(5)),
+  );
+  await pool.query(`insert into unified_markets(id,event_id,venue,resolved_outcome,resolution_observed_at) values ('settled','e','polymarket','NO','2026-11-12T11:59Z');
+   insert into wallet_activity_events values(md5('old-holding')::uuid,md5('5')::uuid,'2026-11-09T09:00Z','polymarket','delta','BUY','{"snapshotSource":"polymarket","prevShares":"0","currShares":"10"}',4,'snapshot_delta',10,'settled','NO')`);
+  assert.equal(
+    (await repo.owners(end, 1000))[0].address,
+    addr(5),
+    "an observed holding in a newly settled market supplies a closure hint without a zero snapshot",
+  );
   const yes = asset("10", 0),
     no = asset("11", 1),
     old = asset("12", 1, previous);
@@ -117,6 +144,64 @@ try {
   const matches = await repo.markets(
     [yes, no, old, yes, wrongIndex, ambiguous],
     end,
+  );
+  const boundMarket = matches.get(assetKey(yes))?.instrument.marketId;
+  assert.ok(boundMarket);
+  const localKey = { ...yes, condition: boundMarket };
+  const localMarkets = await repo.markets([localKey], end, undefined, true);
+  assert.equal(
+    localMarkets.get(assetKey(localKey))?.instrument.marketId,
+    boundMarket,
+  );
+  assert.equal(localMarkets.get(assetKey(localKey))?.winner, null);
+  await pool.query(
+    `insert into wallet_activity_events(id,wallet_id,occurred_at,created_at,venue,market_id,outcome_side,activity_type,action,source,delta_shares,price,metadata)
+    select md5('micro-'||n)::uuid,md5('7')::uuid,timestamptz '2026-11-12T11:00:00.123456Z','2026-11-12T11:00Z','polymarket',$1,'YES','delta','BUY','snapshot_delta',10,.4,'{"snapshotSource":"polymarket","tokenId":"10","prevShares":"0","currShares":"10"}'::jsonb from generate_series(1,1003) n`,
+    [boundMarket],
+  );
+  const microid = (await pool.query("select md5('7')::uuid as id")).rows[0].id;
+  const firstPage = await repo.localPage(
+    microid,
+    "2026-11-12T10:00Z",
+    "00000000-0000-0000-0000-000000000000",
+    end,
+  );
+  assert.equal(firstPage.length, 1000);
+  const last = firstPage.at(-1);
+  assert.ok(last);
+  assert.ok(last.stamp.includes(".123456"));
+  const nextPage = await repo.localPage(microid, last.stamp, last.id, end);
+  assert.equal(nextPage.length, 3);
+  assert.equal(
+    new Set([...firstPage, ...nextPage].map((r) => r.id)).size,
+    1003,
+  );
+  assert.equal(nextPage[0].token, "10");
+  assert.equal(nextPage[0].comparable_before, false);
+  assert.equal(nextPage[0].has_prior_snapshot, false);
+  await pool.query(
+    `insert into wallet_position_snapshots values(md5('7')::uuid,'polymarket','m','YES','2026-11-12T10:00Z',0,'{"source":"snapshot_zero","tokenId":"10"}',.4)`,
+  );
+  assert.equal(
+    (await repo.localPage(microid, last.stamp, last.id, end))[0]
+      .comparable_before,
+    false,
+  );
+  await pool.query(
+    `update wallet_position_snapshots set metadata='{"source":"polymarket","tokenId":"11"}' where wallet_id=md5('7')::uuid`,
+  );
+  assert.equal(
+    (await repo.localPage(microid, last.stamp, last.id, end))[0]
+      .comparable_before,
+    false,
+  );
+  await pool.query(
+    `update wallet_position_snapshots set metadata='{"source":"polymarket","tokenId":"10"}' where wallet_id=md5('7')::uuid`,
+  );
+  assert.equal(
+    (await repo.localPage(microid, last.stamp, last.id, end))[0]
+      .comparable_before,
+    true,
   );
   assert.equal(matches.size, 3);
   assert.equal(matches.has(assetKey(wrongIndex)), false);

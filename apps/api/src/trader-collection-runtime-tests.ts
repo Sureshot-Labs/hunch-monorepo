@@ -128,9 +128,9 @@ let state = createSweep(owners, end);
 const obs = {
   choices: emptyChoices(),
   rejected: {
-    "big-moves": "no_recent_retained_buy",
+    "big-moves": "no_recent_position_increase",
     "top-earners-today": "daily_profit_unknown",
-    "winning-streaks": "too_few_verified_wins",
+    "winning-streaks": "too_few_observed_wins",
   },
 } as const;
 for (const [round, n] of [13, 16, 13, 8].entries()) {
