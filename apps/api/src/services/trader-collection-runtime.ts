@@ -266,15 +266,7 @@ async function cycle(signal: AbortSignal) {
             if (rows.length < 1000) {
               scanning = false;
               const e = await localEvidence(calc, o, repo, stop);
-              for (const leg of e.ledgers) {
-                cats.add(leg.market.category);
-                if (
-                  ordinal < 50 &&
-                  sweep.streakCategories &&
-                  !sweep.streakCategories.includes(leg.market.category)
-                )
-                  sweep.streakCategories.push(leg.market.category);
-              }
+              for (const leg of e.ledgers) cats.add(leg.market.category);
               recordEvaluation(
                 sweep,
                 ordinal,

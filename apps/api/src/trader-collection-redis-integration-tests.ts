@@ -290,15 +290,35 @@ try {
     }
   }
   assert.equal(await redis.get(checkpoint), null);
-  // Observing earnings ordinals 50..99 cannot overwrite a valid Streaks
-  // ranking when none of its own first 50 wallets could be read.
-  const larger = createSweep([...s.owners, ...s.owners], end);
-  larger.evaluated[70] = { choices: emptyChoices(), rejected: {} };
+  // With zero observations neither shortlist tab may replace a ranked snapshot.
+  // An observation in the second half counts for both, never for global Moves.
+  const larger = createSweep(
+    [
+      ...s.owners,
+      ...s.owners.map((o) => ({
+        ...o,
+        id: "tail-" + o.id,
+        family: "tail-" + o.family,
+      })),
+    ],
+    end,
+  );
+  const empty = sweepSnapshots(larger, "not-ready", end);
+  assert.deepEqual(
+    collections.map((k) => shortlistPublication(empty[k])),
+    ["", "", ""],
+  );
+  larger.evaluated[70] = {
+    choices: emptyChoices(),
+    rejected: { "winning-streaks": "too_few_observed_wins" },
+  };
+  larger.attempts[70]++;
+  larger.queue = larger.queue.filter((i) => i !== 70);
   const tail = sweepSnapshots(larger, "tail-only", end);
   const retained = await read();
   const payload = collections.map((k) => shortlistPublication(tail[k]));
   assert.equal(payload[0], "");
-  assert.equal(payload[2], "");
+  assert.ok(payload[2]);
   assert.equal(
     await redis.eval(TRADER_PUBLISH, {
       keys,
@@ -308,7 +328,13 @@ try {
   );
   const after = await read();
   assert.equal(after[0], retained[0]);
-  assert.equal(after[2], retained[2]);
+  const servedStreaks = JSON.parse(after[2] ?? "null");
+  assert.equal(servedStreaks.snapshotId, "tail-only");
+  assert.equal(servedStreaks.diagnostics.observedWallets, 1);
+  assert.equal(servedStreaks.diagnostics.pendingWallets, 99);
+  assert.deepEqual(servedStreaks.diagnostics.exclusions, [
+    { code: "too_few_observed_wins", wallets: 1 },
+  ]);
   assert.equal(JSON.parse(after[1] ?? "null").snapshotId, "tail-only");
   const before = await redis.mGet(keys.slice(1, 4));
   await save("holder2", "unavailable cohort");
