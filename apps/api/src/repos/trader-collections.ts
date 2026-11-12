@@ -76,7 +76,7 @@ const marketLookupSql = (
  FROM requested_assets k JOIN polymarket_asset_bindings b ON b.chain_id=137 AND b.asset_id=k.t AND ${local ? "b.market_id=k.c" : "b.condition_id=k.c"} AND b.outcome_index=k.i
  GROUP BY k.t,k.c,k.i HAVING count(*)=1), enriched_assets AS MATERIALIZED (
  SELECT k.t,k.c,k.i,'137:'||k.position_contract||':'||k.protocol_version AS generation,m.id,m.title,m.event_id,
- coalesce(nullif(lower(m.category),''),(SELECT nullif(lower(e.category),'') FROM unified_events e WHERE e.id=m.event_id),'other') AS category,
+ event_row.title AS event_title,coalesce(nullif(lower(m.category),''),nullif(lower(event_row.category),''),'other') AS category,
  CASE k.i WHEN 0 THEN 'YES' WHEN 1 THEN 'NO' END AS side,
  extract(epoch FROM least(m.close_time,m.expiration_time))::float8 AS tradable_until,
  ${
@@ -99,6 +99,7 @@ const marketLookupSql = (
  AND (protocol_row.protocol_doc->'assets'->>k.i)=k.t
  AND k.t=CASE k.i WHEN 0 THEN ${canonicalMarketTokenIdSql("m", "YES")} WHEN 1 THEN ${canonicalMarketTokenIdSql("m", "NO")} END) AS active
  FROM mapped_assets k JOIN unified_markets m ON m.id=k.market_id AND m.venue='polymarket'
+ LEFT JOIN LATERAL (SELECT e.title,e.category FROM unified_events e WHERE e.id=m.event_id OFFSET 0) event_row ON true
  CROSS JOIN LATERAL (SELECT CASE WHEN m.status='ACTIVE' THEN m.metadata->'polymarketProtocol' END AS protocol_doc OFFSET 0) protocol_row
  ) SELECT enriched.*,q.best_ask::text AS ask,${local ? "q.best_bid::text AS mark_bid," : ""}extract(epoch FROM q.ts)::bigint::text AS quote_at
  FROM enriched_assets enriched LEFT JOIN LATERAL (
@@ -274,6 +275,7 @@ export class TraderRepository {
             venue: "polymarket",
             marketId: r.id,
             eventId: r.event_id,
+            eventTitle: r.event_title?.trim() || null,
             title: r.title,
             tokenId: r.t,
             generation: r.generation,

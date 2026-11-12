@@ -17,6 +17,11 @@ import {
   readCollection,
 } from "./services/trader-collection-service.js";
 import { collections } from "./schemas/trader-collections.js";
+import {
+  calculateWalletCloses,
+  closeView,
+  RecentCloseCache,
+} from "./services/wallet-recent-closes.js";
 
 const end = 1800000000,
   owner = {
@@ -109,6 +114,143 @@ const run = async (rows: LocalActivity[], pause = 3) => {
   return { ev, ranking: evaluateTrader(ev, end), calc };
 };
 const { ranking, ev } = await run([...history, ...today]);
+const profileResults = closeView(ev, end);
+assert.equal(profileResults.items.length, 10);
+assert.deepEqual(
+  profileResults.items
+    .slice(0, 2)
+    .map((r) => [r.result, r.estimatedEpisodePnlUsd]),
+  [
+    ["loss", "-10"],
+    ["win", "20"],
+  ],
+);
+assert.equal(profileResults.items[0].instrument.marketId, "market22");
+const streakFixture = [
+  ...Array.from({ length: 21 }, (_, i) => [
+    fixture(i, end - (22 - i) * DAY, 0, 100, 0.5),
+    fixture(i, end - (22 - i) * DAY + 1, 100, 0, i === 12 ? 0.4 : 0.6),
+  ]).flat(),
+  fixture(32, end - 80, 0, 100, 0.5),
+  fixture(32, end - 60, 100, 0, 0.5),
+  fixture(33, end - 40, 0, 20, 0.98),
+  fixture(33, end - 30, 20, 0, 0.97),
+];
+const exact = await run(streakFixture);
+const streakCard = exact.ranking.choices["winning-streaks"][0].item.achievement;
+assert.ok(streakCard.kind === "winning_streak");
+assert.equal(streakCard.currentLength, 8);
+assert.equal(streakCard.latestWinInstrument?.marketId, "market20");
+assert.deepEqual(
+  streakCard.recentResults
+    ?.slice(0, 2)
+    .map((c) => [c.result, c.qualifiesForStreak]),
+  [
+    ["loss", false],
+    ["flat", false],
+  ],
+);
+assert.deepEqual(closeView(exact.ev, end).items, streakCard.recentResults);
+assert.deepEqual(
+  closeView({ ...exact.ev, ledgers: [...exact.ev.ledgers].reverse() }, end)
+    .items,
+  streakCard.recentResults,
+);
+const cashRows = [...streakFixture, fixture(999, end - 3, 100, 0, 0.8)];
+async function collect<T>(reader: AsyncGenerator<void, T, void>) {
+  for (;;) {
+    const step = await reader.next();
+    if (step.done) return step.value;
+  }
+}
+const cold = await collect(
+  calculateWalletCloses(
+    { ...lookup, localPage: async () => cashRows },
+    owner.id,
+    end,
+    new AbortController().signal,
+  ),
+);
+assert.deepEqual(cold.items, streakCard.recentResults);
+assert.equal(cold.coverage, "known_gaps");
+const settledCarry = await collect(
+  calculateWalletCloses(
+    {
+      localPage: async () => [
+        fixture(90, end - 42 * DAY, 0, 100, 0.4),
+        fixture(91, end - 40 * DAY, 0, 100, 0.4),
+        fixture(91, end - 38 * DAY, 100, 0, 0.5),
+      ],
+      markets: async (...[assets]: Parameters<typeof lookup.markets>) => {
+        const ms = await lookup.markets(assets);
+        for (const m of ms.values())
+          if (m.instrument.tokenId === "90")
+            Object.assign(m, { winner: "NO", resolvedAt: end - DAY });
+        return ms;
+      },
+    },
+    owner.id,
+    end,
+    new AbortController().signal,
+  ),
+);
+assert.deepEqual(
+  settledCarry.items.map((c) => [c.basis, c.result, c.estimatedEpisodePnlUsd]),
+  [
+    ["inferred_settlement", "loss", "-40"],
+    ["observed_exit", "win", "10"],
+  ],
+);
+let clock = end,
+  loads = 0;
+let unlock!: () => void;
+const latch = new Promise<void>((resolve) => {
+  unlock = resolve;
+});
+const cache = new RecentCloseCache(
+  async function* (id) {
+    loads++;
+    await latch;
+    if (id === owner.id) {
+      yield;
+      yield;
+      yield;
+    }
+    finished.push(id);
+    return profileResults;
+  },
+  () => clock,
+);
+const finished: string[] = [];
+assert.equal(cache.read(owner.id, "solana").status, "unsupported");
+assert.equal(cache.read(owner.id, "polygon").status, "preparing");
+assert.equal(cache.read(owner.id, "polygon").status, "preparing");
+assert.equal(loads, 1);
+cache.read("small", "polygon");
+unlock();
+await new Promise((r) => setImmediate(r));
+assert.deepEqual(cache.read(owner.id, "polygon"), profileResults);
+assert.deepEqual(finished, ["small", owner.id]);
+assert.equal(loads, 2);
+clock += 60;
+assert.deepEqual(cache.read(owner.id, "polygon"), profileResults);
+await cache.stop();
+let slowClock = end,
+  slowLoads = 0;
+const slow = new RecentCloseCache(
+  async function* () {
+    slowLoads++;
+    yield;
+    slowClock += 1801;
+    return profileResults;
+  },
+  () => slowClock,
+);
+assert.equal(slow.read(owner.id, "polygon").status, "preparing");
+await new Promise((r) => setImmediate(r));
+assert.deepEqual(slow.read(owner.id, "polygon"), profileResults);
+assert.equal(slowLoads, 1);
+await slow.stop();
 const daily = ranking.choices["top-earners-today"][0]?.item.achievement;
 assert.ok(daily?.kind === "top_earner_24h");
 assert.equal(

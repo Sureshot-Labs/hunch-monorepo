@@ -1,4 +1,12 @@
 import { buildWalletOwnerResolutionJoinSql } from "../services/wallet-owner-resolution-sql.js";
+import {
+  withWalletRecentCloses,
+  walletRecentCloses,
+} from "../services/wallet-recent-closes-runtime.js";
+import {
+  walletWithRecentClosesSchema,
+  walletProfileErrorSchema,
+} from "../schemas/trader-collections.js";
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { ethers } from "ethers";
@@ -9761,6 +9769,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       schema: {
         params: walletProfileParamsSchema,
         querystring: walletProfileQuerySchema,
+        response: {
+          200: walletWithRecentClosesSchema,
+          404: walletProfileErrorSchema,
+          500: walletProfileErrorSchema,
+        },
       },
     },
     async (request, reply) => {
@@ -9789,7 +9802,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           cacheStatus: cacheContext.status,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send(cached.body);
+        return reply.send(withWalletRecentCloses(cached.body));
       }
 
       const client = await pool.connect();
@@ -9802,6 +9815,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           reply.code(404);
           return reply.send({ error: "Wallet not found" });
         }
+        walletRecentCloses.read(wallet.id, wallet.chain);
         const resolvedTradeStatsMap = await loadWalletResolvedTradeStatsMap(
           client,
           [walletId],
@@ -10014,7 +10028,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           cacheStatus: cacheContext.status,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send(body);
+        return reply.send(withWalletRecentCloses(body));
       } catch (error) {
         app.log.error({ error, walletId, userId }, "Failed to load wallet");
         reply.code(500);

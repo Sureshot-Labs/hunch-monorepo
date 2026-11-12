@@ -77,6 +77,7 @@ export type Market = {
 };
 export type Resolution = { at: number; payout: readonly [bigint, bigint] };
 export type Close = {
+  basis?: "observed_exit" | "inferred_settlement";
   at: number;
   net: bigint;
   stake: bigint;

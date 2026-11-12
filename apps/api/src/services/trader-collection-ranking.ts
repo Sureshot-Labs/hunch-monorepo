@@ -17,6 +17,11 @@ import {
   type Market,
   type Ledger,
 } from "./trader-collection-ledger.js";
+import {
+  closeOrder,
+  qualifiesForStreak,
+  recentObservedCloses,
+} from "./trader-recent-closes.js";
 export const DEFAULT_TRADER_POLICY = {
   minDays: 14,
   minCloses: 20,
@@ -130,13 +135,8 @@ export function winningRun(
   observedWindow = false,
 ) {
   const eligible = closes
-    .filter(
-      (c) =>
-        c.stake >= policy.dust &&
-        c.stake * UNIT <= 900000n * c.shares &&
-        c.net !== 0n,
-    )
-    .sort((a, b) => b.at - a.at);
+    .filter((c) => qualifiesForStreak(c, policy.dust))
+    .sort(closeOrder);
   let n = 0,
     profit = 0n,
     boundary = full;
@@ -172,6 +172,7 @@ export function winningRun(
     n,
     profit,
     latest: eligible[0].at,
+    latestInstrument: eligible[0].instrument,
     count: eligible.length,
     lowerBound: !boundary,
   };
@@ -496,6 +497,8 @@ export function evaluateTrader(
           estimatedStreakPnlUsd: fmt(run.profit),
           qualifyingCompletedPositions: run.count,
           latestWinAt: iso(run.latest),
+          latestWinInstrument: run.latestInstrument,
+          recentResults: recentObservedCloses([past], end, policy.dust),
         },
         `${run.lowerBound ? "At least " : ""}${run.n} observed wins, approximately +$${fmt(run.profit)} across these positions.`,
         [BigInt(run.n), run.profit, BigInt(closes.length), p30],

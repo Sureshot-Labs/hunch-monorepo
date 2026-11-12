@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { walletRecentCloses } from "./wallet-recent-closes-runtime.js";
 import { pool } from "../db.js";
 import { deflateRaw, inflateRaw } from "node:zlib";
 import { promisify } from "node:util";
@@ -454,5 +455,5 @@ export async function stopTraderCollections() {
   if (timer) clearInterval(timer);
   timer = null;
   stopper?.abort();
-  await Promise.all([ongoing, movesRunning]);
+  await Promise.all([ongoing, movesRunning, walletRecentCloses.stop()]);
 }

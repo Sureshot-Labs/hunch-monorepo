@@ -79,6 +79,8 @@ const diagnostics = z.object({
 const instrument = z.object({
   marketId: z.string(),
   eventId: z.string(),
+  // Pre-release snapshots can omit this field during the short cache handoff.
+  eventTitle: z.string().nullable().optional(),
   title: z.string(),
   venue: z.literal("polymarket"),
   tokenId: z.string(),
@@ -87,6 +89,34 @@ const instrument = z.object({
   outcomeLabel: z.string(),
 });
 export type Instrument = z.infer<typeof instrument>;
+export const observedCloseSchema = z.object({
+  basis: z.enum(["observed_exit", "inferred_settlement"]).optional(),
+  instrument,
+  completedAt: date,
+  estimatedEpisodePnlUsd: amount,
+  result: z.enum(["win", "loss", "flat"]),
+  qualifiesForStreak: z.boolean(),
+});
+export type ObservedClose = z.infer<typeof observedCloseSchema>;
+export const walletCloseHistorySchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ready"),
+    windowStart: date.nullable(),
+    windowEnd: date,
+    coverage: z.enum(["observed_only", "known_gaps"]),
+    items: z.array(observedCloseSchema).max(10),
+  }),
+  z.object({
+    status: z.enum(["preparing", "busy", "unavailable", "unsupported"]),
+    items: z.null(),
+  }),
+]);
+// Existing wallet properties remain open: this is an additive profile field.
+export const walletWithRecentClosesSchema = z.object({
+  ok: z.literal(true),
+  wallet: z.object({ recentCloses: walletCloseHistorySchema }).passthrough(),
+});
+export const walletProfileErrorSchema = z.object({ error: z.string() });
 const quote = z.object({
   ask: amount,
   asOf: date,
@@ -126,6 +156,8 @@ const streak = z.object({
   estimatedStreakPnlUsd: amount,
   qualifyingCompletedPositions: count,
   latestWinAt: date,
+  latestWinInstrument: instrument.optional(),
+  recentResults: z.array(observedCloseSchema).max(10).optional(),
 });
 export const itemSchema = z.object({
   trader: z.object({
