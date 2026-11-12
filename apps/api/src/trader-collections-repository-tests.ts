@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { TraderRepository, assetKey } from "./repos/trader-collections.js";
+import { GlobalMoveRepository } from "./repos/trader-global-moves.js";
 
 const pool = await createIntegrationTestPool({ max: 1 });
 const end = Date.parse("2026-11-12T12:00:00Z") / 1000;
@@ -105,6 +106,44 @@ try {
     insert into wallet_tracking_subjects
      select md5('new-'||n)::uuid,'polymarket','active','whale' from generate_series(0,50) n`);
   const traderRoster = await repo.owners(end, 1000);
+  assert.ok((await repo.owners(end, 1000, 100)).length > 50);
+  const allMoves = new GlobalMoveRepository(pool);
+  assert.equal(
+    (await allMoves.owners([owner(1).id], 1000))[0].name,
+    "public-name",
+  );
+  assert.deepEqual(await allMoves.balances([], end - 86400, end), []);
+  assert.deepEqual(await allMoves.deltas(end - 3600, end, end), []);
+  await pool.query(`insert into wallet_activity_events(id,wallet_id,occurred_at,venue,activity_type,action,metadata,source,delta_shares,market_id,outcome_side,price,created_at) values
+  (md5('global')::uuid,md5('1')::uuid,'2026-11-12T11:15Z','polymarket','delta','BUY','{"snapshotSource":"polymarket","tokenId":"44","prevShares":"1","currShares":"1001"}','snapshot_delta',1000,'global','YES',0.5,'2026-11-12T11:16Z');
+  insert into wallet_position_snapshots(wallet_id,venue,market_id,outcome_side,snapshot_at,shares,metadata) values
+  (md5('1')::uuid,'polymarket','global','YES','2026-11-12T10:15Z',1,'{"source":"polymarket","tokenId":"44"}'),
+  (md5('1')::uuid,'polymarket','global','YES','2026-11-12T11:15Z',1001,'{"source":"polymarket","tokenId":"44"}')`);
+  const scope = await allMoves.deltas(end - 3600, end, end);
+  assert.equal(scope.length, 1);
+  assert.equal(Number(scope[0].cash), 500);
+  // NUMERIC multiplication can exceed 18 decimal places for ordinary JS
+  // midpoint prices. Apply the $500 gate BEFORE rounding the public amount.
+  await pool.query(
+    "update wallet_activity_events set delta_shares=2000.12,price=0.41000000000000003 where id=md5('global')::uuid",
+  );
+  assert.equal(
+    (await allMoves.deltas(end - 3600, end, end))[0].cash,
+    "820.049200",
+  );
+  await pool.query(
+    "update wallet_activity_events set delta_shares=1000,price=0.499999999999 where id=md5('global')::uuid",
+  );
+  assert.deepEqual(await allMoves.deltas(end - 3600, end, end), []);
+  const inventory = await allMoves.balances(
+    [{ w: owner(1).id, m: "global" }],
+    end - 3600,
+    end,
+  );
+  assert.deepEqual(
+    inventory.map((r) => r.shares),
+    ["1", "1001"],
+  );
   assert.deepEqual(
     traderRoster.map((entry) => entry.address),
     Array.from(

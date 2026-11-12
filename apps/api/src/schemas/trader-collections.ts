@@ -38,6 +38,9 @@ export const rejectionCodes = [
   "streak_order_ambiguous",
   "streak_boundary_unknown",
   "quote_expired_before_publication",
+  "wallet_not_public_trader",
+  "balance_not_comparable",
+  "increase_not_retained",
 ] as const;
 export type RejectionCode = (typeof rejectionCodes)[number];
 export const sourceFailureCodes = [
@@ -57,7 +60,10 @@ export const sourceFailureCodes = [
 ] as const;
 export type SourceFailure = (typeof sourceFailureCodes)[number];
 const diagnostics = z.object({
-  scope: z.literal("whole_shortlist_at_ranking"),
+  scope: z.enum([
+    "whole_shortlist_at_ranking",
+    "all_public_position_increases",
+  ]),
   selectedWallets: count,
   attemptedWallets: count,
   pendingWallets: count,
@@ -101,7 +107,7 @@ const move = z.object({
   openAtLastObservation: z.literal(true),
   quote,
   liquidityUsd: amount.nullable(),
-  relativeToTypical: amount,
+  relativeToTypical: amount.nullable(),
 });
 const earnings = z.object({
   kind: z.literal("top_earner_24h"),
@@ -128,9 +134,9 @@ export const itemSchema = z.object({
     displayName: z.string().nullable(),
   }),
   estimatedClosedPnl30dUsd: amount.nullable(),
-  estimatedCategoryClosedPnl30dUsd: amount,
-  completedPositions: count,
-  historyDays: count,
+  estimatedCategoryClosedPnl30dUsd: amount.nullable(),
+  completedPositions: count.nullable(),
+  historyDays: count.nullable(),
   rank: z.number().int().min(1).max(3),
   achievement: z.discriminatedUnion("kind", [move, earnings, streak]),
   latestOpenPosition: z
@@ -164,7 +170,7 @@ export const collectionSchema = z.object({
   generatedAt: date,
   windowStart: date.nullable(),
   windowEnd: date,
-  policyVersion: z.literal(1),
+  policyVersion: z.union([z.literal(1), z.literal(2)]),
   methodologyVersion: z.literal(2),
   freshness: z.enum(["fresh", "stale"]),
   /** Missing on older snapshots. No economically valid ranking is implied during handoff. */
@@ -178,7 +184,10 @@ export const collectionSchema = z.object({
       sourceAsOf: date,
       coverage: z.object({
         venues: z.array(z.literal("polymarket")),
-        universe: z.literal("recent_active_tracked_shortlist"),
+        universe: z.enum([
+          "recent_active_tracked_shortlist",
+          "all_public_wallet_intel",
+        ]),
         resultScope: z.literal("servable_hunch_catalog_positions"),
         selectedWallets: count,
         observedWallets: count,
