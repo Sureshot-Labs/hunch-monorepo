@@ -84,7 +84,13 @@ export function parsePolymarketDataApiV2Page<T>(
 /** One bounded page for intentional top-N reads and cursor-driven UI feeds. */
 export async function fetchPolymarketDataApiV2Page<T>(inputs: {
   baseUrl: string;
-  endpoint: "positions" | "holders" | "trades" | "prices-history";
+  endpoint:
+    | "positions"
+    | "holders"
+    | "trades"
+    | "prices-history"
+    | "activity"
+    | "resolutions";
   params: Readonly<Record<string, string>>;
   parseRow: (row: unknown) => T;
   timeoutMs: number;
@@ -230,10 +236,16 @@ export async function fetchPolymarketDataApiV2Page<T>(inputs: {
         },
       );
     }
-    const page = parsePolymarketDataApiV2Page(
-      await response.json(),
-      inputs.parseRow,
-    );
+    const payload: unknown = await response.json();
+    // The condition-batched resolutions endpoint is explicitly unpaginated.
+    // Never accept a missing cursor envelope on an account/positions walk.
+    const page =
+      inputs.endpoint === "resolutions" &&
+      isRecord(payload) &&
+      Array.isArray(payload.data) &&
+      !("pagination" in payload)
+        ? { data: payload.data.map(inputs.parseRow), nextCursor: null }
+        : parsePolymarketDataApiV2Page(payload, inputs.parseRow);
     signal.throwIfAborted();
     if (inputs.cursor != null && page.nextCursor === inputs.cursor)
       throw new PolymarketDataApiV2CursorError();

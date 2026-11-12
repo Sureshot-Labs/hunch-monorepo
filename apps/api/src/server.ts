@@ -3,6 +3,10 @@ import { pool, waitForDatabaseReady } from "./db.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
 import { discoveryService } from "./services/discovery-runtime.js";
+import {
+  startTraderCollections,
+  stopTraderCollections,
+} from "./services/trader-collection-runtime.js";
 
 export async function start() {
   // HTTP traffic needs headroom; workers importing db.ts keep their existing cap.
@@ -13,8 +17,10 @@ export async function start() {
 
   const app = await buildApp();
   app.addHook("onClose", async () => discoveryService.stop());
+  app.addHook("onClose", stopTraderCollections);
   const addr = await app.listen({ port: env.port, host: env.host });
   discoveryService.start();
+  startTraderCollections();
   app.log.info(`api listening on ${addr}`);
   return app;
 }
