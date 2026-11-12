@@ -14,6 +14,7 @@ import {
 import { SNAPSHOT_TTL } from "./trader-collection-service.js";
 
 export type Sweep = {
+  pageJournal?: 1;
   end: number;
   owners: Owner[];
   queue: number[];
@@ -42,6 +43,7 @@ export function createSweep(
       (carry.get(owners[b].id) ?? Infinity),
   );
   return {
+    pageJournal: 1,
     end,
     owners,
     queue,
@@ -62,10 +64,27 @@ export function sweepExpired(s: Sweep, now: number) {
 }
 export const encodeSweep = (s: Sweep) =>
   JSON.stringify(s, (_, v) => (typeof v === "bigint" ? v.toString() : v));
-export const decodeSweep = (raw: string): Sweep =>
-  JSON.parse(raw, (k, v) =>
+export const decodeSweep = (raw: string): Sweep => {
+  const state: Sweep = JSON.parse(raw, (k, v) =>
     k === "priority" && Array.isArray(v) ? v.map(BigInt) : v,
   );
+  // A pre-release live checkpoint still knows these identities. Re-open only
+  // the two former per-visit hard stops, once, after fresh owners get a turn.
+  // Completed, already-discarded historic rosters cannot be reconstructed.
+  if (state.pageJournal !== 1) {
+    for (const [ordinal, why] of Object.entries(state.failed)) {
+      if (why !== "incomplete_pages" && why !== "wallet_request_budget")
+        continue;
+      const i = Number(ordinal);
+      delete state.failed[i];
+      delete state.needsFullSlice[i];
+      state.retries[i] = 0;
+      state.queue.push(i);
+    }
+    state.pageJournal = 1;
+  }
+  return state;
+};
 
 export function recordEvaluation(s: Sweep, i: number, ev: Evaluation) {
   for (const k of collections) {

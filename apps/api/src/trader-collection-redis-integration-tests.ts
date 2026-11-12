@@ -16,6 +16,15 @@ import {
 } from "./services/trader-collection-sweep.js";
 import { emptyChoices } from "./services/trader-collection-ranking.js";
 import { collections } from "./schemas/trader-collections.js";
+import {
+  WalletPageJournal,
+  PageContinuation,
+  JournalUnavailable,
+  journalKey,
+  SAVE_PAGE,
+} from "./services/trader-collection-page-journal.js";
+import { PolymarketDataApiV2Error } from "./services/polymarket-data-api-v2.js";
+import type { ReadPage } from "./services/trader-collection-source.js";
 const redis = createClient({
   url: "redis://127.0.0.1:6380",
   socket: { connectTimeout: 2000, reconnectStrategy: false },
@@ -39,8 +48,168 @@ let s = createSweep(
   end,
 );
 assert.equal(await redis.exists(keys), 0);
+const pages = journalKey(prefix, "test", "1", "addr", end);
+assert.notEqual(pages, journalKey(prefix, "test", "1", "addr", end + 1));
+assert.notEqual(pages, journalKey(prefix, "test", "2", "addr", end));
+assert.equal(await redis.exists(pages), 0);
 try {
   await redis.set(lock, "a");
+  {
+    const expires = Math.floor(Date.now() / 1000) + 30;
+    const open = (lease = "a") =>
+      new WalletPageJournal(
+        {
+          get: (k) => redis.hGet(pages, k),
+          write: async (mode, k, v, decodedBytes) =>
+            Number(
+              await redis.eval(SAVE_PAGE, {
+                keys: [lock, pages],
+                arguments: [
+                  lease,
+                  String(expires),
+                  mode,
+                  k,
+                  v,
+                  String(decodedBytes),
+                ],
+              }),
+            ),
+        },
+        "addr",
+      );
+    const signal = new AbortController().signal;
+    const cutoff = Math.floor(Date.now() / 1000) - 10;
+    const watermark = await open().inventoryThrough(cutoff);
+    assert.ok(watermark >= cutoff);
+    assert.equal(await open().inventoryThrough(cutoff), watermark);
+    const j = open(),
+      q = { user: "addr", start: "1" };
+    let hits = 0;
+    const complete: ReadPage = async () => {
+      hits++;
+      return {
+        data: [
+          {
+            proxy_wallet: "addr",
+            type: "TRADE",
+            timestamp: 1000,
+            biography: "not for checkpoint",
+          },
+        ],
+        nextCursor: null,
+      };
+    };
+    for (let i = 0; i < 90; i++)
+      await j.page(
+        complete,
+        "activity",
+        { ...q, start: String(i) },
+        null,
+        signal,
+      );
+    await assert.rejects(
+      j.page(complete, "activity", { ...q, start: "90" }, null, signal),
+      PageContinuation,
+    );
+    assert.equal(hits, 90);
+    const resumed = open();
+    for (let i = 0; i <= 90; i++) {
+      const p = await resumed.page(
+        complete,
+        "activity",
+        { ...q, start: String(i) },
+        null,
+        signal,
+      );
+      assert.equal(p.data[0].biography, undefined);
+    }
+    assert.equal(hits, 91);
+    assert.ok((await redis.ttl(pages)) > 0);
+    const invalid: ReadPage = async () => {
+      throw new PolymarketDataApiV2Error(
+        400,
+        "invalid_request",
+        false,
+        null,
+        null,
+        "cursor",
+        "invalid_cursor",
+      );
+    };
+    const capacityBefore = await redis.hmGet(pages, [
+      "bytes",
+      "decoded",
+      "pages",
+    ]);
+    await assert.rejects(
+      resumed.page(invalid, "activity", q, "invalid", signal),
+      PolymarketDataApiV2Error,
+    );
+    await open().page(complete, "activity", q, null, signal);
+    await open().page(complete, "activity", { ...q, start: "2" }, null, signal);
+    assert.deepEqual(
+      await redis.hmGet(pages, ["bytes", "decoded", "pages"]),
+      capacityBefore,
+      "identical replacement page uses no additional quota",
+    );
+    assert.equal(hits, 92, "only the invalid cursor stream is restarted");
+    await assert.rejects(
+      open("stale").page(
+        complete,
+        "activity",
+        { ...q, start: "100" },
+        null,
+        signal,
+      ),
+      JournalUnavailable,
+    );
+    assert.equal(await redis.hGet(pages, "pages"), "91");
+    await assert.rejects(
+      open().page(
+        async () => ({ data: [{ proxy_wallet: "other" }], nextCursor: null }),
+        "positions",
+        q,
+        null,
+        signal,
+      ),
+      /owner_mismatch/,
+    );
+    await redis.hSet(pages, "bytes", String(4 * 1024 * 1024));
+    await redis.hSet(pages, "pages", "384");
+    await redis.hSet(pages, "decoded", String(24 * 1024 * 1024));
+    // At all three ceilings the stale stream can still be replaced; unrelated
+    // streams and their quota remain intact.
+    await assert.rejects(
+      open().page(invalid, "activity", q, "bad2", signal),
+      PolymarketDataApiV2Error,
+    );
+    await open().page(complete, "activity", q, null, signal);
+    assert.deepEqual(await redis.hmGet(pages, ["bytes", "decoded", "pages"]), [
+      String(4 * 1024 * 1024),
+      String(24 * 1024 * 1024),
+      "384",
+    ]);
+    await assert.rejects(
+      open().page(complete, "activity", { ...q, start: "100" }, null, signal),
+      /wallet_page_capacity/,
+    );
+    assert.equal(
+      await redis.eval(TRADER_CHECKPOINT, {
+        keys: [lock, checkpoint, pages],
+        arguments: ["stale", ""],
+      }),
+      0,
+    );
+    assert.ok(await redis.exists(pages));
+    assert.equal(
+      await redis.eval(TRADER_CHECKPOINT, {
+        keys: [lock, checkpoint, pages],
+        arguments: ["a", ""],
+      }),
+      1,
+    );
+    assert.equal(await redis.exists(pages), 0);
+  }
   assert.equal(await save("a", encodeSweep(s)), 1);
   for (const [pass, size] of [13, 16, 21].entries()) {
     const lease = "holder" + pass;
@@ -98,6 +267,6 @@ try {
     "OK: fenced partial publish + resume, 50 distinct wallets, stale holder, complete/failed finalization (local Redis)",
   );
 } finally {
-  await redis.del(keys);
+  await redis.del([...keys, pages]);
   await redis.quit();
 }

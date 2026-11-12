@@ -1,6 +1,10 @@
 import { assetKey, type Asset } from "../repos/trader-collections.js";
 import { fetchPolymarketDataApiV2Page } from "./polymarket-data-api-v2.js";
 import {
+  PageContinuation,
+  type WalletPageJournal,
+} from "./trader-collection-page-journal.js";
+import {
   DAY,
   UNIT,
   replay,
@@ -17,6 +21,7 @@ import type {
 } from "./trader-collection-ranking.js";
 
 type Row = Record<string, unknown>;
+const activityRowLimit = 12000;
 const record = (r: unknown): Row => {
   if (!r || typeof r !== "object" || Array.isArray(r))
     throw Error("invalid_provider_row");
@@ -145,6 +150,7 @@ export async function collectEvidence(
   ) => Promise<Map<string, Market>>,
   signal: AbortSignal,
   cache?: Map<string, ActivityCache>,
+  journal?: WalletPageJournal,
 ): Promise<Evidence> {
   const floor = end - 30 * DAY,
     seenConditions = new Set<string>(),
@@ -155,8 +161,10 @@ export async function collectEvidence(
     ep: Endpoint,
     params: Record<string, string>,
     cursor: string | null,
+    budget?: { fetched: number; limit: number },
   ) {
     signal.throwIfAborted();
+    if (journal) return journal.page(read, ep, params, cursor, signal, budget);
     if (++requestCount > 90) throw Error("wallet_request_budget");
     return read(ep, params, cursor, signal);
   }
@@ -164,11 +172,16 @@ export async function collectEvidence(
     let cursor: string | null = null;
     const cursors = new Set<string>(),
       rows: Row[] = [];
-    for (let i = 0; i < max; i++) {
+    // A wallet-wide walk may span visits. Per-condition speculative backfills
+    // retain their original hard bound and cannot monopolize the wallet.
+    const resumable = journal && !params.condition;
+    const budget = resumable ? { fetched: 0, limit: max } : undefined;
+    for (let i = 0; resumable || i < max; i++) {
       const p = await page(
         ep,
         { user: owner.address, limit: "250", ...params },
         cursor,
+        budget,
       );
       if (
         !p.data.every(
@@ -177,6 +190,8 @@ export async function collectEvidence(
         )
       )
         throw Error("owner_mismatch");
+      if (ep === "activity" && rows.length + p.data.length > activityRowLimit)
+        throw Error("wallet_activity_capacity");
       rows.push(...p.data);
       if (!p.nextCursor) return rows;
       if (cursors.has(p.nextCursor)) throw Error("repeated_cursor");
@@ -196,7 +211,8 @@ export async function collectEvidence(
   async function advance() {
     const p = prev.pending;
     if (!p) throw Error("missing_activity_checkpoint");
-    for (let i = 0; i < 8; i++) {
+    const budget = { fetched: 0, limit: 8 };
+    for (let i = 0; journal || i < 8; i++) {
       const b = await page(
         "activity",
         {
@@ -207,7 +223,12 @@ export async function collectEvidence(
           exclude_deposits_withdrawals: "false",
         },
         p.cursor,
-      );
+        budget,
+      ).catch((err) => {
+        if (err instanceof PageContinuation && budget.fetched >= budget.limit)
+          throw Error("activity_checkpoint");
+        throw err;
+      });
       if (
         !b.data.every(
           (r) =>
@@ -220,7 +241,7 @@ export async function collectEvidence(
         throw Error("repeated_cursor");
       }
       p.rows.push(...b.data.map(compact));
-      if (p.rows.length > 12000) {
+      if (p.rows.length > activityRowLimit) {
         delete prev.pending;
         prev.capacityUntil = end + 1800;
         throw Error("wallet_activity_capacity");
@@ -234,7 +255,7 @@ export async function collectEvidence(
               secs(r.timestamp) < p.start,
           ),
         ];
-        if (prev.rows.length > 12000) {
+        if (prev.rows.length > activityRowLimit) {
           prev.rows = [];
           prev.end = 0;
           delete prev.pending;
@@ -290,21 +311,28 @@ export async function collectEvidence(
   }
   const opens = await walk("positions", {
     status: "OPEN",
+    sort_by: "TIMESTAMP",
+    sort_direction: "ASC",
     include_archived: "true",
     filter_amount: "0",
   });
   const lost = await walk("positions", {
     status: "REDEEMABLE_LOST",
+    sort_by: "TIMESTAMP",
+    sort_direction: "ASC",
     include_archived: "true",
     filter_amount: "0",
   });
   const closes = await walk("positions", {
     status: "CLOSED",
+    sort_by: "TIMESTAMP",
+    sort_direction: "ASC",
     start: timeParams.start,
   });
   // Snapshot routes reflect now, not historical inventory: post-cut changes
   // invalidate only the affected segment. Never filter them out as zero.
-  const pos = new Map<string, Position>(),
+  type ObservedPosition = Position & { reportedClosed: boolean };
+  const pos = new Map<string, ObservedPosition>(),
     neverSold = new Set<string>(),
     bad = new Set<string>(),
     invalidNative = new Set<string>(),
@@ -327,10 +355,11 @@ export async function collectEvidence(
       continue;
     }
     rememberOutcome(c, t, i);
-    const p = {
+    const p: ObservedPosition = {
       condition: c,
       token: t,
       index: i,
+      reportedClosed: row.status === "CLOSED",
       label: str(row.outcome),
       shares: units(row.current_size),
       pnl: units(row.realized_pnl),
@@ -352,20 +381,39 @@ export async function collectEvidence(
         row.status === "REDEEMABLE" ||
         row.status === "REDEEMABLE_LOST",
     };
-    const previous = pos.get(assetKey(p));
     if (
+      p.reportedClosed &&
+      row.redeemable === false &&
+      row.total_size != null
+    ) {
+      try {
+        p.closedBoughtShares = units(row.total_size);
+      } catch {
+        // Optional corroboration. A malformed lifetime size cannot establish
+        // the single-sale case, but must not discard other native evidence.
+      }
+    }
+    const key = assetKey(p);
+    const previous = pos.get(key);
+    if (previous && previous.closedBoughtShares !== p.closedBoughtShares)
+      delete p.closedBoughtShares;
+    if (
+      // A later duplicate cannot restore missing lifetime corroboration.
+      (!previous || neverSold.has(key)) &&
       p.shares > 0n &&
       p.pnl === 0n &&
       !p.redeemable &&
       row.total_size != null &&
       units(row.total_size) === p.shares
     )
-      neverSold.add(assetKey(p));
-    else neverSold.delete(assetKey(p));
+      neverSold.add(key);
+    else neverSold.delete(key);
     if (
       previous &&
       (previous.shares !== p.shares ||
         previous.pnl !== p.pnl ||
+        previous.redeemable !== p.redeemable ||
+        previous.reportedClosed !== p.reportedClosed ||
         previous.last !== p.last ||
         previous.first !== p.first ||
         previous.unrealized !== p.unrealized ||
@@ -376,7 +424,7 @@ export async function collectEvidence(
       bad.add(c);
       invalidNative.add(c);
     }
-    pos.set(assetKey(p), p);
+    pos.set(key, p);
     assets.push(p);
     seenConditions.add(c);
   }
@@ -431,11 +479,88 @@ export async function collectEvidence(
     }
   }
   parse(recent, activityFloor + 1);
+  const postCutMissing = new Map<string, string>();
+  if (journal) {
+    const through = await journal.inventoryThrough(end);
+    // Both activity requests include the cutoff second. Match multiplicity,
+    // rather than discarding that second (or deduplicating whole tx hashes).
+    const boundary = new Map<string, { row: Row; remaining: number }>();
+    const eventKey = (r: Row) =>
+      JSON.stringify([
+        r.type,
+        r.timestamp,
+        r.transaction_hash,
+        r.condition_id,
+        r.token_id,
+        r.outcome_index,
+        r.side,
+        r.size,
+        r.usdc_size,
+        r.is_combo,
+      ]);
+    for (const r of recent)
+      if (r.timestamp === end && !cashOnly.has(str(r.type))) {
+        const k = eventKey(r);
+        const prev = boundary.get(k);
+        if (prev) prev.remaining++;
+        else boundary.set(k, { row: r, remaining: 1 });
+      }
+    const markDisputed = (r: Row) => {
+      const c = cond(r.condition_id),
+        t = token(r.token_id),
+        i = idx(r.outcome_index);
+      if (!c || !t || i === null) {
+        postCutMissing.set("unknown:" + c, c);
+        return;
+      }
+      const asset = { condition: c, token: t, index: i, label: str(r.outcome) };
+      postCutMissing.set(assetKey(asset), c);
+      assets.push(asset);
+    };
+    // Price changes must not change the pagination order. Trades, transfers,
+    // redemptions, etc. CAN move a row to a different position/status spine.
+    // Observe those changes without treating them as income or pre-cut trades.
+    const changes = await walk(
+      "activity",
+      {
+        start: String(end),
+        end: String(through),
+        exclude_deposits_withdrawals: "false",
+      },
+      8,
+    );
+    for (const r of changes) {
+      const at = secs(r.timestamp);
+      if (!at || at < end || at > through) throw Error("invalid_change_window");
+      if (cashOnly.has(str(r.type))) continue;
+      const c = cond(r.condition_id),
+        t = token(r.token_id),
+        i = idx(r.outcome_index);
+      const native =
+        c &&
+        t &&
+        i !== null &&
+        pos.has(assetKey({ condition: c, token: t, index: i }));
+      const prior = at === end ? boundary.get(eventKey(r)) : undefined;
+      if (prior && prior.remaining > 0) {
+        prior.remaining--;
+        if (native && (r.type === "REDEEM" || r.type === "TRADE")) continue;
+      }
+      if (native && at > end && r.type === "TRADE") continue;
+      markDisputed(r);
+    }
+    for (const { row, remaining } of boundary.values())
+      if (remaining > 0) markDisputed(row);
+  }
   const markets = await lookup(assets, end, signal);
   const resolutions = new Map<string, Resolution>();
   const conditions = [
-    ...new Set([...markets.values()].map((m) => m.condition)),
-  ];
+    ...new Set(
+      [...markets.values()]
+        .map((m) => m.condition)
+        .filter((c) => seenConditions.has(c)),
+    ),
+  ].sort();
   for (let i = 0; i < conditions.length; i += 20) {
     const batch = conditions.slice(i, i + 20);
     const p = await page("resolutions", { condition: batch.join(",") }, null);
@@ -584,6 +709,7 @@ export async function collectEvidence(
       p.last > 0 &&
       latestAction <= p.last &&
       (p.last === latestAction || (res && res.at === p.last && res.at <= end));
+    if (claimConditions.has(p.condition)) delete p.closedBoughtShares;
     const l = clocksMatch
       ? replay(
           acts,
@@ -717,6 +843,15 @@ export async function collectEvidence(
   const categoryByCondition = new Map(
     [...markets.values()].map((m) => [m.condition, m.category]),
   );
+  for (const [key, c] of postCutMissing) {
+    const category = markets.get(key)?.category ?? categoryByCondition.get(c);
+    // A missing position changed after the cutoff: neither its earlier size
+    // nor P&L is known. Unknown identity must never silently mean zero.
+    gaps.add(
+      category ?? (key.startsWith("unknown:") ? "*" : "outside_catalog"),
+    );
+    uncertainExposureConditions.add(c);
+  }
   const posConds = new Set([...pos.values()].map((v) => v.condition));
   for (const c of [...missing, ...[...bad].filter((c) => !posConds.has(c))])
     gaps.add(
@@ -753,6 +888,10 @@ export async function collectEvidence(
       closes
         .filter(
           (r) =>
+            r.status === "CLOSED" &&
+            r.redeemable !== true &&
+            !invalidNative.has(cond(r.condition_id)) &&
+            secs(r.last_event_at) >= secs(r.first_entry_at) &&
             secs(r.last_event_at) <= end &&
             secs(r.first_entry_at) > 0 &&
             Number(r.current_size) === 0 &&

@@ -30,14 +30,17 @@ export const expediteNextSweep = (
   now: number,
 ) => observed > 0 && replacementDue(windowEnd + SNAPSHOT_TTL, now);
 // One bounded private queue; idle GC after the existing 7-day shortlist horizon.
-const SAVE_PROGRESS = `if ARGV[#ARGV]=='' then redis.call('DEL',KEYS[#KEYS])
-else redis.call('SET',KEYS[#KEYS],ARGV[#ARGV],'EX',604800) end`;
+const saveProgress = (
+  index: number,
+) => `if ARGV[#ARGV]=='' then redis.call('DEL',KEYS[${index}])
+else redis.call('SET',KEYS[${index}],ARGV[#ARGV],'EX',604800) end
+for i=${index + 1},#KEYS do redis.call('UNLINK',KEYS[i]) end`;
 export const TRADER_PUBLISH = `if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
 for i=2,4 do redis.call('SET',KEYS[i],ARGV[i],'EX',ARGV[5]) end
-${SAVE_PROGRESS}
+${saveProgress(5)}
 return 1`;
 export const TRADER_CHECKPOINT = `if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
-${SAVE_PROGRESS};return 1`;
+${saveProgress(2)};return 1`;
 
 /** A connected Redis socket can stop responding or queue work while reconnecting.
  * On timeout discard only this lane's client, including any queued late command.

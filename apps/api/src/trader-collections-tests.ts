@@ -348,6 +348,230 @@ const evidence = await collectEvidence(
 assert.deepEqual([...evidence.gaps], []);
 const cs = candidates(evidence, end);
 for (const k of collections) assert.equal(cs[k].length, 1, k);
+// A heavy wallet spans three inventories. Simulate a process restart at every
+// yield: only the private journal survives, never an in-memory cursor.
+{
+  const { WalletPageJournal, PageContinuation } =
+    await import("./services/trader-collection-page-journal.js");
+  const dict = new Map<string, string>(),
+    calls = new Set<string>();
+  const slow: ReadPage = async (ep, params, cursor, sig) => {
+    const key = JSON.stringify([ep, params, cursor]);
+    assert.ok(
+      !calls.has(key),
+      "a persisted provider page must not be fetched again",
+    );
+    calls.add(key);
+    if (ep === "activity" && params.start === String(end))
+      return { data: [], nextCursor: null };
+    if (ep === "positions") {
+      const offset = Number(cursor ?? 0);
+      if (offset < 24)
+        return {
+          data:
+            params.status === "OPEN"
+              ? Array.from({ length: 250 }, (_, slot) => {
+                  const n = 10000 + offset * 250 + slot;
+                  return {
+                    ...rawPos[0],
+                    proxy_wallet: owner.address,
+                    status: "OPEN",
+                    condition_id: "0x" + n.toString(16).padStart(64, "0"),
+                    token_id: String(n),
+                  };
+                })
+              : [],
+          nextCursor: String(offset + 1),
+        };
+    }
+    return read(ep, params, ep === "positions" ? null : cursor, sig);
+  };
+  let yields = 0;
+  for (;;) {
+    const j = new WalletPageJournal(
+      {
+        get: async (k) => dict.get(k),
+        write: async (_, k, v) => {
+          dict.set(k, v);
+          return 1;
+        },
+      },
+      owner.address,
+    );
+    try {
+      const actual = await collectEvidence(
+        owner,
+        end,
+        slow,
+        async (assets) => {
+          assert.ok(assets.length >= 6000);
+          return markets;
+        },
+        new AbortController().signal,
+        new Map(),
+        j,
+      );
+      assert.deepEqual([...actual.gaps], ["outside_catalog"]);
+      assert.deepEqual(
+        candidates(actual, end),
+        candidates({ ...evidence, gaps: new Set(["outside_catalog"]) }, end),
+      );
+      break;
+    } catch (err) {
+      if (!(err instanceof PageContinuation)) throw err;
+      assert.ok(j.saved > 0 && ++yields <= 4);
+    }
+  }
+  assert.equal(yields, 3);
+}
+// A dense single day is not evidence of a full portfolio just because each
+// of its pages fits in Redis individually.
+{
+  const { WalletPageJournal, PageContinuation } =
+    await import("./services/trader-collection-page-journal.js");
+  const dict = new Map<string, string>(),
+    requested = new Set<string | null>();
+  const full: ReadPage = async (ep, p, c) => {
+    assert.equal(ep, "activity");
+    assert.equal(p.start, String(end - DAY + 1));
+    assert.ok(!requested.has(c));
+    requested.add(c);
+    const n = Number(c ?? 0);
+    return {
+      data: Array.from({ length: 250 }, () => ({
+        type: "DEPOSIT",
+        timestamp: end,
+        proxy_wallet: owner.address,
+      })),
+      nextCursor: n < 48 ? String(n + 1) : null,
+    };
+  };
+  let overflow = false;
+  for (let v = 0; v < 8 && !overflow; v++) {
+    const journal = new WalletPageJournal(
+      {
+        get: async (k) => dict.get(k),
+        write: async (_, k, value) => {
+          dict.set(k, value);
+          return 1;
+        },
+      },
+      owner.address,
+    );
+    const cache = new Map<string, ActivityCache>([
+      [owner.address, { end: 0, rows: [], capacityUntil: end + 1800 }],
+    ]);
+    try {
+      await collectEvidence(
+        owner,
+        end,
+        full,
+        async () => {
+          throw Error("partial activity reached SQL");
+        },
+        new AbortController().signal,
+        cache,
+        journal,
+      );
+      assert.fail("partial result");
+    } catch (err) {
+      if (err instanceof PageContinuation) continue;
+      assert.equal((err as Error).message, "wallet_activity_capacity");
+      overflow = true;
+    }
+  }
+  assert.ok(overflow);
+  assert.equal(requested.size, 49);
+}
+// A position closed at a loss before the cutoff reopens AFTER OPEN was read
+// but BEFORE CLOSED is read. A short activity window cannot see its old exit.
+{
+  const { WalletPageJournal, PageContinuation } =
+    await import("./services/trader-collection-page-journal.js");
+  const dict = new Map<string, string>();
+  let reopened = false,
+    reads = 0,
+    guardCalls = 0;
+  const journal = () =>
+    new WalletPageJournal(
+      {
+        get: async (k) => dict.get(k),
+        write: async (_, k, v) => {
+          dict.set(k, v);
+          return 1;
+        },
+      },
+      owner.address,
+      () => end + 6,
+    );
+  const readMoving: ReadPage = async (ep, p, c) => {
+    if (ep === "positions") {
+      assert.equal(p.sort_by, "TIMESTAMP");
+      assert.equal(p.sort_direction, "ASC");
+      if (p.status === "OPEN") {
+        assert.ok(!reopened);
+        reads++;
+      }
+      const n = Number(c ?? 0);
+      return {
+        data: [],
+        nextCursor:
+          p.status === "REDEEMABLE_LOST" && n < 20 ? String(n + 1) : null,
+      };
+    }
+    if (ep === "activity" && p.start === String(end)) {
+      assert.ok(reopened);
+      assert.equal(p.end, String(end + 6));
+      guardCalls++;
+      return { data: [{ ...raw[0], timestamp: end + 5 }], nextCursor: null };
+    }
+    return { data: [], nextCursor: null };
+  };
+  const collect = () =>
+    collectEvidence(
+      owner,
+      end,
+      readMoving,
+      async (assets) =>
+        new Map(
+          assets.flatMap((a) => {
+            const key = assetKey(a),
+              m = markets.get(key);
+            return m ? [[key, m] as const] : [];
+          }),
+        ),
+      new AbortController().signal,
+      new Map([
+        [owner.address, { end: 0, rows: [], capacityUntil: end + 1800 }],
+      ]),
+      journal(),
+    );
+  await assert.rejects(collect(), PageContinuation);
+  reopened = true;
+  const e = await collect();
+  assert.equal(reads, 1);
+  assert.equal(guardCalls, 1);
+  assert.deepEqual([...e.gaps], ["sports"]);
+  assert.equal(
+    candidates({ ...evidence, gaps: e.gaps }, end)["winning-streaks"].length,
+    0,
+  );
+  // A transient bad economic field isn't a durable page. Other valid pages stay saved.
+  const signal = new AbortController().signal,
+    params = { user: owner.address, status: "CLOSED" };
+  let count = 0;
+  const temporary: ReadPage = async () => ({
+    data: [{ ...rawPos[0], realized_pnl: ++count === 1 ? null : "0" }],
+    nextCursor: null,
+  });
+  await assert.rejects(
+    journal().page(temporary, "positions", params, null, signal),
+    /invalid_decimal/,
+  );
+  await journal().page(temporary, "positions", params, null, signal);
+  await journal().page(temporary, "positions", params, null, signal);
+  assert.equal(count, 2);
+}
 // Independently reliable native fee-bearing P&L need not imply that an
 // individual sale's profit is known. The observed capital still belongs in
 // the normal stake distribution; omitting it turns a small trade into a whale.
@@ -589,6 +813,87 @@ const beforeResolution = await collectEvidence(
   async () => extraMarket,
   new AbortController().signal,
 );
+// Both activity windows include the cutoff. One already-seen claim must not
+// hide the entire category; an extra same-second event must still be noticed.
+{
+  const { WalletPageJournal } =
+    await import("./services/trader-collection-page-journal.js");
+  const buy = {
+    ...raw[0],
+    type: "TRADE",
+    side: "BUY",
+    size: 250,
+    usdc_size: 100,
+    timestamp: end - 200,
+  };
+  const redeem = {
+    ...raw[0],
+    type: "REDEEM",
+    side: "",
+    size: 250,
+    usdc_size: 250,
+    timestamp: end,
+    transaction_hash: "0x" + "aa".repeat(32),
+  };
+  for (const copies of [0, 1, 2]) {
+    const dict = new Map<string, string>();
+    const load: ReadPage = async (ep, p) => ({
+      nextCursor: null,
+      data:
+        ep === "positions"
+          ? p.status === "CLOSED"
+            ? [
+                {
+                  ...rawPos[0],
+                  current_size: 0,
+                  realized_pnl: 150,
+                  first_entry_at: end - 200,
+                  last_event_at: end,
+                },
+              ]
+            : []
+          : ep === "resolutions"
+            ? [
+                {
+                  condition_id: raw[0].condition_id,
+                  status: "resolved",
+                  payouts: [0, 1000000],
+                  resolved_at: new Date((end - 1) * 1000).toISOString(),
+                },
+              ]
+            : p.limit === "1"
+              ? [buy]
+              : p.start === String(end)
+                ? Array.from({ length: copies }, () => redeem)
+                : [redeem, buy],
+    });
+    const j = new WalletPageJournal(
+      {
+        get: async (k) => dict.get(k),
+        write: async (_, k, v) => {
+          dict.set(k, v);
+          return 1;
+        },
+      },
+      owner.address,
+      () => end + 5,
+    );
+    const ev = await collectEvidence(
+      owner,
+      end,
+      load,
+      async () => markets,
+      new AbortController().signal,
+      new Map(),
+      j,
+    );
+    assert.equal(
+      ev.ledgers.flatMap((x) => x.ledger.closes)[0]?.net,
+      units(150),
+    );
+    assert.equal(ev.gaps.has("sports"), copies !== 1);
+  }
+}
 const undescribedClaim: ReadPage = async (ep, p, cursor, s) => {
   const page = await claimed(ep, p, cursor, s);
   return {
