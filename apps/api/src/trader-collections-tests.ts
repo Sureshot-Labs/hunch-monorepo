@@ -1069,6 +1069,55 @@ sweep.attempts = [1, 1];
 recordEvaluation(sweep, 0, evaluateTrader(evidence, end));
 recordEvaluation(sweep, 1, evaluateTrader(evidence, end));
 const snapshots = sweepSnapshots(decodeSweep(encodeSweep(sweep)), "snap", end);
+// A partial checkpoint from the previous release can already contain complete
+// streak evaluations for wallets 51 and 100, even in a tail-only category.
+{
+  const roster = Array.from({ length: 100 }, (_, i) => {
+    const id = "00000000-0000-4000-8000-" + String(i + 1).padStart(12, "0");
+    return { ...owner, id, family: id };
+  });
+  const wide = createSweep(roster, end);
+  wide.categories = ["esports"];
+  for (const i of [50, 99]) {
+    recordEvaluation(
+      wide,
+      i,
+      evaluateTrader(
+        {
+          ...evidence,
+          owner: roster[i],
+          ledgers: evidence.ledgers.map((l) => ({
+            ...l,
+            market: { ...l.market, category: "esports" },
+          })),
+        },
+        end,
+      ),
+    );
+    wide.attempts[i]++;
+  }
+  wide.queue = wide.queue.filter((i) => !wide.attempts[i]);
+  const legacyState = { ...wide, streakCategories: ["sports"] };
+  const resumed = decodeSweep(encodeSweep(legacyState));
+  const saved = JSON.parse(encodeSweep(resumed));
+  assert.equal("streakCategories" in saved, false);
+  assert.deepEqual(saved.categories, ["esports"]);
+  const body = sweepSnapshots(resumed, "resume", end)["winning-streaks"];
+  const group = body.groups.find((g) => g.category === "esports");
+  assert.deepEqual(
+    group?.items.map((c) => c.trader.traderId),
+    [roster[50].id, roster[99].id],
+  );
+  assert.deepEqual(
+    group?.items.map((c) => c.rank),
+    [1, 2],
+  );
+  assert.equal(group?.coverage.selectedWallets, 100);
+  assert.equal(group?.coverage.observedWallets, 2);
+  assert.equal(body.diagnostics?.qualifiedWallets, 2);
+  assert.equal(body.diagnostics?.pendingWallets, 98);
+  assert.deepEqual(body.diagnostics?.exclusions, []);
+}
 const later = sweepSnapshots(sweep, "later", end + 301);
 assert.deepEqual(later["big-moves"].diagnostics?.exclusions, [
   { code: "quote_expired_before_publication", wallets: 2 },

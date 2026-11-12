@@ -161,11 +161,24 @@ const o = Array.from({ length: 100 }, (_, i) => ({
   name: null,
 }));
 const sw = createSweep(o, end);
-sw.evaluated[70] = { choices: emptyChoices(), rejected: {} };
+sw.evaluated[70] = {
+  choices: emptyChoices(),
+  rejected: { "winning-streaks": "streak_interrupted_by_loss" },
+};
 sw.attempts[70] = 1;
-sw.queue = sw.queue.filter((i) => i !== 70);
+sw.attempts[99] = 1;
+sw.failed[99] = "local_activity_timeout";
+sw.queue = sw.queue.filter((i) => !sw.attempts[i]);
 const snaps = sweepSnapshots(sw, "test", end);
-assert.equal(snaps["winning-streaks"].diagnostics?.selectedWallets, 50);
-assert.equal(snaps["winning-streaks"].diagnostics?.observedWallets, 0);
+assert.deepEqual(snaps["winning-streaks"].diagnostics, {
+  scope: "whole_shortlist_at_ranking",
+  selectedWallets: 100,
+  attemptedWallets: 2,
+  pendingWallets: 98,
+  observedWallets: 1,
+  sourceFailures: [{ code: "local_activity_timeout", wallets: 1 }],
+  qualifiedWallets: 0,
+  exclusions: [{ code: "streak_interrupted_by_loss", wallets: 1 }],
+});
 assert.equal(snaps["top-earners-today"].diagnostics?.observedWallets, 1);
-console.log("global Big Moves and independent earnings/streak coverage: ok");
+console.log("global Big Moves and shared shortlist coverage: ok");

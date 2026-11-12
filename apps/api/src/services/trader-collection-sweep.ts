@@ -24,7 +24,6 @@ export type Sweep = {
   evaluated: Record<number, Evaluation>;
   failed: Record<number, SourceFailure>;
   categories: string[];
-  streakCategories?: string[];
   publishedAt: number;
   previousSnapshotExpiresAt: number;
 };
@@ -54,7 +53,6 @@ export function createSweep(
     evaluated: {},
     failed: {},
     categories: [],
-    streakCategories: [],
     publishedAt: 0,
     previousSnapshotExpiresAt: 0,
   };
@@ -67,9 +65,12 @@ export function sweepExpired(s: Sweep, now: number) {
 export const encodeSweep = (s: Sweep) =>
   JSON.stringify(s, (_, v) => (typeof v === "bigint" ? v.toString() : v));
 export const decodeSweep = (raw: string): Sweep => {
-  const state: Sweep = JSON.parse(raw, (k, v) =>
-    k === "priority" && Array.isArray(v) ? v.map(BigInt) : v,
-  );
+  const state: Sweep = JSON.parse(raw, (k, v) => {
+    // An older writer can fall back to the full categories list on rollback.
+    // Never re-save its stale first-50 list after resuming a legacy checkpoint.
+    if (k === "streakCategories") return undefined;
+    return k === "priority" && Array.isArray(v) ? v.map(BigInt) : v;
+  });
   // A pre-release live checkpoint still knows these identities. Re-open only
   // the two former per-visit hard stops, once, after fresh owners get a turn.
   // Completed, already-discarded historic rosters cannot be reconstructed.
@@ -195,27 +196,6 @@ export function sweepSnapshots(s: Sweep, id: string, now: number) {
         .filter((v) => v.wallets > 0),
     };
     out[k].diagnostics = diagnostic;
-  }
-  // Earnings gets the larger roster. Streaks keeps the exact first 50 and
-  // their completion counts, exclusions, groups and rankings even mid-sweep.
-  if (s.owners.length > 50) {
-    const first = <T>(rows: Record<number, T>) =>
-      Object.fromEntries(
-        Object.entries(rows).filter(([ordinal]) => Number(ordinal) < 50),
-      );
-    out["winning-streaks"] = sweepSnapshots(
-      {
-        ...s,
-        owners: s.owners.slice(0, 50),
-        attempts: s.attempts.slice(0, 50),
-        queue: s.queue.filter((i) => i < 50),
-        evaluated: first(s.evaluated),
-        failed: first(s.failed),
-        categories: s.streakCategories ?? s.categories,
-      },
-      id,
-      now,
-    )["winning-streaks"];
   }
   return out;
 }
