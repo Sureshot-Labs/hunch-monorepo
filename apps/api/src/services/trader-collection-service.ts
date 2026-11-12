@@ -39,7 +39,7 @@ export function servingWindow(
       generatedAt: iso(nextEnd),
       windowEnd: iso(nextEnd),
       windowStart: k === "winning-streaks" ? null : iso(nextEnd - 86400),
-      policyVersion: 1,
+      policyVersion: k === "big-moves" ? 2 : 1,
       methodologyVersion: 2,
       freshness: "stale",
       availability: "preparing",
@@ -74,7 +74,7 @@ const saveProgress = (
 else redis.call('SET',KEYS[${index}],ARGV[#ARGV],'EX',604800) end
 for i=${index + 1},#KEYS do redis.call('UNLINK',KEYS[i]) end`;
 export const TRADER_PUBLISH = `if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
-for i=2,4 do redis.call('SET',KEYS[i],ARGV[i],'EX',ARGV[5]) end
+for i=2,4 do if ARGV[i]~='' then redis.call('SET',KEYS[i],ARGV[i],'EX',ARGV[5]) end end
 ${saveProgress(5)}
 return 1`;
 export const TRADER_CHECKPOINT = `if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
@@ -131,6 +131,17 @@ export function traderSliceAction(slice: {
 export type LoadCollection = (
   k: Collection,
 ) => Promise<CollectionResponse | null>;
+// Blank payload means keep the prior key (including its original expiry).
+export function shortlistPublication(body: CollectionResponse): string {
+  if (
+    body.collection === "big-moves" ||
+    (body.diagnostics &&
+      body.diagnostics.selectedWallets > 0 &&
+      body.diagnostics.observedWallets === 0)
+  )
+    return "";
+  return JSON.stringify(body);
+}
 /** This read path has no capability to query SQL, call a provider or schedule work. */
 export async function readCollection(
   load: LoadCollection,
@@ -187,7 +198,11 @@ export async function readCollection(
       sourceAsOf: body.windowEnd,
       items: [],
       coverage: {
-        universe: "recent_active_tracked_shortlist",
+        universe:
+          k === "big-moves" &&
+          body.diagnostics?.scope === "all_public_position_increases"
+            ? "all_public_wallet_intel"
+            : "recent_active_tracked_shortlist",
         resultScope: "servable_hunch_catalog_positions",
         venues: ["polymarket"],
         basis:

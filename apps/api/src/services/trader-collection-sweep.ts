@@ -24,6 +24,7 @@ export type Sweep = {
   evaluated: Record<number, Evaluation>;
   failed: Record<number, SourceFailure>;
   categories: string[];
+  streakCategories?: string[];
   publishedAt: number;
   previousSnapshotExpiresAt: number;
 };
@@ -53,6 +54,7 @@ export function createSweep(
     evaluated: {},
     failed: {},
     categories: [],
+    streakCategories: [],
     publishedAt: 0,
     previousSnapshotExpiresAt: 0,
   };
@@ -193,6 +195,27 @@ export function sweepSnapshots(s: Sweep, id: string, now: number) {
         .filter((v) => v.wallets > 0),
     };
     out[k].diagnostics = diagnostic;
+  }
+  // Earnings gets the larger roster. Streaks keeps the exact first 50 and
+  // their completion counts, exclusions, groups and rankings even mid-sweep.
+  if (s.owners.length > 50) {
+    const first = <T>(rows: Record<number, T>) =>
+      Object.fromEntries(
+        Object.entries(rows).filter(([ordinal]) => Number(ordinal) < 50),
+      );
+    out["winning-streaks"] = sweepSnapshots(
+      {
+        ...s,
+        owners: s.owners.slice(0, 50),
+        attempts: s.attempts.slice(0, 50),
+        queue: s.queue.filter((i) => i < 50),
+        evaluated: first(s.evaluated),
+        failed: first(s.failed),
+        categories: s.streakCategories ?? s.categories,
+      },
+      id,
+      now,
+    )["winning-streaks"];
   }
   return out;
 }

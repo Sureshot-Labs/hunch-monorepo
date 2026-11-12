@@ -10,6 +10,8 @@ import {
 } from "./trader-collection-local.js";
 import { discardDedicatedRedis, getDedicatedRedis } from "../redis.js";
 import { TraderRepository } from "../repos/trader-collections.js";
+import { GlobalMoveRepository } from "../repos/trader-global-moves.js";
+import { buildGlobalMoves } from "./trader-global-moves.js";
 import { discoveryReadOnly } from "../repos/discovery.js";
 import {
   collections,
@@ -47,12 +49,14 @@ import {
   expediteNextSweep,
   replacementDue,
   TRADER_PUBLISH,
+  shortlistPublication,
   TRADER_CHECKPOINT,
   traderRedisCommand,
   traderSliceAction,
 } from "./trader-collection-service.js";
 
 const prefix = "intel:trader-collections:local-v2:",
+  movesPrefix = "intel:trader-collections:all-moves-v1:",
   lock = prefix + "lease",
   leaseMs = 60000;
 const redisFor = (lane: string) =>
@@ -62,7 +66,12 @@ export async function loadTraderCollection(k: Collection) {
     redis = await redisFor(name);
   if (!redis) return null;
   const [raw, marker] = await traderRedisCommand(
-    () => redis.mGet([prefix + k, prefix + "preparing"]),
+    () =>
+      redis.mGet(
+        k === "big-moves"
+          ? [movesPrefix + "ranked", movesPrefix + "preparing"]
+          : [prefix + k, prefix + "preparing"],
+      ),
     () => discardDedicatedRedis(name, redis),
     850,
   );
@@ -77,10 +86,68 @@ const progressKey = prefix + "build";
 const pack = promisify(deflateRaw),
   unpack = promisify(inflateRaw);
 let timer: ReturnType<typeof setInterval> | null = null,
+  movesRunning: Promise<void> | null = null,
   ongoing: Promise<void> | null = null,
   stopper: AbortController | null = null,
   next = 0,
   rotation = 0;
+async function globalMovesCycle(signal: AbortSignal) {
+  const name = "trader-global-moves",
+    redis = await redisFor(name);
+  if (!redis || signal.aborted) return;
+  const command = <T>(work: () => Promise<T>) =>
+    traderRedisCommand(work, () => discardDedicatedRedis(name, redis));
+  const owner = randomUUID(),
+    key = movesPrefix + "lease",
+    end = Math.floor(Date.now() / 1000);
+  if (
+    (await command(() => redis.set(key, owner, { NX: true, PX: 120000 }))) !==
+    "OK"
+  )
+    return;
+  const stop = AbortSignal.any([signal, AbortSignal.timeout(90000)]);
+  try {
+    const prior = Number(
+      await command(() => redis.get(movesPrefix + "preparing")),
+    );
+    if (prior > 0 && end - prior < NORMAL_INTERVAL) return;
+    const save = (target: string, value: string) =>
+      command(() =>
+        redis.eval(TRADER_SAVE_CALC, {
+          keys: [key, movesPrefix + target],
+          arguments: [
+            owner,
+            String(end + SNAPSHOT_TTL + HANDOFF_SECONDS),
+            value,
+          ],
+        }),
+      );
+    if (!Number(await save("preparing", String(end)))) return;
+    const whale = await discoveryReadOnly(
+      pool,
+      async (c) =>
+        (await resolveWalletIntelRefreshPolicy(c)).effective.whaleUsd,
+    );
+    const body = await buildGlobalMoves(
+      new GlobalMoveRepository(pool),
+      new TraderRepository(pool),
+      end,
+      owner,
+      whale,
+      stop,
+    );
+    stop.throwIfAborted();
+    if (Number(await save("ranked", JSON.stringify(body))))
+      console.info("[trader-global-moves] snapshot", {
+        wallets: body.diagnostics?.selectedWallets,
+        qualified: body.diagnostics?.qualifiedWallets,
+        cards: body.groups.reduce((s, g) => s + g.items.length, 0),
+        seconds: Date.now() / 1000 - end,
+      });
+  } finally {
+    await command(() => releaseHolderResearchRunLock({ redis, key, owner }));
+  }
+}
 async function cycle(signal: AbortSignal) {
   const name = "trader-collections-writer",
     redis = await redisFor(name);
@@ -131,7 +198,7 @@ async function cycle(signal: AbortSignal) {
       );
     let state = previous;
     if (!state || sweepExpired(state, now)) {
-      const last = await command(() => redis.get(prefix + collections[0]));
+      const last = await command(() => redis.get(prefix + "top-earners-today"));
       const prior = last ? JSON.parse(last) : null;
       const expiresAt = prior
         ? Date.parse(prior.windowEnd) / 1000 + SNAPSHOT_TTL
@@ -149,7 +216,7 @@ async function cycle(signal: AbortSignal) {
           (await resolveWalletIntelRefreshPolicy(c)).effective.whaleUsd,
       );
       stop.throwIfAborted();
-      const shortlist = await repo.owners(now, whale),
+      const shortlist = await repo.owners(now, whale, 100),
         offset = rotation % Math.max(1, shortlist.length);
       state = createSweep(shortlist, now, offset, previous);
       state.previousSnapshotExpiresAt = expiresAt;
@@ -198,7 +265,15 @@ async function cycle(signal: AbortSignal) {
             if (rows.length < 1000) {
               scanning = false;
               const e = await localEvidence(calc, o, repo, stop);
-              for (const leg of e.ledgers) cats.add(leg.market.category);
+              for (const leg of e.ledgers) {
+                cats.add(leg.market.category);
+                if (
+                  ordinal < 50 &&
+                  sweep.streakCategories &&
+                  !sweep.streakCategories.includes(leg.market.category)
+                )
+                  sweep.streakCategories.push(leg.market.category);
+              }
               recordEvaluation(
                 sweep,
                 ordinal,
@@ -314,7 +389,7 @@ async function cycle(signal: AbortSignal) {
         ],
         arguments: [
           owner,
-          ...collections.map((k) => JSON.stringify(snapshots[k])),
+          ...collections.map((k) => shortlistPublication(snapshots[k])),
           String(SNAPSHOT_TTL + HANDOFF_SECONDS),
           state.queue.length ? encodeSweep(state) : "",
         ],
@@ -344,6 +419,21 @@ export function startTraderCollections() {
   stopper = new AbortController();
   const signal = stopper.signal;
   const run = () => {
+    if (!movesRunning && Date.now() >= nextMoves) {
+      nextMoves = Date.now() + NORMAL_INTERVAL * 1000;
+      movesRunning = globalMovesCycle(signal)
+        .catch((e: unknown) =>
+          console.warn("[trader-global-moves] refresh unavailable", {
+            reason:
+              e instanceof Error && "code" in e
+                ? String(e.code)
+                : "refresh_failed",
+          }),
+        )
+        .finally(() => {
+          movesRunning = null;
+        });
+    }
     if (!ongoing && Date.now() >= next) {
       next = Date.now() + NORMAL_INTERVAL * 1000;
       ongoing = cycle(signal)
@@ -355,6 +445,7 @@ export function startTraderCollections() {
         });
     }
   };
+  let nextMoves = 0;
   timer = setInterval(run, TICK_SECONDS * 1000);
   timer.unref();
   run();
@@ -363,5 +454,5 @@ export async function stopTraderCollections() {
   if (timer) clearInterval(timer);
   timer = null;
   stopper?.abort();
-  await ongoing;
+  await Promise.all([ongoing, movesRunning]);
 }

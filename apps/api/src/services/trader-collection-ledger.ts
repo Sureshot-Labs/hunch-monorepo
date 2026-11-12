@@ -61,6 +61,7 @@ export type Position = {
   redeemable?: boolean;
 };
 export type Market = {
+  oppositeToken?: string;
   instrument: Instrument;
   category: string;
   condition: string;

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { createClient } from "redis";
 import {
   TRADER_PUBLISH,
+  shortlistPublication,
   TRADER_CHECKPOINT,
   TRADER_SAVE_CALC,
   TRADER_START,
@@ -289,6 +290,26 @@ try {
     }
   }
   assert.equal(await redis.get(checkpoint), null);
+  // Observing earnings ordinals 50..99 cannot overwrite a valid Streaks
+  // ranking when none of its own first 50 wallets could be read.
+  const larger = createSweep([...s.owners, ...s.owners], end);
+  larger.evaluated[70] = { choices: emptyChoices(), rejected: {} };
+  const tail = sweepSnapshots(larger, "tail-only", end);
+  const retained = await read();
+  const payload = collections.map((k) => shortlistPublication(tail[k]));
+  assert.equal(payload[0], "");
+  assert.equal(payload[2], "");
+  assert.equal(
+    await redis.eval(TRADER_PUBLISH, {
+      keys,
+      arguments: ["holder2", ...payload, "1800", ""],
+    }),
+    1,
+  );
+  const after = await read();
+  assert.equal(after[0], retained[0]);
+  assert.equal(after[2], retained[2]);
+  assert.equal(JSON.parse(after[1] ?? "null").snapshotId, "tail-only");
   const before = await redis.mGet(keys.slice(1, 4));
   await save("holder2", "unavailable cohort");
   assert.equal(await save("holder2", ""), 1);

@@ -10,11 +10,11 @@ import type { Owner } from "../services/trader-collection-ranking.js";
 
 // Bound the driving index walk BEFORE eligibility filters/joins, not after.
 // Shortlist hints only: a positive share delta is not an executed buy.
-const publicSourcesSql =
+export const publicSourcesSql =
   "('polymarket','auto_tracked_wallet','alchemy','followed_wallet')";
-const tokenSql = (doc: string) =>
+export const tokenSql = (doc: string) =>
   `CASE WHEN NOT (${doc} ? 'assets') THEN coalesce(${doc}->>'onchainTokenId',${doc}->>'tokenId') WHEN jsonb_typeof(${doc}->'assets')='array' THEN CASE WHEN jsonb_array_length(${doc}->'assets')=1 THEN ${doc}#>>'{assets,0,tokenId}' END END`;
-const contractSql = (doc: string) =>
+export const contractSql = (doc: string) =>
   `lower(coalesce(${doc}#>>'{assets,0,positionContract}',${doc}->>'positionContract',''))`;
 const actualZero = `EXISTS(SELECT 1 FROM wallet_position_snapshots ws WHERE ws.wallet_id=a.wallet_id AND ws.venue=a.venue AND ws.market_id=a.market_id AND ws.outcome_side=a.outcome_side AND ws.snapshot_at=a.occurred_at AND ws.shares=0 AND ws.metadata->>'source' IN ${publicSourcesSql})`;
 const largePurchaseHint = `a.occurred_at>$1::timestamptz-interval '24 hours' AND a.action='BUY' AND a.size_usd >= 500 AND a.size_usd < 'Infinity'::numeric AND a.delta_shares>0 AND a.delta_shares<'Infinity'::numeric`;
@@ -61,7 +61,7 @@ export const TRADER_COHORT_SQL = `WITH recent_wallets AS MATERIALIZED (
  UNION ALL
  SELECT wallet_id,(row_number() OVER (ORDER BY last_activity_at DESC,wallet_id DESC)-1)*5+4 FROM hinted_wallets
  ), selected_wallets AS (
- SELECT wallet_id,min(slot_number) AS first_slot FROM lane_slots GROUP BY wallet_id ORDER BY first_slot,wallet_id DESC LIMIT 50)
+ SELECT wallet_id,min(slot_number) AS first_slot FROM lane_slots GROUP BY wallet_id ORDER BY first_slot,wallet_id DESC LIMIT $4::int)
  SELECT h.wallet_id::text AS id,h.address,h.owner_family,h.venue_name FROM selected_wallets s
  JOIN hinted_wallets h ON h.wallet_id=s.wallet_id ORDER BY s.first_slot,h.wallet_id DESC`;
 // Check frozen bindings for every asset, including historical instruments.
@@ -81,7 +81,8 @@ const marketLookupSql = (
  extract(epoch FROM least(m.close_time,m.expiration_time))::float8 AS tradable_until,
  ${
    local
-     ? `CASE WHEN lower(m.condition_id)=k.c AND m.resolution_observed_at <= $2::timestamptz AND
+     ? `protocol_row.protocol_doc->'assets'->>(1-k.i) AS opposite_token,
+ CASE WHEN lower(m.condition_id)=k.c AND m.resolution_observed_at <= $2::timestamptz AND
  ((m.resolved_outcome::text='YES' AND (m.resolved_outcome_pct IS NULL OR m.resolved_outcome_pct=10000)) OR
  (m.resolved_outcome::text='NO' AND (m.resolved_outcome_pct IS NULL OR m.resolved_outcome_pct=0))) THEN m.resolved_outcome::text END AS winner,
  extract(epoch FROM m.resolution_observed_at)::float8 AS resolved_at,`
@@ -165,7 +166,11 @@ export const assetKey = (v: {
 }) => `${v.condition}:${v.token}:${v.index}`;
 export class TraderRepository {
   constructor(private db: Pick<Pool, "connect">) {}
-  owners(end: number, whaleUsd: number): Promise<Owner[]> {
+  owners(
+    end: number,
+    whaleUsd: number,
+    limit: 50 | 100 = 50,
+  ): Promise<Owner[]> {
     return discoveryReadOnly(this.db, async (c) =>
       (
         await c.query<{
@@ -177,6 +182,7 @@ export class TraderRepository {
           new Date(end * 1000),
           whaleUsd,
           walletIntelProtocolAddresses(),
+          limit,
         ])
       ).rows.map((r) => ({
         id: r.id,
@@ -250,6 +256,7 @@ export class TraderRepository {
           terminal: r.terminal === true,
           ...(local
             ? {
+                oppositeToken: r.opposite_token ?? undefined,
                 winner: r.winner,
                 resolvedAt: r.resolved_at,
                 markBid: r.mark_bid == null ? null : units(r.mark_bid),
