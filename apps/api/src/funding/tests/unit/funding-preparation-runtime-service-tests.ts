@@ -611,6 +611,49 @@ await test("Limitless readiness selects the explicit market exchange over the le
   assert.notEqual(legacy.clobAddress, marketExchange);
 });
 
+await test("Limitless SELL resolves the indexed market adapter without changing market class", () => {
+  const adapter = "0x6151EF8368b6316c1aa3C68453EF083ad31E712D";
+  for (const metadata of [
+    { venueAdapter: adapter },
+    { venue: { adapter } },
+    { adapter_address: adapter },
+  ]) {
+    const context =
+      walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+        venue: "limitless",
+        market: { ...market, venue: "limitless", metadata },
+        requestedMarketClass: "clob",
+      });
+    assert.equal(context.marketClass, "clob");
+    assert.equal(context.adapterAddress, adapter);
+    assert.equal(context.evidence.adapterResolved, true);
+  }
+});
+
+await test("invalid Limitless adapter metadata cannot falsely satisfy adapter resolution", () => {
+  for (const metadata of [
+    { venueAdapter: "not-an-address" },
+    { venue: { adapter: "not-an-address" } },
+  ]) {
+    const context =
+      walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+        venue: "limitless",
+        market: { ...market, venue: "limitless", metadata },
+        requestedMarketClass: "clob",
+      });
+    assert.equal(context.adapterAddress, null);
+    assert.equal(context.evidence.adapterResolved, false);
+  }
+  const ordinary =
+    walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+      venue: "limitless",
+      market: { ...market, venue: "limitless", metadata: {} },
+      requestedMarketClass: "clob",
+    });
+  assert.equal(ordinary.evidence.adapterResolved, true);
+  assert.equal(ordinary.adapterAddress, null);
+});
+
 await test("only the canonical derived Deposit Wallet is owner verified", () => {
   const signer = wallets[0].walletAddress;
   const canonicalDeposit = wallets[1].walletAddress;

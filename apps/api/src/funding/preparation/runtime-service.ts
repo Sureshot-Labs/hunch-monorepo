@@ -25,7 +25,10 @@ import {
   resolveLimitlessAuthContext,
 } from "../../services/limitless-auth.js";
 import { isLimitlessPartnerHmacConfigured } from "../../services/limitless-client.js";
-import { extractLimitlessMarketExchangeAddress } from "../../services/limitless-market-contracts.js";
+import {
+  extractLimitlessMarketExchangeAddress,
+  resolveLimitlessMarketAdapter,
+} from "../../services/limitless-market-contracts.js";
 import { fetchLimitlessOnchainSnapshot } from "../../services/limitless-onchain.js";
 import { fetchOpenOrderCollateralLocks } from "../../services/open-order-collateral.js";
 import {
@@ -596,16 +599,13 @@ function runtimeMarketContextFromMarket(input: {
           "amm_address",
         )
       : null;
+  const limitlessAdapter =
+    input.venue === "limitless"
+      ? resolveLimitlessMarketAdapter(input.market.metadata)
+      : null;
   const adapterAddress =
     input.venue === "limitless"
-      ? metadataString(
-          input.market.metadata,
-          "adapter",
-          "adapterAddress",
-          "adapter_address",
-          "negRiskAdapter",
-          "neg_risk_adapter",
-        )
+      ? (limitlessAdapter?.address ?? null)
       : v2
         ? POLYMARKET_PROTOCOL_CONTRACTS.router
         : negRisk
@@ -666,6 +666,7 @@ function runtimeMarketContextFromMarket(input: {
       orderable: classMatches && isOrderable(input.market),
       adapterResolved:
         classMatches &&
+        limitlessAdapter?.status !== "invalid" &&
         (marketClass.includes("neg_risk")
           ? Boolean(adapterAddress)
           : routeResolved),
@@ -1836,6 +1837,7 @@ export class WalletPreparationRuntimeService {
         reservedRaw,
         marketRef: marketContext.evidence.safeMarketRef,
         marketExchangeAddress: marketContext.exchangeAddress,
+        marketAdapterAddress: marketContext.adapterAddress,
         marketAdapterRequired: Boolean(marketContext.adapterAddress),
         directCollateralAllowanceRaw:
           (effectiveMarketClass === "clob_neg_risk"

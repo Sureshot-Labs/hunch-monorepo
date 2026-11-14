@@ -16,6 +16,7 @@ import {
 } from "../../preparation/runtime-actions.js";
 import type { VenueAccountBinding } from "../../domain/types.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
+import { resolveLimitlessMarketAdapter } from "../../../services/limitless-market-contracts.js";
 
 const OBSERVED_AT = "2026-07-24T12:00:00.000Z";
 const erc20Interface = new Interface([
@@ -328,6 +329,45 @@ await test("Limitless connect and CLOB approval use the exact market exchange", 
       actions[1].action.data,
     );
     assert.equal(String(decoded[0]).toLowerCase(), marketExchange);
+  }
+});
+
+await test("Limitless SELL materializes only the indexed adapter's ERC1155 permission", async () => {
+  const marketAdapter = "0x6151EF8368b6316c1aa3C68453EF083ad31E712D";
+  const ctf = new Interface([
+    "function setApprovalForAll(address operator,bool approved)",
+  ]);
+  for (const internal of [true, false]) {
+    const resolved = resolveLimitlessMarketAdapter({
+      venueAdapter: marketAdapter,
+    });
+    const materialize = createLimitlessRuntimeActionMaterializer({
+      wallet: wallet(internal),
+      adapterAddress: resolved.address,
+      ammAddress: null,
+      clobAddress: "0xe3E00BA3a9888d1DE4834269f62ac008b4BB5C47",
+      fetchSigningMessage: async () => {
+        throw Error("SELL approval must not reconnect or sign a trade");
+      },
+    });
+    const actions = await materialize(
+      materializerInput(binding("limitless"), [
+        requirement("approve-market_adapter_approval", "evm_transaction"),
+      ]),
+    );
+    assert.equal(actions.length, 1);
+    const action = actions[0]?.action;
+    assert.equal(action?.kind, "evm_transaction");
+    if (action?.kind !== "evm_transaction") throw Error("approval missing");
+    assert.equal(
+      action.to.toLowerCase(),
+      fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress.toLowerCase(),
+    );
+    assert.equal(action.networkId, "evm:8453");
+    assert.equal(action.valueRaw, "0");
+    const decoded = ctf.decodeFunctionData("setApprovalForAll", action.data);
+    assert.equal(String(decoded[0]).toLowerCase(), marketAdapter.toLowerCase());
+    assert.equal(decoded[1], true);
   }
 });
 
