@@ -78,7 +78,10 @@ import {
   fetchEvmCode,
 } from "./polygon-rpc.js";
 import { fetchLimitlessOnchainSnapshot } from "./limitless-onchain.js";
-import { extractLimitlessMarketExchangeAddress } from "./limitless-market-contracts.js";
+import {
+  extractLimitlessMarketAdapterAddress,
+  extractLimitlessMarketExchangeAddress,
+} from "./limitless-market-contracts.js";
 import { isLimitlessAmmMarketMetadata } from "./limitless-market-mode.js";
 import { readLimitlessAmmMarketAddress } from "./limitless-amm-address.js";
 import {
@@ -2918,52 +2921,6 @@ function extractLimitlessTokenPair(
 
   if (!tokenYes && !tokenNo) return null;
   return { tokenYes, tokenNo };
-}
-
-function extractLimitlessMarketAdapterAddress(payload: unknown): string | null {
-  const marketRecord = isRecord(payload)
-    ? isRecord(payload.market)
-      ? payload.market
-      : payload
-    : null;
-  if (!marketRecord) return null;
-
-  const directCandidates = [
-    marketRecord.operator,
-    marketRecord.operatorAddress,
-    marketRecord.negRiskOperator,
-    marketRecord.negRiskOperatorAddress,
-    marketRecord.negRiskAdapter,
-    marketRecord.adapter,
-    marketRecord.adapterAddress,
-    marketRecord.venueAdapter,
-    marketRecord.exchangeAdapter,
-  ];
-  for (const candidate of directCandidates) {
-    if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
-      return ethers.getAddress(candidate.trim());
-    }
-  }
-
-  const venue = marketRecord.venue;
-  if (isRecord(venue)) {
-    const nestedCandidates = [
-      venue.operator,
-      venue.operatorAddress,
-      venue.negRiskOperator,
-      venue.negRiskOperatorAddress,
-      venue.adapter,
-      venue.adapterAddress,
-      venue.exchangeAdapter,
-    ];
-    for (const candidate of nestedCandidates) {
-      if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
-        return ethers.getAddress(candidate.trim());
-      }
-    }
-  }
-
-  return null;
 }
 
 function resolveLimitlessLegacyOperatorForExchange(

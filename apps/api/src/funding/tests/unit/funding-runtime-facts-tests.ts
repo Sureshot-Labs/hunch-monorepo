@@ -465,6 +465,66 @@ await test("protocol V2 requires only its own V3 exchange and PM permissions", a
   }
 });
 
+await test("Limitless SELL cannot be ready with exchange approval but missing market adapter approval", async () => {
+  const exactBinding = binding("limitless");
+  for (const marketClass of ["clob", "clob_neg_risk", "amm", "amm_neg_risk"]) {
+    let evidence = limitlessEvidence({
+      binding: exactBinding,
+      cashRaw: "0",
+      clobApproval: true,
+      negRiskClobApproval: true,
+      ammApproval: true,
+      marketAdapterRequired: true,
+      marketAdapterApproval: false,
+    });
+    const inspect = () =>
+      new LimitlessWalletPreparationAdapter(
+        async (request) => buildLimitlessRuntimeFacts(request, evidence),
+        () => NOW,
+      ).inspect(input(exactBinding, "sell", marketClass));
+    const before = await inspect();
+    assert.equal(before.status, "setup_required");
+    assert.equal(before.requiredActions.length, 1);
+    assert.equal(
+      before.requiredActions[0]?.safeLabel,
+      "Approve the canonical Limitless market adapter",
+    );
+    assert.ok(
+      before.evidence.checks.some(
+        (check) =>
+          check.checkId === "market_adapter_approval" &&
+          check.status === "action_required",
+      ),
+    );
+    evidence = { ...evidence, marketAdapterApproval: true };
+    const after = await inspect();
+    assert.equal(after.status, "ready");
+    assert.deepEqual(after.requiredActions, []);
+    assert.notEqual(before.inspectionRevision, after.inspectionRevision);
+  }
+});
+
+await test("Limitless adapter identity is included in preparation revision even before approval changes", async () => {
+  const exactBinding = binding("limitless");
+  const revision = async (marketAdapterAddress: string) => {
+    const evidence = limitlessEvidence({
+      binding: exactBinding,
+      marketAdapterRequired: true,
+      marketAdapterApproval: false,
+      safeEvidence: { marketAdapterAddress },
+    });
+    return new LimitlessWalletPreparationAdapter(
+      async (request) => buildLimitlessRuntimeFacts(request, evidence),
+      () => NOW,
+    ).inspect(input(exactBinding, "sell", "clob"));
+  };
+  const first = await revision("0x00000000000000000000000000000000000000a1");
+  const changed = await revision("0x00000000000000000000000000000000000000b2");
+  assert.equal(first.status, "setup_required");
+  assert.equal(changed.status, "setup_required");
+  assert.notEqual(first.inspectionRevision, changed.inspectionRevision);
+});
+
 await test("Polymarket runtime facts produce ready rows for every purpose", async () => {
   for (const purpose of [
     "fund",
