@@ -955,6 +955,9 @@ export async function planProductionFundingSourceBoundaries(
   input: Readonly<{
     adapted: readonly PlannedSourceOption[];
     requiredAmount: Money;
+    /** Exact-input consent is not a residual funding request. Other balances
+     * must not suppress discovery or be added to the confirmed input. */
+    exactSourceInput?: boolean;
     destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
@@ -972,16 +975,20 @@ export async function planProductionFundingSourceBoundaries(
   }>,
 ): Promise<FundingSourcePlanningResult> {
   const requirements = {
-    automatic: remainingFundingRequirementAfterVenuePreparation(
-      input.adapted,
-      input.requiredAmount,
-      "automatic",
-    ),
-    client_handoff: remainingFundingRequirementAfterVenuePreparation(
-      input.adapted,
-      input.requiredAmount,
-      "client_handoff",
-    ),
+    automatic: input.exactSourceInput
+      ? input.requiredAmount
+      : remainingFundingRequirementAfterVenuePreparation(
+          input.adapted,
+          input.requiredAmount,
+          "automatic",
+        ),
+    client_handoff: input.exactSourceInput
+      ? input.requiredAmount
+      : remainingFundingRequirementAfterVenuePreparation(
+          input.adapted,
+          input.requiredAmount,
+          "client_handoff",
+        ),
   } as const;
   const discoveries = new Map<string, Promise<ProductionRelayDiscovery>>();
   const discover = (
@@ -1036,15 +1043,19 @@ export async function planProductionFundingSourceBoundaries(
     maximumFeeBps: input.maximumFeeBps,
     feeReferenceUsd: input.feeReferenceUsd,
   } as const;
-  const automaticComposite = buildCompositeSourceOption({
-    ...compositeInput,
-    candidates: [...automaticDiscovery.adapted, ...automaticRelay],
-  });
-  const clientComposite = buildCompositeSourceOption({
-    ...compositeInput,
-    candidates: [...clientDiscovery.adapted, ...clientRelay],
-    executionBoundary: "client_handoff",
-  });
+  const automaticComposite = input.exactSourceInput
+    ? null
+    : buildCompositeSourceOption({
+        ...compositeInput,
+        candidates: [...automaticDiscovery.adapted, ...automaticRelay],
+      });
+  const clientComposite = input.exactSourceInput
+    ? null
+    : buildCompositeSourceOption({
+        ...compositeInput,
+        candidates: [...clientDiscovery.adapted, ...clientRelay],
+        executionBoundary: "client_handoff",
+      });
   const sources = [
     ...automaticDiscovery.adapted,
     ...clientDiscovery.adapted,
@@ -1111,6 +1122,7 @@ export class ProductionFundingSourcePlanner {
     const planned = await planProductionFundingSourceBoundaries({
       adapted,
       requiredAmount: input.requiredAmount,
+      exactSourceInput: input.request.confirmedSourceAmount != null,
       destinationUnitPriceUsd:
         input.destinationFacts?.collateralValuation?.unitPriceUsd ?? null,
       maximumFeeUsd: limits.maximumFeeUsd,

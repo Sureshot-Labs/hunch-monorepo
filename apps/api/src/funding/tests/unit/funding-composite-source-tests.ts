@@ -19,7 +19,12 @@ import {
   planOrderedFundingContributions,
   remainingFundingRequirementAfterVenuePreparation,
   restrictResidualSourcesToCompositeContribution,
+  ProductionFundingSourcePlanner,
 } from "../../planner/production-source-planner.js";
+import { quoteFundingReceiveReceipt } from "../../receive/receive-receipt-router.js";
+import type { FundingReceiveReceiptRoutingTarget } from "../../persistence/funding-receive-session-repository.js";
+import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
+import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
 import type { PlannedSourceOption } from "../../planner/planning-types.js";
 import { sourceOptionSchema } from "../../../schemas/funding.js";
 import { recommendedSource } from "../../planner/planner.js";
@@ -894,6 +899,191 @@ const productionClientComposite = productionBoundaryPlan.sources.find(
   (source) => source.option.kind === "composite",
 );
 assert.ok(productionClientComposite);
+
+// Receive reviews have an exact received source and a one-atom destination
+// floor. An unrelated local preparation can cover that floor, but cannot
+// replace the source the user is reviewing or suppress its Relay discovery.
+{
+  const exactSourceRequirements: Array<{ boundary: string; raw: string }> = [];
+  const exactReceipt = partialSource({
+    id: "exact_received_usdc",
+    location: sourceLocation(
+      "exact_received_usdc",
+      "evm:137",
+      "0x00000000000000000000000000000000000000b6",
+    ),
+    sourceRaw: "1100000",
+    expectedRaw: "1090000",
+    minimumRaw: "1080000",
+    feeUsd: "0.01",
+  });
+  const selectableReceipt = {
+    ...exactReceipt,
+    option: { ...exactReceipt.option, selectable: true, reasonCodes: [] },
+  };
+  const dustPreparation = {
+    ...preparation,
+    option: {
+      ...preparation.option,
+      selectable: true,
+      reasonCodes: [],
+      expectedDestination: money(DESTINATION_ASSET, "1"),
+      minimumDestination: money(DESTINATION_ASSET, "1"),
+    },
+  };
+  const exactPlan = await planProductionFundingSourceBoundaries({
+    adapted: [dustPreparation],
+    requiredAmount: money(DESTINATION_ASSET, "1"),
+    exactSourceInput: true,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    discoverRelay: async (requiredAmount, boundary) => {
+      exactSourceRequirements.push({ boundary, raw: requiredAmount.raw });
+      return { sources: [selectableReceipt], reasonCodes: [] };
+    },
+  });
+  assert.deepEqual(
+    exactSourceRequirements.sort((left, right) =>
+      left.boundary.localeCompare(right.boundary),
+    ),
+    [
+      { boundary: "automatic", raw: "1" },
+      { boundary: "client_handoff", raw: "1" },
+    ],
+  );
+  assert.ok(
+    exactPlan.sources.some(
+      (source) =>
+        source.option.sourceOptionId ===
+          selectableReceipt.option.sourceOptionId && source.option.selectable,
+    ),
+  );
+  assert.equal(
+    exactPlan.sources.some((source) => source.option.kind === "composite"),
+    false,
+  );
+
+  const insufficientExactPlan = await planProductionFundingSourceBoundaries({
+    adapted: [clientPreparation],
+    requiredAmount: money(DESTINATION_ASSET, "2282018"),
+    exactSourceInput: true,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    discoverRelay: async (requiredAmount) => {
+      assert.equal(
+        requiredAmount.raw,
+        "2282018",
+        "an explicit source must not be sized as a residual of another wallet",
+      );
+      return { sources: [clientSolana], reasonCodes: [] };
+    },
+  });
+  assert.equal(
+    insufficientExactPlan.sources.some(
+      (source) => source.option.kind === "composite",
+    ),
+    false,
+    "fixed-source consent must never pull in extra preparation inputs",
+  );
+
+  // Exercise production dispatch and receive-review selection together, not
+  // just the lower-level boundary helper. The two boundaries share one exact
+  // source discovery; no extra provider quote or alternative wallet is needed.
+  let relayQueries = 0;
+  const sourcePlanner = new ProductionFundingSourcePlanner(
+    {
+      query: () => {
+        throw new Error("fixture must not query a database");
+      },
+    } as never,
+    { projection: { components: [] } } as unknown as AccountValueReadModel,
+    [{ adapterId: "fixture_preparation", list: async () => [dustPreparation] }],
+  );
+  Object.defineProperty(sourcePlanner, "listBlockingReasonCodes", {
+    value: async () => [],
+  });
+  Object.defineProperty(sourcePlanner, "relaySourceFacts", { value: () => [] });
+  Object.defineProperty(sourcePlanner, "relayPlanner", {
+    value: () => ({
+      discover: async (input: FundingSourcePlanningInput) => {
+        relayQueries++;
+        assert.equal(input.requiredAmount.raw, "1");
+        assert.equal(input.request.confirmedSourceAmount?.raw, "1100000");
+        return { sources: [selectableReceipt], reasonCodes: [] };
+      },
+    }),
+  });
+  const receiptLocation = selectableReceipt.option.source;
+  assert.equal(receiptLocation.kind, "owned_location");
+  if (receiptLocation.kind !== "owned_location")
+    throw new Error("fixture source must be owned");
+  const target = {
+    userId: "account_composite_12345678",
+    receiptDestinationLocationId: receiptLocation.location.locationId,
+    destinationOptionId: "destination_exact_receipt_review_12345678",
+    venueBindingOptionId: "binding_exact_receipt_review_12345678",
+    automationPolicy: { maximumFeeUsd: "1", maximumSlippageBps: 100 },
+    receipt: {
+      rawAmount: "1100000",
+      asset: receiptLocation.location.asset,
+      destinationAddress: receiptLocation.location.details.address,
+    },
+  } as unknown as FundingReceiveReceiptRoutingTarget;
+  const confirmedSourceAmount = money(
+    receiptLocation.location.asset,
+    "1100000",
+  );
+  const reviewed = await quoteFundingReceiveReceipt(
+    {
+      liquidity: async (_userId, request) => {
+        const planned = await sourcePlanner.discover({
+          accountId: target.userId,
+          request,
+          requiredAmount: money(DESTINATION_ASSET, "1"),
+          policy: {
+            placement: {
+              maximumFeeUsd: "1",
+              maximumFeeBps: 2_000,
+              maximumSlippageBps: 100,
+            },
+          },
+          destinationFacts: { collateralValuation: { unitPriceUsd: "1" } },
+        } as unknown as FundingSourcePlanningInput);
+        return {
+          liquidityProjectionId: "projection_exact_receipt_review",
+          sourceOptions: planned.sources.map((source) => source.option),
+        } as never;
+      },
+      quote: async (_userId, request) => {
+        assert.equal(
+          request.selectedSourceOptionId,
+          selectableReceipt.option.sourceOptionId,
+        );
+        assert.deepEqual(request.confirmedSourceAmount, confirmedSourceAmount);
+        assert.equal(request.requestedDestinationAmount, null);
+        return { quoteId: "quote_exact_received_usdc" } as never;
+      },
+    },
+    target,
+    {
+      quotePlan: {
+        version: 1,
+        confirmedSourceAmount,
+        requestedDestinationAmount: money(DESTINATION_ASSET, "1"),
+        venuePreparation: false,
+      },
+      explainUnavailable: true,
+    },
+  );
+  assert.equal(reviewed?.quoteId, "quote_exact_received_usdc");
+  assert.equal(
+    relayQueries,
+    1,
+    "automatic/client boundaries reuse the exact same provider discovery",
+  );
+}
 assert.deepEqual(
   productionClientComposite.option.requiredActions.map((action) => action.kind),
   ["evm_transaction", "svm_transaction"],
