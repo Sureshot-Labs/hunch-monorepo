@@ -6,6 +6,7 @@ import type {
   JsonValue,
 } from "../domain/types.js";
 import { isPositiveRawAmount } from "../domain/raw-amount.js";
+import { SOLANA_NATIVE_ASSET } from "../domain/network-fees.js";
 import {
   canonicalAccountAddress,
   canonicalAssetId,
@@ -187,9 +188,10 @@ export type FundingCommitReservation = Readonly<{
    * omit these fields. A pre-route may additionally fence balance that will
    * arrive at a later step. That fence remains durable for conflict and
    * availability accounting, but must not be reported as another source of
-   * money by the planner or quote.
+   * money by the planner or quote. Native execution costs also reserve real
+   * balance, but are not another economic input to the transfer segment.
    */
-  economicRole?: "source_input" | "future_credit_fence";
+  economicRole?: "source_input" | "future_credit_fence" | "execution_cost";
   /** Exact source amount when one reservation also fences a later credit. */
   sourceInputRawAmount?: string;
 }>;
@@ -208,7 +210,11 @@ export function fundingEconomicSourceReservations(
   reservations: readonly FundingCommitReservation[],
 ): readonly FundingEconomicSourceReservation[] {
   return reservations.flatMap((reservation) => {
-    if (reservation.economicRole === "future_credit_fence") return [];
+    if (
+      reservation.economicRole === "future_credit_fence" ||
+      reservation.economicRole === "execution_cost"
+    )
+      return [];
     return [
       {
         reservation,
@@ -904,7 +910,7 @@ async function insertCommitSteps(
 }
 
 function commitReservations(
-  plan: Pick<FundingCommitPlan, "reservations">,
+  plan: Pick<FundingCommitPlan, "reservations" | "operation" | "segments">,
 ): readonly FundingCommitReservation[] {
   const reservations = plan.reservations;
   if (reservations.length > 32) {
@@ -914,6 +920,15 @@ function commitReservations(
     );
   }
   const keys = new Set<string>();
+  const executionCosts = reservations.filter(
+    (reservation) => reservation.economicRole === "execution_cost",
+  );
+  if (executionCosts.length > 1) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "direct withdrawal requires one exact native execution-cost reservation",
+    );
+  }
   for (const reservation of reservations) {
     const key = `${reservation.componentId}\u0000${reservation.mode}`;
     const validReservationRawAmount = isPositiveRawAmount(
@@ -925,6 +940,19 @@ function commitReservations(
         (reservation.mode !== "subtract_available" ||
           reservation.segmentOrdinal !== null ||
           sourceInputRawAmount !== undefined)) ||
+      (reservation.economicRole === "execution_cost" &&
+        (reservation.mode !== "subtract_available" ||
+          reservation.segmentOrdinal !== 0 ||
+          reservation.networkId !== SOLANA_NATIVE_ASSET.networkId ||
+          reservation.assetId !== SOLANA_NATIVE_ASSET.assetId ||
+          reservation.assetDecimals !== SOLANA_NATIVE_ASSET.decimals ||
+          sourceInputRawAmount !== undefined ||
+          plan.operation.purpose !== "withdrawal" ||
+          plan.operation.planKind !== "wallet_route" ||
+          plan.segments.length !== 1 ||
+          plan.segments[0]?.providerId !== "direct_wallet" ||
+          plan.operation.supportMetadata?.withdrawalUserSolCostRaw !==
+            reservation.rawAmount)) ||
       (sourceInputRawAmount !== undefined &&
         (!isPositiveRawAmount(sourceInputRawAmount) ||
           !validReservationRawAmount ||
