@@ -39,7 +39,11 @@ import type {
   FundingReasonCode,
 } from "../../domain/types.js";
 import { assertDirectWithdrawalActionMatchesRecipient } from "../../execution/direct-withdrawal-transfer.js";
-import { buildExactSolWithdrawalAction } from "../../execution/direct-withdrawal-transfer.js";
+import {
+  buildExactSolWithdrawalAction,
+  buildExactUsdcWithdrawalAction,
+} from "../../execution/direct-withdrawal-transfer.js";
+import { fundingEconomicSourceReservations } from "../../persistence/funding-operation-repository.js";
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const ACCOUNT_ID = "account_source_planner_12345678";
@@ -442,7 +446,10 @@ async function directWithdrawalOptionsForAsset(
   return new DirectWithdrawalSourceAdapter(sourceAccount, {
     sponsorBudgetAvailable: async () => false,
     inspectCost: async (input) => ({
-      maximumSourceRaw: input.availableRaw - 5000n,
+      maximumSourceRaw:
+        input.asset.assetId === SOLANA_NATIVE.assetId
+          ? input.availableRaw - 5000n
+          : input.availableRaw,
       sourceAmountRaw: input.requestedRaw ?? input.availableRaw - 5000n,
       networkFeeRaw: 5000n,
       accountRentRaw: 0n,
@@ -453,13 +460,16 @@ async function directWithdrawalOptionsForAsset(
       reasonCode: null,
       built:
         input.requestedRaw && input.requestedRaw <= input.availableRaw - 5000n
-          ? buildExactSolWithdrawalAction({
+          ? (input.asset.assetId === SOLANA_USDC.assetId
+              ? buildExactUsdcWithdrawalAction
+              : buildExactSolWithdrawalAction)({
               amount: {
                 asset: input.asset,
                 raw: input.requestedRaw.toString(),
               },
               profile: input.profile,
               recipient: input.recipient,
+              createRecipientAta: false,
             })
           : null,
     }),
@@ -601,6 +611,86 @@ assert.equal(
   (await directWithdrawalOptionsForAsset(SOLANA_NATIVE, "3995001")).length,
   0,
 );
+
+{
+  const tokenAccount = accountForExactAsset(SOLANA_USDC);
+  const solAccount = accountForExactAsset(SOLANA_NATIVE);
+  const solComponent = solAccount.projection.components[0];
+  const solAvailability = solAccount.cashAvailability.components[0];
+  assert.ok(solComponent);
+  assert.ok(solAvailability);
+  const sourceAccount: AccountValueReadModel = {
+    ...tokenAccount,
+    projection: {
+      ...tokenAccount.projection,
+      components: [
+        ...tokenAccount.projection.components,
+        {
+          ...solComponent,
+          componentId: "native_sol_execution_cost_component",
+          location: {
+            ...solComponent.location,
+            locationId: "native_sol_location",
+          },
+        },
+      ],
+    },
+    cashAvailability: {
+      ...tokenAccount.cashAvailability,
+      components: [
+        ...tokenAccount.cashAvailability.components,
+        {
+          ...solAvailability,
+          componentId: "native_sol_execution_cost_component",
+        },
+      ],
+    },
+  };
+  const options = await directWithdrawalOptionsForAsset(
+    SOLANA_USDC,
+    "2000000",
+    undefined,
+    sourceAccount,
+  );
+  assert.equal(options.length, 1);
+  const plan = options[0]?.commitPlan;
+  assert.ok(plan);
+  assert.deepEqual(
+    plan.reservations.map((reservation) => ({
+      role: reservation.economicRole ?? "source_input",
+      asset: reservation.assetId,
+      raw: reservation.rawAmount,
+      mode: reservation.mode,
+      segment: reservation.segmentOrdinal,
+    })),
+    [
+      {
+        role: "source_input",
+        asset: SOLANA_USDC.assetId,
+        raw: "2000000",
+        mode: "subtract_available",
+        segment: 0,
+      },
+      {
+        role: "execution_cost",
+        asset: SOLANA_NATIVE.assetId,
+        raw: "5000",
+        mode: "subtract_available",
+        segment: 0,
+      },
+    ],
+  );
+  assert.equal(
+    plan.operation.supportMetadata?.withdrawalUserSolCostRaw,
+    "5000",
+  );
+  assert.equal(fundingEconomicSourceReservations(plan.reservations).length, 1);
+  assert.equal(
+    fundingEconomicSourceReservations(plan.reservations)[0]?.rawAmount,
+    "2000000",
+  );
+  assert.equal(options[0]?.option.fees[0]?.amount?.raw, "5000");
+}
 
 for (const priceReason of [
   "trusted_price_unavailable",

@@ -81,6 +81,7 @@ try {
       expectedDestinationAddress: string;
       legacyTerminalStatus: "completed" | "failed";
       throughPrivyProviderReference?: boolean;
+      executionCostRaw?: string;
       futureCreditFence?: Readonly<{
         componentId: string;
         locationId: string;
@@ -158,6 +159,9 @@ try {
           adapterId: DIRECT_WITHDRAWAL_ADAPTER_ID,
           routeId: DIRECT_WITHDRAWAL_ROUTE_ID,
           withdrawalExecutionKind: "exact_same_asset_transfer",
+          ...(input.executionCostRaw
+            ? { withdrawalUserSolCostRaw: input.executionCostRaw }
+            : {}),
         },
       },
       segments: [
@@ -224,8 +228,129 @@ try {
               },
             ]
           : []),
+        ...(input.executionCostRaw
+          ? [
+              {
+                segmentOrdinal: 0,
+                componentId: opaque("native_cost_component"),
+                locationId: opaque("native_cost_location"),
+                networkId: "solana:mainnet",
+                assetId: RELAY_PINNED_ASSETS.solanaNative,
+                assetDecimals: 9,
+                rawAmount: input.executionCostRaw,
+                mode: "subtract_available" as const,
+                economicRole: "execution_cost" as const,
+                expiresAt,
+              },
+            ]
+          : []),
       ],
     };
+    const principalReservation = plan.reservations[0];
+    assert.ok(principalReservation);
+    const cost = plan.reservations.find(
+      (reservation) => reservation.economicRole === "execution_cost",
+    );
+    if (input.executionCostRaw) {
+      assert.ok(cost);
+      const invalidPlans: readonly FundingCommitPlan[] = [
+        // The original defect: two principal inputs must still fail SQL.
+        {
+          ...plan,
+          reservations: [
+            principalReservation,
+            { ...cost, economicRole: "source_input" },
+          ],
+        },
+        {
+          ...plan,
+          reservations: [
+            principalReservation,
+            { ...cost, mode: "advisory_destination" },
+          ],
+        },
+        {
+          ...plan,
+          reservations: [
+            principalReservation,
+            { ...cost, segmentOrdinal: null },
+          ],
+        },
+        {
+          ...plan,
+          reservations: [
+            principalReservation,
+            { ...cost, assetId: input.amount.asset.assetId },
+          ],
+        },
+        {
+          ...plan,
+          reservations: [principalReservation, { ...cost, rawAmount: "1" }],
+        },
+        {
+          ...plan,
+          reservations: [
+            ...plan.reservations,
+            { ...cost, componentId: opaque("duplicate_cost") },
+          ],
+        },
+      ];
+      for (const [index, invalidPlan] of invalidPlans.entries()) {
+        const rejectedConsent = opaque("consent");
+        const rejectedQuote = await createFundingQuoteInTransaction(client, {
+          userId,
+          discoveryProjectionId: opaque("projection"),
+          selectedSourceOptionSnapshot: source,
+          marketContextSnapshot: null,
+          destinationOptionSnapshot: destination,
+          venueBindingSnapshot: null,
+          planSnapshot: invalidPlan,
+          policyVersion: 1,
+          policyRevision: "invalid_execution_cost",
+          canonicalRequest: { purpose: "withdrawal", recipientId },
+          consentToken: rejectedConsent,
+          expiresAt: new Date(expiresAt),
+        });
+        await client.query("savepoint invalid_cost_commit");
+        await assert.rejects(
+          async () => {
+            await commitFundingOperationInTransaction(client, {
+              userId,
+              quoteId: rejectedQuote.id,
+              consentToken: rejectedConsent,
+              idempotencyKey: opaque("idempotency"),
+              plan: invalidPlan,
+              subjectLookupHmac: hash(userId),
+              subjectLookupKeyVersion: 1,
+            });
+            await client.query("set constraints all immediate");
+          },
+          (error: unknown) => {
+            if (index === 0)
+              assert.equal((error as { code?: string }).code, "23514");
+            else {
+              assert.ok(error instanceof FundingPersistenceError);
+              assert.equal(error.code, "quote_mismatch");
+            }
+            return true;
+          },
+        );
+        await client.query("rollback to savepoint invalid_cost_commit");
+        await client.query("release savepoint invalid_cost_commit");
+        const untouched = await client.query<{
+          consumed_at: Date | null;
+          operations: string;
+        }>(
+          `select quote_row.consumed_at,
+                  (select count(*)::text from funding_operations operation_row where operation_row.quote_id = quote_row.id) as operations
+             from funding_quotes quote_row where quote_row.id = $1`,
+          [rejectedQuote.id],
+        );
+        assert.deepEqual(untouched.rows, [
+          { consumed_at: null, operations: "0" },
+        ]);
+      }
+    }
     const consentToken = opaque("consent");
     const quote = await createFundingQuoteInTransaction(client, {
       userId,
@@ -252,6 +377,80 @@ try {
     });
     await client.query("set constraints all immediate");
     await client.query("set constraints all deferred");
+    if (input.executionCostRaw) {
+      const stored = await client.query<{
+        economic_role: string;
+        mode: string;
+        raw_amount: string;
+        state: string;
+      }>(
+        `select economic_role, mode, raw_amount, state from balance_reservations
+          where operation_id = $1 order by economic_role`,
+        [committed.operation.id],
+      );
+      assert.deepEqual(stored.rows, [
+        {
+          economic_role: "execution_cost",
+          mode: "subtract_available",
+          raw_amount: input.executionCostRaw,
+          state: "active",
+        },
+        {
+          economic_role: "source_input",
+          mode: "subtract_available",
+          raw_amount: input.amount.raw,
+          state: "active",
+        },
+      ]);
+      assert.ok(cost);
+      // Distinct token inventory, same SOL cost: the fee hold must still
+      // participate in admission and cannot be bypassed by its economic role.
+      const alternatePlan: FundingCommitPlan = {
+        ...plan,
+        reservations: [
+          {
+            ...principalReservation,
+            componentId: opaque("other_token_component"),
+            locationId: opaque("other_token_location"),
+          },
+          cost,
+        ],
+      };
+      const otherConsent = opaque("consent");
+      const otherQuote = await createFundingQuoteInTransaction(client, {
+        userId,
+        discoveryProjectionId: opaque("projection"),
+        selectedSourceOptionSnapshot: source,
+        marketContextSnapshot: null,
+        destinationOptionSnapshot: destination,
+        venueBindingSnapshot: null,
+        planSnapshot: alternatePlan,
+        policyVersion: 1,
+        policyRevision: "cost_capacity",
+        canonicalRequest: { purpose: "withdrawal", recipientId },
+        consentToken: otherConsent,
+        expiresAt: new Date(expiresAt),
+      });
+      await client.query("savepoint competing_sol_cost_commit");
+      await assert.rejects(
+        commitFundingOperationInTransaction(client, {
+          userId,
+          quoteId: otherQuote.id,
+          consentToken: otherConsent,
+          idempotencyKey: opaque("idempotency"),
+          plan: alternatePlan,
+          subjectLookupHmac: hash(userId),
+          subjectLookupKeyVersion: 1,
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof FundingPersistenceError);
+          assert.equal(error.code, "quote_invalidated");
+          return true;
+        },
+      );
+      await client.query("rollback to savepoint competing_sol_cost_commit");
+      await client.query("release savepoint competing_sol_cost_commit");
+    }
     let competingCommit:
       | Readonly<{
           consentToken: string;
@@ -462,6 +661,17 @@ try {
       status: "completed",
       stage: "terminal",
     });
+    if (input.executionCostRaw) {
+      const remaining = await client.query<{ held: string }>(
+        `select count(*)::text as held from balance_reservations where operation_id = $1 and state = 'active'`,
+        [committed.operation.id],
+      );
+      assert.equal(
+        remaining.rows[0]?.held,
+        "0",
+        "completion releases principal and SOL costs",
+      );
+    }
     const notices = await client.query<{ count: string }>(
       `select count(*)::text as count from notifications
         where user_id = $1 and dedupe_key = $2`,
@@ -650,7 +860,7 @@ try {
         assetId: RELAY_PINNED_ASSETS.solanaUsdc,
         decimals: 6,
       },
-      raw: "2000000",
+      raw: "47655857",
     };
     const built = buildExactUsdcWithdrawalAction({
       amount,
@@ -683,6 +893,7 @@ try {
       },
       expectedDestinationAddress: tokenRecipient,
       legacyTerminalStatus: "completed",
+      executionCostRaw: createRecipientAta ? "1493440" : "5000",
     });
   }
 

@@ -543,6 +543,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
                     assetDecimals: 9,
                     rawAmount: cost.userSolCostRaw.toString(),
                     mode: "subtract_available" as const,
+                    economicRole: "execution_cost" as const,
                     expiresAt: executionExpiresAt,
                   }))
                 : []),
