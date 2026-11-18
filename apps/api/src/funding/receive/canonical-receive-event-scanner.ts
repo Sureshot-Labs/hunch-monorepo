@@ -94,6 +94,7 @@ export type CanonicalFundingReceiveScanBatchResult = Readonly<{
   scans: ReadonlyMap<string, FundingReceiveEventScan | null>;
   failedKeys: ReadonlySet<string>;
   errors: ReadonlyMap<string, unknown>;
+  failureStages: ReadonlyMap<string, "variants" | "evm_scan" | "solana_scan">;
 }>;
 
 export async function scanCanonicalFundingReceiveEventsBatch(
@@ -103,12 +104,17 @@ export async function scanCanonicalFundingReceiveEventsBatch(
   const groupsByKey = new Map<string, ReturnType<typeof partitionVariants>>();
   const failedKeys = new Set<string>();
   const errors = new Map<string, unknown>();
+  const failureStages = new Map<
+    string,
+    "variants" | "evm_scan" | "solana_scan"
+  >();
   for (const entry of entries) {
     try {
       groupsByKey.set(entry.key, partitionVariants(entry.variants));
     } catch (error) {
       failedKeys.add(entry.key);
       errors.set(entry.key, error);
+      failureStages.set(entry.key, "variants");
     }
   }
   const evmEntries = entries.flatMap((entry) => {
@@ -117,7 +123,10 @@ export async function scanCanonicalFundingReceiveEventsBatch(
     return variants.length > 0 ? [{ key: entry.key, variants }] : [];
   });
   const evmResult = await scanEvmEventBatch(evmEntries, now);
-  for (const key of evmResult.failedKeys) failedKeys.add(key);
+  for (const key of evmResult.failedKeys) {
+    failedKeys.add(key);
+    failureStages.set(key, "evm_scan");
+  }
   for (const [key, error] of evmResult.errors) errors.set(key, error);
   const solanaEntries = entries.flatMap((entry) => {
     if (failedKeys.has(entry.key)) return [];
@@ -125,7 +134,10 @@ export async function scanCanonicalFundingReceiveEventsBatch(
     return variants.length > 0 ? [{ key: entry.key, variants }] : [];
   });
   const solanaResult = await scanSolanaEventBatch(solanaEntries, now);
-  for (const key of solanaResult.failedKeys) failedKeys.add(key);
+  for (const key of solanaResult.failedKeys) {
+    failedKeys.add(key);
+    failureStages.set(key, "solana_scan");
+  }
   for (const [key, error] of solanaResult.errors) errors.set(key, error);
 
   const scans = new Map<string, FundingReceiveEventScan | null>();
@@ -152,7 +164,7 @@ export async function scanCanonicalFundingReceiveEventsBatch(
       cursorAdvanced: active.some((scan) => scan.cursorAdvanced),
     });
   }
-  return { scans, failedKeys, errors };
+  return { scans, failedKeys, errors, failureStages };
 }
 
 export type {

@@ -331,6 +331,36 @@ integration(
       "insert into unified_market_tokens(market_id,token_id,outcome_side) values($1,'token-z','NO'),($1,'token-a','YES')",
       [pair[0].id],
     );
+    const metadataCases = [
+      null,
+      "null",
+      "true",
+      '"scalar"',
+      '[{"question":"not a root object"}]',
+      JSON.stringify({
+        question: "Full question",
+        rulesPrimary: "Primary rule",
+        rulesSecondary: "Secondary rule",
+        outcomes: ["YES", "NO"],
+        clobTokenIds: ["17", "18"],
+      }),
+      JSON.stringify({
+        question: 12,
+        rulesPrimary: ["array rule"],
+        rulesSecondary: { nested: true },
+        outcomes: null,
+        clobTokenIds: "[19,20]",
+      }),
+    ];
+    const metadataIds: string[] = [];
+    for (const [i, metadata] of metadataCases.entries()) {
+      const childId = `${parentId}:child-${i + 1}`;
+      metadataIds.push(childId);
+      await pool.query(
+        "update unified_markets set metadata=$2::jsonb where id=$1",
+        [childId, metadata],
+      );
+    }
     // Frozen pre-optimization projection: compare normalization and complete
     // fingerprint inputs, including siblings not requested or not eligible.
     const legacySelect = `select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,m.close_time,m.expiration_time,e.end_date as event_end_date,
@@ -345,7 +375,7 @@ integration(
     const requested = [
       pair[0].id,
       pair[1].id,
-      parentId + ":child-1",
+      ...metadataIds,
       pair[0].id,
       "missing",
     ];
@@ -358,6 +388,23 @@ integration(
     assert.deepEqual(
       sortContracts(await loadContracts(pool, requested)),
       sortContracts(legacyBatch.rows.map(normalizeContract)),
+    );
+    let projectedMetadata: unknown[] = [];
+    await loadContracts(
+      {
+        query: (async (sql: string, params: unknown[]) => {
+          const result = await pool.query<MarketRow>(sql, params);
+          projectedMetadata = result.rows
+            .map((row) => [row.id, row.metadata])
+            .sort();
+          return result;
+        }) as Pool["query"],
+      },
+      requested,
+    );
+    assert.deepEqual(
+      projectedMetadata,
+      legacyBatch.rows.map((row) => [row.id, row.metadata]).sort(),
     );
     const legacyChildren = await pool.query<MarketRow>(
       legacySelect + " where m.event_id=$1",

@@ -154,10 +154,15 @@ export async function discoveryReadOnly<T>(
   pool: Pick<Pool, "connect">,
   work: (client: PoolClient) => Promise<T>,
   timeoutMs = 5000,
+  options?: { repeatableRead?: boolean },
 ): Promise<T> {
   const client = await pool.connect();
   try {
-    await client.query("BEGIN READ ONLY");
+    await client.query(
+      options?.repeatableRead
+        ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        : "BEGIN READ ONLY",
+    );
     await client.query(
       "SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout','1000',true),set_config('jit','off',true)",
       [String(timeoutMs)],

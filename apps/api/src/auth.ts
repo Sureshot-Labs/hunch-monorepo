@@ -2876,6 +2876,8 @@ type AuthMiddlewareOptions = {
   touchSession?: boolean;
   optional?: boolean;
   requireWallet?: boolean;
+  /** For high-volume streams, record only bounded rejection reasons. */
+  logUnauthorized?: boolean;
 };
 
 type AdminMiddlewareOptions = AuthMiddlewareOptions & {
@@ -2938,13 +2940,30 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const authHeader = request.headers.authorization;
     const allowAnonymous = options.optional;
+    const reject = (
+      reason:
+        | "missing_bearer"
+        | "invalid_token"
+        | "invalid_session"
+        | "inactive_user",
+      error: string,
+    ) => {
+      if (options.logUnauthorized)
+        request.log.info(
+          { authFailure: reason },
+          "Request authentication rejected",
+        );
+      return reply.code(401).send({ error });
+    };
 
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       if (allowAnonymous) {
         return;
       }
-      reply.code(401);
-      return reply.send({ error: "Missing or invalid authorization header" });
+      return reject(
+        "missing_bearer",
+        "Missing or invalid authorization header",
+      );
     }
 
     const token = authHeader.substring(7);
@@ -2957,8 +2976,7 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
         );
         return;
       }
-      reply.code(401);
-      return reply.send({ error: "Invalid or expired token" });
+      return reject("invalid_token", "Invalid or expired token");
     }
 
     // Validate session
@@ -2970,8 +2988,7 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
         request.log.debug("Ignoring expired session for optional auth route");
         return;
       }
-      reply.code(401);
-      return reply.send({ error: "Invalid or expired session" });
+      return reject("invalid_session", "Invalid or expired session");
     }
 
     const requestAgent = readRequestUserAgent(request.headers);
@@ -3001,8 +3018,7 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
         request.log.debug("Ignoring inactive user for optional auth route");
         return;
       }
-      reply.code(401);
-      return reply.send({ error: "User not found or inactive" });
+      return reject("inactive_user", "User not found or inactive");
     }
 
     // Default to the wallet captured on session creation (typically the Privy primary wallet).

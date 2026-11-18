@@ -448,6 +448,10 @@ try {
     now: new Date(NOW.getTime() + 20_000),
   });
   assert.ok(failed.retryableErrors >= 1);
+  assert.equal(
+    failed.retryableErrorBreakdown?.["session.unknown"],
+    failed.retryableErrors,
+  );
   const afterFailure = await fetchFundingReceiveSessionForUser(pool, {
     userId: errorUserId,
     receiveSessionId: errorSession.snapshot.session.receiveSessionId,

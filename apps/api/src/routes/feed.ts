@@ -21,7 +21,7 @@ import {
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
-import { createFeedSingleflight } from "../lib/feed-singleflight.js";
+import { createReadSingleflight } from "../lib/read-singleflight.js";
 import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
@@ -275,9 +275,10 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     expirationTime: rRow.market_expiration_time,
     eventEndTime: rRow.end_date,
     pmAcceptingOrders: rRow.pm_accepting_orders ?? null,
-    dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
-      rRow.market_metadata,
-    ),
+    dflowNativeAcceptingOrders:
+      rRow.venue?.toLowerCase() === "kalshi"
+        ? readDflowNativeAcceptingOrders(rRow.market_metadata)
+        : null,
   });
   const observedTop = buildObservedCanonicalMarketTop({
     yesTop: {
@@ -393,7 +394,7 @@ function buildFeedData(input: {
 
 export const feedRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
-  const loadSharedFeed = createFeedSingleflight<{
+  const loadSharedFeed = createReadSingleflight<{
     body: string;
     etag: string;
     cacheControl?: string;
@@ -758,6 +759,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                     eventIds,
                     {
                       useCachedChange24h,
+                      // The event response never exposes raw metadata; only
+                      // DFlow availability consumes it. Preserve other readers.
+                      compactResponseMetadata: true,
                     },
                   )
                 : [];

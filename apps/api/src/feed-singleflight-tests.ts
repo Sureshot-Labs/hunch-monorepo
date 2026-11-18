@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { createFeedSingleflight } from "./lib/feed-singleflight.js";
+import { createReadSingleflight } from "./lib/read-singleflight.js";
 
-const run = createFeedSingleflight<string>();
+const run = createReadSingleflight<string>();
 let calls = 0;
 let resolve!: (value: string) => void;
 const body = new Promise<string>((done) => {
@@ -42,7 +42,7 @@ assert.deepEqual(
   await Promise.all(keys.map((key) => run(key, async () => key))),
   keys,
 );
-const small = createFeedSingleflight<string>(1);
+const small = createReadSingleflight<string>(1);
 let release!: (value: string) => void;
 const active = small(
   "active",

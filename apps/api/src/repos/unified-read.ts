@@ -3712,6 +3712,7 @@ export async function fetchFeedMarkets(
     directTokenLookup?: boolean;
     transactionClient?: PoolClient;
     statementTimeoutMs?: number;
+    compactResponseMetadata?: boolean;
   },
 ): Promise<FeedMarketRow[]> {
   if (eventIds.length === 0) return [];
@@ -4050,7 +4051,7 @@ export async function fetchFeedMarkets(
     ) selected_market
     cross join lateral (${canonicalMarketTokenPairSql("selected_market")}) canonical_pair
     cross join lateral (
-      select selected_market.metadata || '{}'::jsonb as expanded_metadata
+      select ${options?.compactResponseMetadata ? "case when selected_market.venue = 'limitless' then selected_market.metadata || '{}'::jsonb end" : "selected_market.metadata || '{}'::jsonb"} as expanded_metadata
       offset 0
     ) metadata_expand
     cross join lateral jsonb_to_record(
@@ -4242,7 +4243,7 @@ export async function fetchFeedMarkets(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
-      m.metadata as market_metadata,
+      ${options?.compactResponseMetadata && directTokenLookup ? "case when lower(m.venue) = 'kalshi' then m.metadata end" : "m.metadata"} as market_metadata,
       coalesce(${marketVenueExchangeExpr}, ${eventVenueExchangeExpr}) as venue_exchange,
       coalesce(${marketVenueAdapterExpr}, ${eventVenueAdapterExpr}) as venue_adapter,
       ${marketAddressExpr} as market_address,
@@ -4280,7 +4281,7 @@ export async function fetchFeedMarketsBatched(
   pool: Pool,
   inputs: FeedInputs,
   eventIds: string[],
-  options?: { useCachedChange24h?: boolean },
+  options?: { useCachedChange24h?: boolean; compactResponseMetadata?: boolean },
 ): Promise<FeedMarketRow[]> {
   const batchSize = 20;
   if (
