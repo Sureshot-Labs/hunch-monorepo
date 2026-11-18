@@ -1,7 +1,7 @@
 /** Per route instance, no response cache or extra freshness window. Failure
  * removes the flight so the next request can recover. Different normalized
  * keys never share a result; overload bypasses coalescing, not the request. */
-export function createFeedSingleflight<T>(maxKeys = 128) {
+export function createReadSingleflight<T>(maxKeys = 128) {
   const running = new Map<string, Promise<T>>();
   return (key: string, load: () => Promise<T>): Promise<T> => {
     const existing = running.get(key);

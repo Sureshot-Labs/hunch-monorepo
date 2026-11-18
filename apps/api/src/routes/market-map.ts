@@ -11,6 +11,7 @@ import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { createReadSingleflight } from "../lib/read-singleflight.js";
 import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
@@ -1785,7 +1786,14 @@ function applyLiveMarketDataToEvents(
   });
 }
 
+type SidebarRead = {
+  body: string;
+  cache: "hit" | "bypass" | null;
+  persist?: () => Promise<"miss" | "bypass">;
+};
+
 export const marketMapRoutes: FastifyPluginAsync = async (app) => {
+  const readSidebars = createReadSingleflight<SidebarRead>();
   await app.register(marketMapSearchRoutes, {
     hydrateNodes: async (runId, nodes) => {
       const summary = await loadNodeSignalSummaryByNodeId({
@@ -2719,168 +2727,192 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         venues.slice().sort().join(","),
         String(defaultLimit),
       ].join(":");
-      let sidebarRedis: Awaited<ReturnType<typeof getRedisStatus>>["redis"] =
-        null;
-      let skipCacheWrite = false;
-
-      if (cacheEnabled) {
-        const { redis } = await getRedisStatus();
-        sidebarRedis = redis;
+      const load = async (): Promise<SidebarRead> => {
+        const sidebarRedis = cacheEnabled
+          ? (await getRedisStatus()).redis
+          : null;
+        let skipCacheWrite = false;
         if (sidebarRedis) {
-          const rawCachedBody = await sidebarRedis.get(cacheKey);
-          const cachedBody = rawCachedBody
-            ? filterCachedMarketMapBody(
-                rawCachedBody,
-                venues as MarketMapVenue[],
-              )
-            : null;
-          if (cachedBody) {
-            const etag = buildWeakEtag(cachedBody);
-            requestMarketMapBodyRefresh(cachedBody, "market-map:sidebars");
-            if (request.headers["if-none-match"] === etag) {
-              reply.header("ETag", etag);
-              reply.code(304);
-              return reply.send();
+          try {
+            const raw = await sidebarRedis.get(cacheKey);
+            const cached = raw
+              ? filterCachedMarketMapBody(raw, venues as MarketMapVenue[])
+              : null;
+            if (cached) {
+              requestMarketMapBodyRefresh(cached, "market-map:sidebars");
+              return { body: cached, cache: "hit" };
             }
-            reply.header("x-cache", "hit");
-            reply.header("ETag", etag);
-            reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send(cachedBody);
+          } catch {
+            skipCacheWrite = true;
+            request.log.warn("Market map sidebar cache read unavailable");
           }
         }
-      }
 
-      const [
-        trendingCandidates,
-        volumeMoverCandidates,
-        liquidityMoverCandidates,
-        topMoverCandidates,
-      ] = await Promise.all([
-        loadMarketMapSidebarCandidates({
-          kind: "trendingNow",
-          venues: marketMapSidebarVenuesForKind("trendingNow", venues),
-          limit: marketMapSidebarCandidateLimit(sidebarLimits.trendingNow),
-          quality: marketMapSidebarQualityForKind("trendingNow", quality),
-        }),
-        loadMarketMapSidebarCandidates({
-          kind: volumeMoverKind,
-          venues: marketMapSidebarVenuesForKind(volumeMoverKind, venues),
-          limit: marketMapSidebarCandidateLimit(sidebarLimits.volumeMovers24h),
-          quality: marketMapSidebarQualityForKind(volumeMoverKind, quality),
-        }),
-        loadMarketMapSidebarCandidates({
-          kind: liquidityMoverKind,
-          venues: marketMapSidebarVenuesForKind(liquidityMoverKind, venues),
-          limit: marketMapSidebarCandidateLimit(
+        const startedAt = performance.now();
+        const [
+          trendingCandidates,
+          volumeMoverCandidates,
+          liquidityMoverCandidates,
+          topMoverCandidates,
+        ] = await Promise.all([
+          loadMarketMapSidebarCandidates({
+            kind: "trendingNow",
+            venues: marketMapSidebarVenuesForKind("trendingNow", venues),
+            limit: marketMapSidebarCandidateLimit(sidebarLimits.trendingNow),
+            quality: marketMapSidebarQualityForKind("trendingNow", quality),
+          }),
+          loadMarketMapSidebarCandidates({
+            kind: volumeMoverKind,
+            venues: marketMapSidebarVenuesForKind(volumeMoverKind, venues),
+            limit: marketMapSidebarCandidateLimit(
+              sidebarLimits.volumeMovers24h,
+            ),
+            quality: marketMapSidebarQualityForKind(volumeMoverKind, quality),
+          }),
+          loadMarketMapSidebarCandidates({
+            kind: liquidityMoverKind,
+            venues: marketMapSidebarVenuesForKind(liquidityMoverKind, venues),
+            limit: marketMapSidebarCandidateLimit(
+              sidebarLimits.liquidityMovers24h,
+            ),
+            quality: marketMapSidebarQualityForKind(
+              liquidityMoverKind,
+              quality,
+            ),
+          }),
+          loadMarketMapSidebarCandidates({
+            kind: "topMovers24h",
+            venues: marketMapSidebarVenuesForKind("topMovers24h", venues),
+            limit: marketMapSidebarCandidateLimit(sidebarLimits.topMovers24h),
+            quality: marketMapSidebarQualityForKind("topMovers24h", quality),
+          }),
+        ]);
+        const candidatesMs = performance.now() - startedAt;
+
+        const allCandidates = dedupeEventsForLiveLookup([
+          trendingCandidates,
+          volumeMoverCandidates,
+          liquidityMoverCandidates,
+          topMoverCandidates,
+        ]);
+
+        let liveBundle: MarketMapLiveMarketBundle | null = null;
+        if (allCandidates.length > 0) {
+          try {
+            liveBundle = await loadLiveMarketDataForEvents(allCandidates, 1);
+          } catch (error) {
+            skipCacheWrite = true;
+            request.log.warn(
+              { err: error, itemCount: allCandidates.length },
+              "market-map sidebars live market enrichment failed",
+            );
+          }
+        }
+
+        const hydrate = (
+          events: MarketMapEventSummary[],
+          limit: number,
+        ): MarketMapEventSummary[] => {
+          const withLive =
+            liveBundle == null
+              ? events
+              : applyLiveMarketDataToEvents(
+                  events,
+                  liveBundle.primaryByEventVenue,
+                  liveBundle.marketsByEventVenue,
+                );
+          const filtered = filterUsableEvents(withLive).items;
+          return filtered.slice(0, limit);
+        };
+
+        let payload = {
+          trendingNow: hydrate(trendingCandidates, sidebarLimits.trendingNow),
+          volumeMovers24h: hydrate(
+            volumeMoverCandidates,
+            sidebarLimits.volumeMovers24h,
+          ),
+          liquidityMovers24h: hydrate(
+            liquidityMoverCandidates,
             sidebarLimits.liquidityMovers24h,
           ),
-          quality: marketMapSidebarQualityForKind(liquidityMoverKind, quality),
-        }),
-        loadMarketMapSidebarCandidates({
-          kind: "topMovers24h",
-          venues: marketMapSidebarVenuesForKind("topMovers24h", venues),
-          limit: marketMapSidebarCandidateLimit(sidebarLimits.topMovers24h),
-          quality: marketMapSidebarQualityForKind("topMovers24h", quality),
-        }),
-      ]);
-
-      const allCandidates = dedupeEventsForLiveLookup([
-        trendingCandidates,
-        volumeMoverCandidates,
-        liquidityMoverCandidates,
-        topMoverCandidates,
-      ]);
-
-      let liveBundle: MarketMapLiveMarketBundle | null = null;
-      if (allCandidates.length > 0) {
-        try {
-          liveBundle = await loadLiveMarketDataForEvents(allCandidates, 1);
-        } catch (error) {
-          skipCacheWrite = true;
-          request.log.warn(
-            { err: error, itemCount: allCandidates.length },
-            "market-map sidebars live market enrichment failed",
-          );
-        }
-      }
-
-      const hydrate = (
-        events: MarketMapEventSummary[],
-        limit: number,
-      ): MarketMapEventSummary[] => {
-        const withLive =
-          liveBundle == null
-            ? events
-            : applyLiveMarketDataToEvents(
-                events,
-                liveBundle.primaryByEventVenue,
-                liveBundle.marketsByEventVenue,
-              );
-        const filtered = filterUsableEvents(withLive).items;
-        return filtered.slice(0, limit);
-      };
-
-      let payload = {
-        trendingNow: hydrate(trendingCandidates, sidebarLimits.trendingNow),
-        volumeMovers24h: hydrate(
-          volumeMoverCandidates,
-          sidebarLimits.volumeMovers24h,
-        ),
-        liquidityMovers24h: hydrate(
-          liquidityMoverCandidates,
-          sidebarLimits.liquidityMovers24h,
-        ),
-        topMovers24h: hydrate(topMoverCandidates, sidebarLimits.topMovers24h),
-        generatedAt,
-      };
-
-      if (marketMapSparklinesEnabled(sparklineOptions)) {
-        const returnedEvents = dedupeEventsForLiveLookup([
-          payload.trendingNow,
-          payload.volumeMovers24h,
-          payload.liquidityMovers24h,
-          payload.topMovers24h,
-        ]);
-        const sparklinesByEvent = await fetchMarketMapEventSparklines(
-          pool,
-          returnedEvents,
-          sparklineOptions,
-        );
-        payload = {
-          ...payload,
-          trendingNow: applyMarketMapSparklinesToEvents(
-            payload.trendingNow,
-            sparklinesByEvent,
-          ),
-          volumeMovers24h: applyMarketMapSparklinesToEvents(
-            payload.volumeMovers24h,
-            sparklinesByEvent,
-          ),
-          liquidityMovers24h: applyMarketMapSparklinesToEvents(
-            payload.liquidityMovers24h,
-            sparklinesByEvent,
-          ),
-          topMovers24h: applyMarketMapSparklinesToEvents(
-            payload.topMovers24h,
-            sparklinesByEvent,
-          ),
+          topMovers24h: hydrate(topMoverCandidates, sidebarLimits.topMovers24h),
+          generatedAt,
         };
-      }
-      requestMarketMapPayloadRefresh(payload, "market-map:sidebars");
-      const body = JSON.stringify(payload);
+
+        if (marketMapSparklinesEnabled(sparklineOptions)) {
+          const returnedEvents = dedupeEventsForLiveLookup([
+            payload.trendingNow,
+            payload.volumeMovers24h,
+            payload.liquidityMovers24h,
+            payload.topMovers24h,
+          ]);
+          const sparklinesByEvent = await fetchMarketMapEventSparklines(
+            pool,
+            returnedEvents,
+            sparklineOptions,
+          );
+          payload = {
+            ...payload,
+            trendingNow: applyMarketMapSparklinesToEvents(
+              payload.trendingNow,
+              sparklinesByEvent,
+            ),
+            volumeMovers24h: applyMarketMapSparklinesToEvents(
+              payload.volumeMovers24h,
+              sparklinesByEvent,
+            ),
+            liquidityMovers24h: applyMarketMapSparklinesToEvents(
+              payload.liquidityMovers24h,
+              sparklinesByEvent,
+            ),
+            topMovers24h: applyMarketMapSparklinesToEvents(
+              payload.topMovers24h,
+              sparklinesByEvent,
+            ),
+          };
+        }
+        requestMarketMapPayloadRefresh(payload, "market-map:sidebars");
+        const body = JSON.stringify(payload);
+        const elapsedMs = performance.now() - startedAt;
+        if (elapsedMs >= 1000)
+          request.log.info(
+            {
+              elapsedMs: Math.round(elapsedMs),
+              candidatesMs: Math.round(candidatesMs),
+              candidateCount: allCandidates.length,
+            },
+            "Market map sidebar build slow",
+          );
+        if (sidebarRedis && !skipCacheWrite) {
+          let written: Promise<"miss" | "bypass"> | undefined;
+          const writeOnce = async () => {
+            try {
+              await sidebarRedis.setEx(cacheKey, cacheTtl, body);
+              return "miss" as const;
+            } catch {
+              request.log.warn("Market map sidebar cache write unavailable");
+              return "bypass" as const;
+            }
+          };
+          return {
+            body,
+            cache: null,
+            persist: () => (written ??= writeOnce()),
+          };
+        }
+        return { body, cache: sidebarRedis ? "bypass" : null };
+      };
+      // Cache lookup is set-keyed, but filtering can preserve request ordering.
+      const flightKey = `${cacheKey}:${venues.join(",")}`;
+      const { body, cache, persist } = await readSidebars(flightKey, load);
       const etag = buildWeakEtag(body);
       if (request.headers["if-none-match"] === etag) {
         reply.header("ETag", etag);
         reply.code(304);
         return reply.send();
       }
-      if (cacheEnabled && sidebarRedis && !skipCacheWrite) {
-        await sidebarRedis.setEx(cacheKey, cacheTtl, body);
-        reply.header("x-cache", "miss");
-      } else if (cacheEnabled && sidebarRedis && skipCacheWrite) {
-        reply.header("x-cache", "bypass");
-      }
+      const cacheState = persist ? await persist() : cache;
+      if (cacheState) reply.header("x-cache", cacheState);
       reply.header("ETag", etag);
       reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
       reply.header("Content-Type", "application/json; charset=utf-8");

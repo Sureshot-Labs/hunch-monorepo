@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import type { Pool as InfraPool } from "@hunch/infra";
 import type { FeedInputs, FeedMarketRow } from "./repos/unified-read.js";
+import { readDflowNativeAcceptingOrders } from "./lib/market-availability.js";
 import {
   createIntegrationTestPool,
   integrationDatabaseTargetFromEnv,
@@ -499,6 +500,50 @@ try {
     "trending full selected page",
     baseInputs,
     selectedEvents,
+  );
+  await client.query(`insert into unified_events(id,title) values ('compact-kalshi-event','DFlow fixture');
+    insert into unified_markets(id,event_id,venue_market_id,title,venue,metadata,volume_total)
+      values ('compact-kalshi','compact-kalshi-event','compact-kalshi','DFlow market','kalshi',
+        '{"dflowNativeAcceptingOrders":true}',100);`);
+  const compactIds = [
+    ...selectedEvents,
+    ...metadataEventIds,
+    ...largeMetadataEventIds,
+    "compact-kalshi-event",
+  ];
+  const compact = await fetchFeedMarkets(fixturePool, baseInputs, compactIds, {
+    compactResponseMetadata: true,
+  });
+  const fullResponse = await fetchFeedMarkets(
+    fixturePool,
+    baseInputs,
+    compactIds,
+  );
+  assert.ok(compact.some((row) => row.venue === "limitless"));
+  assert.ok(
+    compact.some(
+      (row) =>
+        row.venue === "kalshi" &&
+        readDflowNativeAcceptingOrders(row.market_metadata),
+    ),
+  );
+  const publicProjection = (row: FeedMarketRow) => ({
+    ...row,
+    market_metadata:
+      row.venue?.toLowerCase() === "kalshi" ? row.market_metadata : null,
+    venue_exchange: row.venue === "limitless" ? row.venue_exchange : null,
+    venue_adapter: row.venue === "limitless" ? row.venue_adapter : null,
+    market_address: row.venue === "limitless" ? row.market_address : null,
+    trade_type: row.venue === "limitless" ? row.trade_type : null,
+  });
+  assert.deepEqual(
+    compact.map(publicProjection),
+    fullResponse.map(publicProjection),
+  );
+  assert.ok(
+    compact.every(
+      (row) => row.venue === "kalshi" || row.market_metadata === null,
+    ),
   );
   assert.deepEqual(
     [...new Set(baseline.map((row) => row.event_id))],

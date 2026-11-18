@@ -62,6 +62,7 @@ import {
   isDirectReceiveCompletionKind,
 } from "../planner/receive-targets.js";
 import { recordCanonicalReceiveDepositNotification } from "./receive-deposit-notification.js";
+import { addReceiveObservationFailure } from "./receive-observation-diagnostics.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -402,6 +403,7 @@ export type FundingReceiveSessionObservationResult = Readonly<{
   receiptsRecorded: number;
   recoveriesRequired: number;
   retryableErrors: number;
+  retryableErrorBreakdown?: Readonly<Record<string, number>>;
 }>;
 
 function hasValidObservationVariants(
@@ -619,6 +621,20 @@ export class FundingReceiveSessionObserver {
     const validSessions: FundingReceiveSessionSnapshot[] = [];
     let recoveriesRequired = 0;
     let retryableErrors = 0;
+    const retryableErrorBreakdown: Record<string, number> = {};
+    const recordRetryable = (
+      stage: Parameters<typeof addReceiveObservationFailure>[1],
+      error: unknown,
+      count = 1,
+    ) => {
+      retryableErrors += count;
+      addReceiveObservationFailure(
+        retryableErrorBreakdown,
+        stage,
+        error,
+        count,
+      );
+    };
     for (const session of observableSessions) {
       if (hasValidObservationVariants(session)) {
         validSessions.push(session);
@@ -628,10 +644,10 @@ export class FundingReceiveSessionObserver {
         if (await quarantineInvalidObservationVariants(pool, session, now)) {
           recoveriesRequired += 1;
         } else {
-          retryableErrors += 1;
+          recordRetryable("quarantine", undefined);
         }
-      } catch {
-        retryableErrors += 1;
+      } catch (error) {
+        recordRetryable("quarantine", error);
       }
     }
     const sessions = validSessions;
@@ -654,10 +670,10 @@ export class FundingReceiveSessionObserver {
           })),
           now,
         );
-      } catch {
+      } catch (error) {
         // An unexpected batch-level failure is retryable for every selected
         // session. Normal route failures are isolated in failedKeys below.
-        retryableErrors += sessions.length;
+        recordRetryable("batch_scan", error, sessions.length);
         batchScanFailed = true;
       }
     }
@@ -667,7 +683,10 @@ export class FundingReceiveSessionObserver {
       if (batchScanFailed) {
         // The batch failure was already counted for every selected session.
       } else if (batchScans?.failedKeys.has(sessionKey)) {
-        retryableErrors += 1;
+        recordRetryable(
+          batchScans.failureStages.get(sessionKey) ?? "batch_scan",
+          batchScans.errors.get(sessionKey),
+        );
       } else {
         try {
           const result = await this.pollSession(
@@ -680,10 +699,10 @@ export class FundingReceiveSessionObserver {
           );
           receiptsRecorded += result.receiptsRecorded;
           recoveriesRequired += result.recoveryRequired ? 1 : 0;
-        } catch {
+        } catch (error) {
           // One RPC or venue observation failure must not stall unrelated
           // receive sessions or the canonical funding reconciliation batch.
-          retryableErrors += 1;
+          recordRetryable("session", error);
         }
       }
     }
@@ -692,6 +711,7 @@ export class FundingReceiveSessionObserver {
       receiptsRecorded,
       recoveriesRequired,
       retryableErrors,
+      ...(retryableErrors > 0 ? { retryableErrorBreakdown } : {}),
     };
   }
 

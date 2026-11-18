@@ -38,8 +38,17 @@ export type Job = {
 const marketSelect = (predicate: "m.id=any($1::text[])" | "m.event_id=$1") => `
   with selected_markets as materialized (
     select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,
-      m.close_time,m.expiration_time,m.resolved_outcome,m.metadata
-    from unified_markets m where ${predicate}
+      m.close_time,m.expiration_time,m.resolved_outcome,
+      jsonb_build_object('question',fields.question,'rulesPrimary',fields."rulesPrimary",
+        'rulesSecondary',fields."rulesSecondary",'outcomes',fields.outcomes,
+        'clobTokenIds',fields."clobTokenIds") as matching_metadata
+    from unified_markets m
+    cross join lateral (select m.metadata || '{}'::jsonb as expanded_metadata offset 0) decoded
+    cross join lateral jsonb_to_record(
+      case when jsonb_typeof(decoded.expanded_metadata)='object'
+        then decoded.expanded_metadata else '{}'::jsonb end
+    ) as fields(question text,"rulesPrimary" text,"rulesSecondary" text,outcomes jsonb,"clobTokenIds" jsonb)
+    where ${predicate}
   ), selected_event_members as materialized (
     select selected_event.event_id,members.event_members
     from (select distinct event_id from selected_markets) selected_event
@@ -49,8 +58,7 @@ const marketSelect = (predicate: "m.id=any($1::text[])" | "m.event_id=$1") => `
     ) members
   )
   select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,m.close_time,m.expiration_time,e.end_date as event_end_date,
-  jsonb_build_object('question',m.metadata->>'question','rulesPrimary',m.metadata->>'rulesPrimary','rulesSecondary',m.metadata->>'rulesSecondary',
-    'outcomes',m.metadata->'outcomes','clobTokenIds',m.metadata->'clobTokenIds') as metadata,
+  m.matching_metadata as metadata,
   e.title as event_title, e.description as event_description,
   case when e.end_date<=now() then 'CLOSED' else e.status::text end as event_status,
   case when m.resolved_outcome is not null or m.close_time<=now() or m.expiration_time<=now() then 'CLOSED' else m.status::text end as matching_status,

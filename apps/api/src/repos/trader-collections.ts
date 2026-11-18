@@ -1,10 +1,11 @@
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 import { discoveryReadOnly } from "./discovery.js";
 import { canonicalMarketTokenIdSql } from "./canonical-market-token-sql.js";
 import { buildWalletMmSuspectedSql } from "../services/wallet-intel-mm.js";
 import { walletIntelProtocolAddresses } from "../services/wallet-intel-protocol-addresses.js";
 import { buildWalletOwnerResolutionJoinSql } from "../services/wallet-owner-resolution-sql.js";
 import { publicHolderLabel } from "../services/hunch-public-presentation.js";
+import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import { units, type Market } from "../services/trader-collection-ledger.js";
 import type { Owner } from "../services/trader-collection-ranking.js";
 
@@ -216,29 +217,61 @@ export class TraderRepository {
     signal?.throwIfAborted();
     const result = new Map<string, Market>();
     const unique = [...new Map(assets.map((a) => [assetKey(a), a])).values()];
-    for (let i = 0; i < unique.length; i += 250) {
+    const asOf = new Date(end * 1000);
+    const query = local ? TRADER_LOCAL_MARKETS_SQL : TRADER_MARKETS_SQL;
+    const readBatch = async (c: PoolClient, batch: Asset[]) => {
       signal?.throwIfAborted();
+      const { rows } = await c.query(query, [
+        JSON.stringify(
+          batch.map((a) => ({
+            t: a.token,
+            c: a.condition,
+            i: a.index,
+          })),
+        ),
+        asOf,
+      ]);
+      signal?.throwIfAborted();
+      return rows;
+    };
+    let splitAttempted = false;
+    for (let i = 0; i < unique.length; i += 250) {
       const batch = unique.slice(i, i + 250);
       const labels = new Map(batch.map((a) => [assetKey(a), a.label]));
-      const rows = await discoveryReadOnly(
-        this.db,
-        async (c) =>
-          (
-            await c.query(
-              local ? TRADER_LOCAL_MARKETS_SQL : TRADER_MARKETS_SQL,
-              [
-                JSON.stringify(
-                  batch.map((a) => ({
-                    t: a.token,
-                    c: a.condition,
-                    i: a.index,
-                  })),
-                ),
-                new Date(end * 1000),
-              ],
-            )
-          ).rows,
-      );
+      let rows;
+      try {
+        rows = await discoveryReadOnly(this.db, (c) => readBatch(c, batch));
+      } catch (error) {
+        if (
+          !signal ||
+          signal.aborted ||
+          splitAttempted ||
+          batch.length < 2 ||
+          !isPgStatementTimeoutError(error) ||
+          !(
+            error instanceof Error &&
+            /due to statement timeout/i.test(error.message)
+          )
+        )
+          throw error;
+        // A cold lookup can exhaust the query timeout. One smaller sequential
+        // retry per call, under the caller's deadline, never returns a partial map.
+        splitAttempted = true;
+        const middle = Math.ceil(batch.length / 2);
+        console.warn(
+          "[trader-collections] catalog lookup split after timeout",
+          { local, batchSize: batch.length },
+        );
+        rows = await discoveryReadOnly(
+          this.db,
+          async (c) => [
+            ...(await readBatch(c, batch.slice(0, middle))),
+            ...(await readBatch(c, batch.slice(middle))),
+          ],
+          2500,
+          { repeatableRead: true },
+        );
+      }
       signal?.throwIfAborted();
       for (const r of rows) {
         const key = assetKey({

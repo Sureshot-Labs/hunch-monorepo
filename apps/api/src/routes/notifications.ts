@@ -136,7 +136,7 @@ export const notificationsRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/notifications/stream",
-    { preHandler: createAuthMiddleware() },
+    { preHandler: createAuthMiddleware({ logUnauthorized: true }) },
     async (request, reply) => {
       const user = request.user;
       if (!user) {

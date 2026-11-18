@@ -18,6 +18,7 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
+import { createReadSingleflight } from "../lib/read-singleflight.js";
 import { buildHiddenOwnPositionSnapshotSuppressionSql } from "../lib/hidden-own-position-snapshot-sql.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -4453,6 +4454,80 @@ async function writeWalletIntelCachedBody(
   }
 }
 
+type SharedWalletBody = { body: string; layer: "none" | "local" };
+class WalletIntelPoolAcquireError extends Error {}
+type ReportWalletRead = (timing: {
+  poolWaitMs: number;
+  queryMs: number;
+}) => void;
+
+function createWalletIntelQueryLoader<T>(
+  options: { workMem: string; report: ReportWalletRead },
+  task: (client: PoolClient) => Promise<T>,
+) {
+  return {
+    report: options.report,
+    read: (client: PoolClient) =>
+      withWalletIntelQuerySettings(client, { workMem: options.workMem }, () =>
+        task(client),
+      ),
+  };
+}
+
+async function readColdWalletIntel<
+  T,
+  Failure extends { maxScanCandidates: number } = never,
+>(
+  cacheClient: WalletIntelCacheClient | null,
+  cacheKey: string,
+  cacheTtlSec: number,
+  load: { read: (client: PoolClient) => Promise<T>; report: ReportWalletRead },
+  toResponse: (result: T) => { payload: unknown } | Failure,
+): Promise<SharedWalletBody | Failure> {
+  // The initial Redis lookup may race a successful flight. Recheck the local
+  // copy before opening another DB transaction. This adds no freshness window.
+  const cached = cacheTtlSec > 0 ? readWalletIntelLocalCache(cacheKey) : null;
+  if (cached) return { body: cached, layer: "local" };
+  const startedAt = performance.now();
+  const client = await pool.connect().catch((cause: unknown) => {
+    throw new WalletIntelPoolAcquireError(
+      "Wallet intel pool acquisition failed",
+      { cause },
+    );
+  });
+  const connectedAt = performance.now();
+  let result: T;
+  try {
+    result = await load.read(client);
+  } finally {
+    client.release();
+    load.report({
+      poolWaitMs: Math.round(connectedAt - startedAt),
+      queryMs: Math.round(performance.now() - connectedAt),
+    });
+  }
+  const response = toResponse(result);
+  if ("maxScanCandidates" in response) return response;
+  const body = JSON.stringify(response.payload);
+  await writeWalletIntelCachedBody(cacheClient, cacheKey, body, cacheTtlSec);
+  return { body, layer: "none" };
+}
+
+function readColdWalletActivity<T>(
+  cacheClient: WalletIntelCacheClient | null,
+  cacheKey: string,
+  cacheTtlSec: number,
+  load: { read: (client: PoolClient) => Promise<T>; report: ReportWalletRead },
+) {
+  return readColdWalletIntel<T>(
+    cacheClient,
+    cacheKey,
+    cacheTtlSec,
+    load,
+    (payload) => ({ payload }),
+  );
+}
+
 function buildWalletIntelSelectorMetricsJsonSql(alias: string): string {
   return `
     case
@@ -7606,6 +7681,16 @@ async function loadWhaleTopMarkets(
 
 export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const readWalletIntel = createReadSingleflight<
+    SharedWalletBody | { maxScanCandidates: number }
+  >();
+  const readWalletActivity = createReadSingleflight<SharedWalletBody>();
+  const reportSlowWalletRead =
+    (route: "whales" | "summary" | "signals"): ReportWalletRead =>
+    (timing) => {
+      if (timing.poolWaitMs + timing.queryMs >= 1000)
+        app.log.info({ route, ...timing }, "Wallet intel cold read slow");
+    };
 
   /**
    * POST /wallets/follow
@@ -9094,12 +9179,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(cached.body);
       }
-      const client = await pool.connect();
       try {
-        const result = await withWalletIntelQuerySettings(
-          client,
-          { workMem: "32MB" },
-          async () => {
+        const load = createWalletIntelQueryLoader(
+          { workMem: "32MB", report: reportSlowWalletRead("whales") },
+          async (client) => {
             const signalsPolicy = await resolveWalletIntelSignalsPolicy(client);
             const attributionPolicy =
               await resolveWalletIntelAttributionPolicy(client);
@@ -9718,7 +9801,19 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           },
         );
 
-        if (result.filterTooBroad) {
+        const loaded = await readWalletIntel(cacheKey, () =>
+          readColdWalletIntel(
+            cacheClient,
+            cacheKey,
+            cacheTtlSec,
+            load,
+            (result) =>
+              result.filterTooBroad
+                ? { maxScanCandidates: result.maxScanCandidates }
+                : { payload: result.payload },
+          ),
+        );
+        if ("maxScanCandidates" in loaded) {
           reply.code(422);
           return reply.send({
             error: "filter_too_broad",
@@ -9727,34 +9822,24 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             statusCode: 422,
             details: {
               route: "/wallets/whales",
-              maxScanCandidates: result.maxScanCandidates,
+              maxScanCandidates: loaded.maxScanCandidates,
             },
           });
         }
 
-        const body = JSON.stringify(result.payload);
-        if (cacheTtlSec > 0) {
-          await writeWalletIntelCachedBody(
-            cacheClient,
-            cacheKey,
-            body,
-            cacheTtlSec,
-          );
-        }
         applyWalletIntelCacheHeaders({
           reply,
-          hit: false,
-          layer: "none",
+          hit: loaded.layer !== "none",
+          layer: loaded.layer,
           cacheStatus: cacheContext.status,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send(body);
+        return reply.send(loaded.body);
       } catch (error) {
+        if (error instanceof WalletIntelPoolAcquireError) throw error.cause;
         app.log.error({ error, userId, query }, "Failed to load whale wallets");
         reply.code(500);
         return reply.send({ error: "Failed to load whale wallets" });
-      } finally {
-        client.release();
       }
     },
   );
@@ -10281,12 +10366,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(cached.body);
       }
-      const client = await pool.connect();
       try {
-        const payload = await withWalletIntelQuerySettings(
-          client,
-          { workMem: "32MB" },
-          async () => {
+        const load = createWalletIntelQueryLoader(
+          { workMem: "32MB", report: reportSlowWalletRead("summary") },
+          async (client) => {
             const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
             const signalsPolicy = await resolveWalletIntelSignalsPolicy(client);
             const attributionPolicy =
@@ -10780,24 +10863,19 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           },
         );
 
-        const body = JSON.stringify(payload);
-        if (cacheTtlSec > 0) {
-          await writeWalletIntelCachedBody(
-            cacheClient,
-            cacheKey,
-            body,
-            cacheTtlSec,
-          );
-        }
+        const loaded = await readWalletActivity(cacheKey, () =>
+          readColdWalletActivity(cacheClient, cacheKey, cacheTtlSec, load),
+        );
         applyWalletIntelCacheHeaders({
           reply,
-          hit: false,
-          layer: "none",
+          hit: loaded.layer === "local",
+          layer: loaded.layer,
           cacheStatus: cacheContext.status,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send(body);
+        return reply.send(loaded.body);
       } catch (error) {
+        if (error instanceof WalletIntelPoolAcquireError) throw error.cause;
         app.log.error(
           { error, userId, query },
           "Failed to load wallet activity summaries",
@@ -10806,8 +10884,6 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({
           error: "Failed to load wallet activity summaries",
         });
-      } finally {
-        client.release();
       }
     },
   );
@@ -10878,12 +10954,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(cached.body);
       }
-      const client = await pool.connect();
       try {
-        const payload = await withWalletIntelQuerySettings(
-          client,
-          { workMem: "48MB" },
-          async () => {
+        const load = createWalletIntelQueryLoader(
+          { workMem: "48MB", report: reportSlowWalletRead("signals") },
+          async (client) => {
             const signalsPolicy = await resolveWalletIntelSignalsPolicy(client);
             const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
             const attributionPolicy =
@@ -11298,32 +11372,25 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             };
           },
         );
-        const body = JSON.stringify(payload);
-        if (cacheTtlSec > 0) {
-          await writeWalletIntelCachedBody(
-            cacheClient,
-            cacheKey,
-            body,
-            cacheTtlSec,
-          );
-        }
+        const loaded = await readWalletActivity(cacheKey, () =>
+          readColdWalletActivity(cacheClient, cacheKey, cacheTtlSec, load),
+        );
         applyWalletIntelCacheHeaders({
           reply,
-          hit: false,
-          layer: "none",
+          hit: loaded.layer === "local",
+          layer: loaded.layer,
           cacheStatus: cacheContext.status,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send(body);
+        return reply.send(loaded.body);
       } catch (error) {
+        if (error instanceof WalletIntelPoolAcquireError) throw error.cause;
         app.log.error(
           { error, userId, query },
           "Failed to load wallet activity signals",
         );
         reply.code(500);
         return reply.send({ error: "Failed to load wallet activity signals" });
-      } finally {
-        client.release();
       }
     },
   );
