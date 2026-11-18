@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import {
   buildGlobalMoves,
   retainedMove,
+  selectMoveRepresentatives,
 } from "./services/trader-global-moves.js";
+import { readCollection } from "./services/trader-collection-service.js";
 import { collectionSchema } from "./schemas/trader-collections.js";
 import { assetKey } from "./repos/trader-collections.js";
 import type { Balance, Delta } from "./repos/trader-global-moves.js";
@@ -147,8 +149,62 @@ assert.deepEqual(
   page.groups
     .find((g) => g.category === "sports")
     ?.items.map((i) => i.trader.traderId),
-  [wallet(75), wallet(73), wallet(72)],
+  [wallet(75)],
 );
+const lead = page.groups.find((g) => g.category === "sports")?.items[0];
+assert.ok(lead);
+assert.deepEqual(
+  lead.relatedMoves?.map((item) => item.trader.traderId),
+  [wallet(73), wallet(72)],
+);
+
+const orderedPairs = [
+  { eventId: "a", family: "x" },
+  { eventId: "a", family: "y" },
+  { eventId: "b", family: "x" },
+  { eventId: "c", family: "z" },
+];
+assert.deepEqual(
+  selectMoveRepresentatives(orderedPairs),
+  orderedPairs.slice(1),
+);
+
+assert.equal(lead.achievement.kind, "big_move");
+const primaryQuote = lead.achievement.quote;
+const linkedMove = lead.relatedMoves?.[0];
+const expiredRelated = lead.relatedMoves?.[1];
+assert.ok(linkedMove && expiredRelated);
+primaryQuote.validUntil = new Date((end + 1) * 1000).toISOString();
+expiredRelated.achievement.quote.validUntil = primaryQuote.validUntil;
+const promotedPage = await readCollection(
+  async () => page,
+  "big-moves",
+  "sports",
+  end + 1,
+);
+const promoted = promotedPage?.response.groups[0].items[0];
+assert.equal(promoted?.trader.traderId, linkedMove.trader.traderId);
+assert.deepEqual(promoted?.achievement, linkedMove.achievement);
+assert.equal(promoted?.rank, 1);
+assert.equal(promoted?.relatedMoves?.length, 0);
+assert.equal(
+  promoted?.summary,
+  `Position grew by approximately $${linkedMove.achievement.estimatedIncreaseUsd}.`,
+);
+assert.equal(lead.trader.traderId, wallet(75), "stored lead remains unchanged");
+assert.equal(
+  lead.relatedMoves?.length,
+  2,
+  "stored related moves remain unchanged",
+);
+const expiredPage = await readCollection(
+  async () => page,
+  "big-moves",
+  "sports",
+  end + 300,
+);
+assert.equal(expiredPage?.response.groups[0].items.length, 0);
+assert.equal(expiredPage?.response.groups[0].status, "insufficient_evidence");
 assert.equal(page.diagnostics?.selectedWallets, 77);
 assert.equal(page.diagnostics?.qualifiedWallets, 76);
 assert.deepEqual(page.diagnostics?.exclusions, [

@@ -119,6 +119,7 @@ console.log(
 
 const viewNodes = nodes.map((node) => ({
   ...node,
+  heroVenue: "kalshi",
   childIds: node.id === "root" ? ["leaf"] : [],
 }));
 const viewEvents = new Map([
@@ -157,6 +158,7 @@ assert.equal(view.nodes[0].sumVolume24h, 20);
 assert.equal(view.nodes[0].sumLiquidity, 30);
 assert.equal(view.nodes[0].sumOpenInterest, 40);
 assert.equal(view.nodes[0].heroEventId, "a");
+assert.equal(view.nodes[0].heroVenue, "polymarket");
 assert.deepEqual(Object.keys(view.nodes[0].venueBreakdown), ["polymarket"]);
 assert.equal(view.nodes[0].signalCountSubtree, 1);
 assert.equal(view.nodes[0].topSignal?.title, "Bitcoin catalyst");
@@ -173,6 +175,11 @@ assert.equal(
   buildMapSearchView(viewNodes, viewDocs, "crypto", ["limitless"]).nodes[0]
     .sumVolume24h,
   300,
+);
+assert.equal(
+  buildMapSearchView(viewNodes, viewDocs, "crypto", ["limitless"]).nodes[0]
+    .heroVenue,
+  "limitless",
 );
 assert.equal(
   viewNodes[0].eventCount,

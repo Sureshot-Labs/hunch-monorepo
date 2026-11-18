@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
+  marketMapTopic,
+  mapTopicComposition,
+} from "./services/market-map-topic.js";
+import {
   embeddingKey,
   readActiveGeneration,
   parseEmbeddingVector,
@@ -111,6 +115,9 @@ const MARKET_MAP_MARKET_ACTIVITY_VOLUME_SQL =
 
 type EventCandidateRow = {
   event_id: string;
+  topic_category?: string | null;
+  topic_slug?: string | null;
+  topic_metadata?: unknown;
   venue: MarketMapVenue;
   title: string | null;
   event_image: string | null;
@@ -169,6 +176,7 @@ type CandidateQualitySummary = {
 
 type EventPoint = {
   eventId: string;
+  topic?: string | null;
   venue: MarketMapVenue;
   title: string;
   startTime: string | null;
@@ -523,6 +531,7 @@ function formatCoord(value: number): number {
 function summarizeEvent(point: EventPoint): MarketMapEventSummary {
   return {
     eventId: point.eventId,
+    topic: point.topic ?? null,
     title: point.title,
     venue: point.venue,
     startTime: point.startTime,
@@ -730,7 +739,20 @@ function buildTreeGlobal(params: {
         parentId,
         eventIds,
       });
-      const representative = pickRepresentative(bucket);
+      const { dominant, mixed, known, prefer, label } =
+        mapTopicComposition(bucket);
+      const representative = pickRepresentative(prefer);
+      const examples = prefer.slice(0, 6);
+      if (examples.length < 6) {
+        const used = new Set(examples.map((row) => row.eventId));
+        for (const row of bucket) {
+          if (!used.has(row.eventId)) {
+            examples.push(row);
+            used.add(row.eventId);
+          }
+          if (examples.length === 6) break;
+        }
+      }
       const eventCount = bucket.length;
       const sumVolume24h = bucket.reduce((sum, row) => sum + row.volume24h, 0);
       const sumLiquidity = bucket.reduce((sum, row) => sum + row.liquidity, 0);
@@ -796,8 +818,9 @@ function buildTreeGlobal(params: {
         level,
         parentId,
         childIds: [],
-        label: representative.title,
+        label: mixed ? label : representative.title,
         labelRepresentative: representative.title,
+        topicComposition: { scope: "whole_snapshot", dominant, mixed, known },
         labelAi: null,
         labelSource: "representative",
         x: formatCoord(x),
@@ -807,8 +830,9 @@ function buildTreeGlobal(params: {
         sumLiquidity: formatCoord(sumLiquidity),
         sumOpenInterest: formatCoord(sumOpenInterest),
         score: formatCoord(score),
-        sampleEventIds: bucket.slice(0, 6).map((row) => row.eventId),
+        sampleEventIds: examples.map((row) => row.eventId),
         heroEventId: representative.eventId,
+        heroVenue: representative.venue,
         heroMarketId: representative.representativeMarketId,
         heroImage: representative.image,
         heroIcon: representative.icon,
@@ -821,7 +845,12 @@ function buildTreeGlobal(params: {
         bucket
           .slice()
           .sort(
-            (a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId),
+            (a, b) =>
+              (dominant
+                ? Number(b.topic === dominant) - Number(a.topic === dominant)
+                : 0) ||
+              b.score - a.score ||
+              a.eventId.localeCompare(b.eventId),
           )
           .map(summarizeEvent),
       );
@@ -1370,7 +1399,10 @@ async function applyAiLabels(params: {
     return emptyLabelCostSummary();
   }
   const allowedLevels = new Set(config.labelLevels);
-  const deepestExistingLevel = nodes.reduce(
+  const homogeneousNodes = nodes.filter(
+    (node) => !node.topicComposition?.mixed,
+  );
+  const deepestExistingLevel = homogeneousNodes.reduce(
     (max, node) => Math.max(max, node.level),
     1,
   );
@@ -1379,7 +1411,9 @@ async function applyAiLabels(params: {
     allowedLevels.add(deepestExistingLevel);
   }
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const candidates = nodes.filter((node) => allowedLevels.has(node.level));
+  const candidates = homogeneousNodes.filter((node) =>
+    allowedLevels.has(node.level),
+  );
   if (candidates.length === 0) {
     console.log("[market-map] ai labels skipped (no candidate nodes)");
     return emptyLabelCostSummary();
@@ -2001,6 +2035,10 @@ async function fetchVenueCandidates(
       candidate_events as (
         select
           e.id as event_id,
+          e.category as topic_category,
+          e.slug as topic_slug,
+          jsonb_build_object('sport',e.metadata->'sport','league',e.metadata->'league',
+            'sportSlug',e.metadata->'sportSlug') as topic_metadata,
           e.venue::text as venue,
           e.title,
           e.image as event_image,
@@ -2118,6 +2156,9 @@ async function fetchVenueCandidates(
       )
       select
         em.event_id,
+        em.topic_category,
+        em.topic_slug,
+        em.topic_metadata,
         em.venue,
         em.title,
         em.event_image,
@@ -2634,6 +2675,11 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
         if (!vector) continue;
         points.push({
           eventId: row.event_id,
+          topic: marketMapTopic(
+            row.topic_category,
+            row.topic_slug ?? null,
+            row.topic_metadata,
+          ),
           venue: row.venue,
           title: row.title?.trim() || row.event_id,
           startTime: toIsoStringOrNull(row.start_time),

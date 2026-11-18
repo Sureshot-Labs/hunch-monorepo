@@ -4,7 +4,11 @@ export type MarketMapSidebarKind =
   | "volumeMoversAbsolute24h"
   | "liquidityMovers24h"
   | "liquidityMoversAbsolute24h"
+  | "newVolumeActivity"
+  | "newLiquidityActivity"
   | "topMovers24h";
+
+export const SIDEBAR_COMPARABLE_USD = 0.01;
 
 const EVENT_CHANGE24H_CURRENT_VERSION_SQL = `(
   ec.calculation_version = 2
@@ -48,6 +52,22 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
   filterSql: string;
   orderSql: string;
 } {
+  if (kind === "newVolumeActivity" || kind === "newLiquidityActivity") {
+    const volume = kind === "newVolumeActivity";
+    const valid = volume ? "volume_valid" : "liquidity_valid";
+    const base = volume ? "volume_prev_24h" : "liquidity_24h_ago";
+    const delta = volume ? "volume_last_24h_change" : "liquidity_change_24h";
+    const floor = volume ? "$5" : "$8";
+    return {
+      fromSql: `from unified_event_activity_metrics_24h eam
+        join unified_events e on e.id=eam.event_id and e.venue=eam.venue
+        left join unified_event_change_24h ec on ec.event_id=e.id and ${EVENT_CHANGE24H_CURRENT_VERSION_SQL}`,
+      filterSql: `and eam.venue=any($1::text[]) and eam.${valid} is true
+        and eam.${base} >= 0 and eam.${base} < ${SIDEBAR_COMPARABLE_USD}
+        and eam.${delta} > 0 and eam.${delta} >= ${floor}::numeric`,
+      orderSql: `abs(eam.${delta}) desc nulls last`,
+    };
+  }
   switch (kind) {
     case "volumeMovers24h":
       return {
@@ -66,6 +86,7 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
           and eam.volume_last_24h_change_pct is not null
           and eam.volume_last_24h >= $3::numeric
           and eam.volume_prev_24h >= $3::numeric
+          and eam.volume_prev_24h >= ${SIDEBAR_COMPARABLE_USD}
           and eam.volume_last_24h_change_pct >= $4::numeric
         `,
         orderSql: `
@@ -116,6 +137,7 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
           and eam.liquidity_change_pct_24h is not null
           and eam.liquidity_now >= $6::numeric
           and eam.liquidity_24h_ago >= $6::numeric
+          and eam.liquidity_24h_ago >= ${SIDEBAR_COMPARABLE_USD}
           and eam.liquidity_change_pct_24h >= $7::numeric
         `,
         orderSql: `
@@ -189,6 +211,10 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
 
 function sidebarRankedOrderSql(kind: MarketMapSidebarKind): string {
   switch (kind) {
+    case "newVolumeActivity":
+      return "abs(re.volume_last_24h_change) desc nulls last";
+    case "newLiquidityActivity":
+      return "abs(re.liquidity_change_24h) desc nulls last";
     case "volumeMovers24h":
       return `
         re.volume_last_24h_change_pct desc nulls last,
@@ -248,10 +274,13 @@ export function buildMarketMapSidebarQuery(params: {
           eam.volume_last_24h,
           eam.volume_prev_24h,
           eam.volume_last_24h_change,
-          eam.volume_last_24h_change_pct,
+          case when eam.volume_prev_24h >= ${SIDEBAR_COMPARABLE_USD}
+            then eam.volume_last_24h_change_pct end as volume_last_24h_change_pct,
           eam.liquidity_now,
+          eam.liquidity_24h_ago,
           eam.liquidity_change_24h,
-          eam.liquidity_change_pct_24h,
+          case when eam.liquidity_24h_ago >= ${SIDEBAR_COMPARABLE_USD}
+            then eam.liquidity_change_pct_24h end as liquidity_change_pct_24h,
           eam.open_interest_now,
           eam.open_interest_change_24h,
           eam.open_interest_change_pct_24h,

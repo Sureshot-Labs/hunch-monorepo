@@ -156,6 +156,8 @@ export const socialThesisSchema = z.object({
   entryQuoteAsOf: timestamp.nullable(),
   sources: z.array(thesisSourceSchema),
   simulation: z.literal("top_ask_no_depth_fees_or_slippage").nullable(),
+  previousThesisId: uuid.nullable().optional(),
+  changeReason: z.string().nullable().optional(),
   id: uuid,
   author: socialProfileSchema,
   body: z.string(),

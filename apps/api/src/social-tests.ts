@@ -72,6 +72,46 @@ assert.throws(
     ),
   /invalid_cursor/,
 );
+const cursorSecret = "fake-social-feed-local-test-key";
+const snapshotCursor = {
+  ...cursor,
+  asOf: "2026-10-08T11:12:14.000Z",
+  paperVisibility: "100:104:101,103",
+};
+const sealed = encodeSocialCursor(snapshotCursor, cursorSecret);
+assert.match(sealed, /^s2:v1:/);
+assert.ok(!sealed.includes(snapshotCursor.paperVisibility));
+assert.deepEqual(decodeSocialCursor(sealed, cursor.scope, cursorSecret), {
+  version: 1,
+  ...snapshotCursor,
+});
+assert.throws(() => encodeSocialCursor(snapshotCursor), /key is missing/);
+assert.throws(
+  () => decodeSocialCursor(sealed, cursor.scope, "different-key"),
+  /invalid_cursor/,
+);
+assert.throws(
+  () => decodeSocialCursor(sealed, "different-scope", cursorSecret),
+  /invalid_cursor/,
+);
+const [, version, iv, tag, ciphertext] = sealed.split(":");
+const modified = (ciphertext[0] === "A" ? "B" : "A") + ciphertext.slice(1);
+assert.throws(
+  () =>
+    decodeSocialCursor(
+      ["s2", version, iv, tag, modified].join(":"),
+      cursor.scope,
+      cursorSecret,
+    ),
+  /invalid_cursor/,
+);
+const spoofed = Buffer.from(
+  JSON.stringify({ version: 1, ...snapshotCursor }),
+).toString("base64url");
+assert.throws(
+  () => decodeSocialCursor(spoofed, cursor.scope, cursorSecret),
+  /invalid_cursor/,
+);
 assert.equal(graphemeLength("👩🏽‍🚀🇵🇹a\u0301"), 3);
 assert.equal(socialText("  a\u0301  ", 1), "á");
 assert.throws(() => socialText("ab", 1), /invalid_text_length/);

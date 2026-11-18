@@ -220,6 +220,7 @@ export function buildMapSearchView(
           dominantVenue: hero.venue,
           sampleEventIds: events.map((event) => event.eventId),
           heroEventId: hero.eventId,
+          heroVenue: hero.venue,
           heroMarketId: hero.representativeMarketId,
           heroImage: hero.image,
           heroIcon: hero.icon,

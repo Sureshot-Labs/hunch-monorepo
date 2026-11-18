@@ -51,6 +51,7 @@ import { buildSocialTraderStatisticsRevision } from "./social-trader-statistics-
 import { paperPerformanceSchema } from "../schemas/social.js";
 import { loadIntelTags } from "./intel-tags-loader.js";
 import { emptyIntelTags } from "./intel-tags.js";
+import { publicPaperAtFeedCutoffSql } from "./paper-revision-identity.js";
 
 type Row = {
   is_agent?: boolean;
@@ -253,7 +254,10 @@ export class SocialService {
       policy: SocialPolicy,
       kind: "write" | "comment" | "report" | "like",
     ) => Promise<void> = async () => {},
-    private readonly options: { limitlessPositionContract?: string } = {},
+    private readonly options: {
+      limitlessPositionContract?: string;
+      feedCursorSecret?: string;
+    } = {},
   ) {}
 
   private instrumentMatches(
@@ -988,6 +992,18 @@ export class SocialService {
       m.title,m.outcomes,coalesce(m.image,e.image) as image,m.status,m.venue,m.resolved_outcome,m.resolved_outcome_pct::text,m.close_time,m.expiration_time,m.metadata,
       e.status as event_status,e.end_date as event_end_time,pm.accepting_orders as pm_accepting_orders,
       current_token.token_id as current_token_id,${likeColumns("thesis", "t.id")},
+      (select prior.id from user_theses prior
+        where prior.id=case when t.buy_snapshot#>>'{provenance,previousThesisId}' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          then (t.buy_snapshot#>>'{provenance,previousThesisId}')::uuid end
+        and prior.purchase_mode='paper' and prior.author_id=t.author_id
+        and prior.market_id=t.market_id
+        and (case when t.paper_revision_checked then t.paper_revision_parent_id=prior.id
+          else prior.outcome=t.outcome and prior.token_id=t.token_id
+            and prior.instrument_generation=t.instrument_generation end)
+        and prior.expiry is not distinct from t.expiry
+        and (prior.published_at,prior.id)<(t.published_at,t.id)
+        and prior.author_hidden_at is null and prior.moderation_hidden_at is null
+        and prior.proof_invalidated_at is null) as public_previous_thesis_id,
       case when q.ts<=now() and q.ts>=now()-($4::int*interval '1 second') then coalesce(q.mid,(q.best_bid+q.best_ask)/2)::text end as mark,
       (select count(*)::int from social_comments c join users cu on cu.id=c.author_id where c.thesis_id=t.id and c.author_hidden_at is null and c.moderation_hidden_at is null and cu.is_active and cu.social_suspended_at is null
         and not exists(select 1 from user_blocks b where (b.blocker_user_id=$1::uuid and b.blocked_user_id=cu.id) or (b.blocked_user_id=$1::uuid and b.blocker_user_id=cu.id))) as comment_count,
@@ -1024,6 +1040,17 @@ export class SocialService {
         entryQuoteAsOf: paper?.success ? paper.data.quoteAsOf : null,
         sources: paper?.success ? paper.data.provenance.sources : [],
         simulation: paper?.success ? paper.data.simulation : null,
+        ...(paper?.success && visibility === "public"
+          ? {
+              previousThesisId: row.public_previous_thesis_id ?? null,
+              changeReason:
+                row.public_previous_thesis_id &&
+                paper.data.provenance.changeReason &&
+                isSocialTextAllowed(paper.data.provenance.changeReason)
+                  ? paper.data.provenance.changeReason
+                  : null,
+            }
+          : {}),
         id: row.thesis_id,
         author: profile(row),
         body: isSocialTextAllowed(row.body)
@@ -1078,7 +1105,32 @@ export class SocialService {
       input.marketId ?? null,
       input.eventId ?? null,
     ]);
-    const cursor = decodeSocialCursor(input.cursor, scope);
+    const collapseRevisions =
+      input.mode === "all" &&
+      !input.authorId &&
+      !input.marketId &&
+      !input.eventId;
+    const cursorSecret = collapseRevisions
+      ? (this.options.feedCursorSecret ?? process.env.JWT_SECRET)
+      : undefined;
+    const cursor = decodeSocialCursor(input.cursor, scope, cursorSecret);
+    const asOf = collapseRevisions
+      ? new Date(
+          Math.min(
+            Date.now(),
+            cursor?.asOf ? Date.parse(cursor.asOf) : Infinity,
+          ),
+        ).toISOString()
+      : null;
+    const paperVisibility =
+      asOf && input.source !== "hunch"
+        ? (cursor?.paperVisibility ??
+          (
+            await this.db.query<{ snapshot: string }>(
+              "select pg_current_snapshot()::text as snapshot",
+            )
+          ).rows[0].snapshot)
+        : null;
     const values = [
       viewerId,
       input.marketId ?? null,
@@ -1088,6 +1140,9 @@ export class SocialService {
       cursor?.kind ?? null,
       cursor?.id ?? null,
       limit + 1,
+      ...(asOf
+        ? [asOf, ...(input.source !== "hunch" ? [paperVisibility] : [])]
+        : []),
     ];
     // Separate query shapes keep generic plans selective; nullable-OR filters can scan an entire empty market tail.
     const thesisFilters = `${input.marketId ? "and t.market_id=$2::text" : ""} ${input.eventId ? "and t.event_id=$3::text" : ""} ${input.authorId ? "and t.author_id=$4::uuid" : ""}
@@ -1122,8 +1177,44 @@ export class SocialService {
               ${cursor ? "and (t.published_at,'thesis'::text,t.id)<($5::timestamptz,$6::text,$7::uuid)" : ""}
             order by t.event_id,t.published_at desc,t.id desc limit $8) candidate
           where scoped_event.id=$3::text order by candidate.sort_at desc,candidate.id desc limit $8`
-            : `select t.id,t.published_at as sort_at,'thesis'::text as item_kind from user_theses t join users u on u.id=t.author_id
-      where ${publicThesis} ${thesisFilters} order by t.published_at desc,t.id desc limit $8`;
+            : collapseRevisions
+              ? `select t.id,t.published_at as sort_at,'thesis'::text as item_kind from user_theses t
+      where t.author_hidden_at is null and t.moderation_hidden_at is null and t.proof_invalidated_at is null
+      and coalesce((select true from users u where u.id=t.author_id and ${publicAuthor} and ${noBlock} offset 0),false)
+      ${cursor ? "and t.published_at <= $5::timestamptz" : ""}
+      ${thesisFilters}
+      and t.published_at <= $9::timestamptz
+      and (t.purchase_mode <> 'paper' or t.paper_created_xid is null
+        or pg_visible_in_snapshot(t.paper_created_xid,$10::pg_snapshot)
+        or t.paper_created_xid=pg_current_xact_id_if_assigned())
+      and (t.purchase_mode <> 'paper' or ${publicPaperAtFeedCutoffSql("t")})
+      and (t.purchase_mode <> 'paper'
+        or not coalesce((select u.is_agent from users u where u.id=t.author_id offset 0),false)
+        or not exists (
+        with recursive descendants as (
+          select t.id,t.published_at,t.outcome,t.token_id,t.instrument_generation,false as visible_revision
+          union all
+          select child.id,child.published_at,child.outcome,child.token_id,child.instrument_generation,
+            ${publicPaperAtFeedCutoffSql("child")}
+          from descendants parent
+          join user_theses child on md5(child.buy_snapshot#>>'{provenance,previousThesisId}')=md5(parent.id::text)
+            and child.buy_snapshot#>>'{provenance,previousThesisId}'=parent.id::text
+          where not parent.visible_revision and child.purchase_mode='paper'
+            and child.author_id=t.author_id and child.market_id=t.market_id
+            and child.expiry is not distinct from t.expiry
+            and (case when child.paper_revision_checked then child.paper_revision_parent_id=parent.id
+              else parent.outcome=child.outcome and parent.token_id=child.token_id
+                and parent.instrument_generation=child.instrument_generation end)
+            and (child.paper_created_xid is null or pg_visible_in_snapshot(child.paper_created_xid,$10::pg_snapshot)
+              or child.paper_created_xid=pg_current_xact_id_if_assigned())
+            and child.published_at <= $9::timestamptz
+            and (child.published_at,child.id)>(parent.published_at,parent.id)
+        )
+        select 1 from descendants where visible_revision
+      )) order by t.published_at desc,t.id desc limit $8`
+              : `select t.id,t.published_at as sort_at,'thesis'::text as item_kind
+                 from user_theses t join users u on u.id=t.author_id
+                 where ${publicThesis} ${thesisFilters} order by t.published_at desc,t.id desc limit $8`;
     const hunchBranch = input.eventId
       ? `select candidate.id,candidate.sort_at,'hunch'::text as item_kind from unified_markets m
       cross join lateral (select n.id,n.created_at as sort_at from ai_notes n where n.source_id=m.id and ${SOCIAL_PUBLIC_AI}
@@ -1132,6 +1223,7 @@ export class SocialService {
       where m.event_id=$3::text ${input.marketId ? "and m.id=$2::text" : ""} order by candidate.sort_at desc,candidate.id desc limit $8`
       : `select n.id,n.created_at as sort_at,'hunch'::text as item_kind from ai_notes n join unified_markets m on m.id=n.source_id
       where ${SOCIAL_PUBLIC_AI} ${input.marketId ? "and n.source_id=$2::text" : ""} ${input.eventId ? "and m.event_id=$3::text" : ""}
+      ${asOf ? "and n.created_at <= $9::timestamptz" : ""}
       ${cursor ? "and (n.created_at,'hunch'::text,n.id)<($5::timestamptz,$6::text,$7::uuid)" : ""} order by n.created_at desc,n.id desc limit $8`;
     const branches: string[] = [];
     if (input.source !== "hunch") branches.push(`(${thesisBranch})`);
@@ -1166,12 +1258,17 @@ export class SocialService {
       }),
       nextCursor:
         rows.length > limit && last
-          ? encodeSocialCursor({
-              scope,
-              timestamp: last.sort_at,
-              kind: last.item_kind,
-              id: last.id,
-            })
+          ? encodeSocialCursor(
+              {
+                scope,
+                timestamp: last.sort_at,
+                kind: last.item_kind,
+                id: last.id,
+                ...(asOf ? { asOf } : {}),
+                ...(paperVisibility ? { paperVisibility } : {}),
+              },
+              cursorSecret,
+            )
           : null,
     };
   }

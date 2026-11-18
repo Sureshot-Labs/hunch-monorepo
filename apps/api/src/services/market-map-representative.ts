@@ -464,7 +464,7 @@ export async function selectPreferredRepresentativeMarketsForEvents(
 }
 
 export async function selectRankedRepresentativeMarketsForEvents(
-  pool: Pool,
+  pool: Pick<Pool, "query">,
   inputs: RepresentativeEventInput[],
   perEventLimit: number,
 ): Promise<RankedRepresentativeMarket[]> {

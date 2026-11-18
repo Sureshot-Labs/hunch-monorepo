@@ -107,6 +107,11 @@ export type FeedMarket = {
 };
 
 export type FeedEvent = {
+  representative?: {
+    marketId: string;
+    venue: string;
+    basis: "observed_volume_24h" | "liquidity_fallback";
+  } | null;
   eventId: string;
   eventTitle: string | null;
   durationMinutes?: number | null;

@@ -104,6 +104,25 @@ export const zDurationMinutesQuery = z
     return Array.from(new Set(values)).sort((a, b) => a - b);
   });
 
+export const feedResponseSchema = z.looseObject({
+  count: z.number().int(),
+  limit: z.number().int(),
+  offset: z.number().int(),
+  data: z.array(
+    z.looseObject({
+      eventId: z.string(),
+      representative: z
+        .object({
+          marketId: z.string(),
+          venue: z.string(),
+          basis: z.enum(["observed_volume_24h", "liquidity_fallback"]),
+        })
+        .nullable()
+        .optional(),
+    }),
+  ),
+});
+
 export const feedQuerySchema = z.object({
   limit: z.coerce
     .number()

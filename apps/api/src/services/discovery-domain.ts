@@ -326,6 +326,7 @@ export function quickReason(
 ): Extract<DiscoveryItem["reason"], { kind: "quick-wins" }> {
   return {
     kind: "quick-wins",
+    selectionBasis: "quote_favorite_near_market_expiry",
     volume24hUsd,
     liquidityUsd,
     grossReturnIfWin: sub(div("1", ask) ?? "0", "1"),
@@ -753,6 +754,15 @@ export function aggregateSmartMoney(
     group.reason.positioning = {
       selected: a,
       opposite: b,
+      selectedIncreaseComparison:
+        cmp(add(a.observedIncreaseValueUsd, b.observedIncreaseValueUsd), "0") <=
+        0
+          ? "unavailable"
+          : cmp(a.observedIncreaseValueUsd, b.observedIncreaseValueUsd) > 0
+            ? "leads"
+            : cmp(a.observedIncreaseValueUsd, b.observedIncreaseValueUsd) < 0
+              ? "trails"
+              : "equal",
       selectedIncreaseShare: div(
         a.observedIncreaseValueUsd,
         add(a.observedIncreaseValueUsd, b.observedIncreaseValueUsd),

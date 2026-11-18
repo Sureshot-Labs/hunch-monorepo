@@ -201,6 +201,7 @@ export function applyDiscoveryEstimate(
     ...item,
     estimate: { ...estimate, reason },
     valuation: null,
+    researchAskComparison: "unavailable" as const,
   });
   if (!sameInstrument(research.instrument, item.selection.instrument))
     return unavailable("instrument_changed");
@@ -289,9 +290,13 @@ export function applyDiscoveryEstimate(
   estimate.reason = shift === 0 ? "no_adjustment" : "adjusted";
   const ratio = div(estimatedProbability, askText);
   const payout = div("1", askText);
+  const difference = cmp(estimatedProbability, askText);
+  const askComparison =
+    difference > 0 ? "above_ask" : difference < 0 ? "below_ask" : "at_ask";
   return {
     ...item,
     estimate,
+    researchAskComparison: askComparison,
     valuation:
       ratio && payout
         ? {

@@ -1,4 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
+import {
+  decryptCredentialsString,
+  encryptCredentialsString,
+} from "../lib/credentials-encryption.js";
 
 export class SocialError extends Error {
   constructor(
@@ -54,25 +58,51 @@ export type SocialCursor = {
   timestamp: string;
   kind: "thesis" | "hunch" | "comment" | "user" | "report";
   id: string;
+  asOf?: string;
+  paperVisibility?: string;
 };
+
+const sealedCursorPrefix = "s2:";
+const cursorKey = (secret: string) =>
+  createHmac("sha256", secret).update("hunch:social-feed-cursor:v2").digest();
 
 export function encodeSocialCursor(
   value: Omit<SocialCursor, "version">,
+  secret?: string,
 ): string {
-  return Buffer.from(JSON.stringify({ version: 1, ...value })).toString(
-    "base64url",
-  );
+  const json = JSON.stringify({ version: 1, ...value });
+  if (value.asOf === undefined && value.paperVisibility === undefined)
+    return Buffer.from(json).toString("base64url");
+  if (!secret) throw new Error("Social feed cursor key is missing");
+  return sealedCursorPrefix + encryptCredentialsString(json, cursorKey(secret));
 }
 
 export function decodeSocialCursor(
   raw: string | undefined,
   scope: string,
+  secret?: string,
 ): SocialCursor | null {
   if (!raw) return null;
   try {
+    if (raw.length > 24_000) throw new Error("invalid");
+    const sealed = raw.startsWith(sealedCursorPrefix);
+    if (sealed && (!secret || !/^s2:v1:[\w-]{16}:[\w-]{22}:[\w-]+$/.test(raw)))
+      throw new Error("invalid");
     const value = JSON.parse(
-      Buffer.from(raw, "base64url").toString("utf8"),
+      sealed && secret
+        ? decryptCredentialsString(
+            raw.slice(sealedCursorPrefix.length),
+            cursorKey(secret),
+          )
+        : Buffer.from(raw, "base64url").toString("utf8"),
     ) as SocialCursor;
+    // Legacy cursors keep their public keyset position; never trust an
+    // unsigned transaction snapshot or cutoff, even from a matching scope.
+    if (
+      !sealed &&
+      (value.asOf !== undefined || value.paperVisibility !== undefined)
+    )
+      throw new Error("invalid");
     const parts =
       typeof value.timestamp === "string"
         ? value.timestamp.slice(0, 10).split("-").map(Number)
@@ -85,9 +115,37 @@ export function decodeSocialCursor(
       month <= 12 &&
       day >= 1 &&
       day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const visibility = value.paperVisibility;
+    let snapshotValid = visibility === undefined;
+    if (
+      typeof visibility === "string" &&
+      visibility.length <= 16_384 &&
+      /^\d{1,20}:\d{1,20}:(?:\d{1,20}(?:,\d{1,20})*)?$/.test(visibility)
+    ) {
+      const [lo, hi, active] = visibility.split(":");
+      const first = BigInt(lo),
+        last = BigInt(hi);
+      let previous = first - 1n;
+      snapshotValid =
+        first > 2n &&
+        last >= first &&
+        last < 1n << 64n &&
+        (active === "" ||
+          active.split(",").every((entry) => {
+            const xid = BigInt(entry);
+            if (xid <= previous || xid >= last) return false;
+            previous = xid;
+            return true;
+          }));
+    }
     if (
       value.version !== 1 ||
       value.scope !== scope ||
+      !snapshotValid ||
+      (value.asOf !== undefined &&
+        (typeof value.asOf !== "string" ||
+          !Number.isFinite(Date.parse(value.asOf)) ||
+          new Date(value.asOf).toISOString() !== value.asOf)) ||
       !["thesis", "hunch", "comment", "user", "report"].includes(value.kind) ||
       !/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::?\d{2})?)$/.test(
         value.timestamp,
