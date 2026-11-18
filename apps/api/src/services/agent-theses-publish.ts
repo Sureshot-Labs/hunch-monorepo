@@ -7,6 +7,7 @@ import {
   type SocialBuySnapshot,
 } from "../schemas/social-trade.js";
 import { resolveAgentThesesPolicy } from "./agent-theses-policy.js";
+import { samePaperIdeaSql } from "./paper-revision-identity.js";
 import { resolveSocialPolicy } from "./social-policy.js";
 import {
   readSocialMarket,
@@ -150,11 +151,33 @@ export async function publishAgentThesis(input: {
       provenance: input.provenance,
     });
     await input.assertLease();
+    const parentId = input.provenance.previousThesisId;
+    const sealedParent = parentId
+      ? ((
+          await db.query<{ id: string }>(
+            `
+        select prior.id from user_theses prior
+        cross join (select $4::text as outcome,$5::text as token_id,$6::text as instrument_generation) chosen
+        where prior.id=$1::uuid and prior.author_id=$2::uuid and prior.market_id=$3::text and prior.purchase_mode='paper'
+          and prior.expiry is not distinct from $7::timestamptz
+          and ${samePaperIdeaSql("$3::text", "prior", "chosen")}`,
+            [
+              parentId,
+              input.userId,
+              input.instrument.marketId,
+              input.instrument.outcome,
+              input.instrument.tokenId,
+              input.instrument.generation,
+              input.instrument.expiry,
+            ],
+          )
+        ).rows[0]?.id ?? null)
+      : null;
     const created = await db.query(
       `insert into user_theses(author_id,canonical_purchase_key,market_id,event_id,token_id,outcome,
        instrument_generation,expiry,body,buy_snapshot,policy_revision,qualifying_notional,
-       idempotency_key,payload_hash,purchase_mode,published_at)
-       values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::numeric,$13,$14,'paper',$15) returning id`,
+       idempotency_key,payload_hash,purchase_mode,published_at,paper_revision_checked,paper_revision_parent_id)
+       values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::numeric,$13,$14,'paper',$15,true,$16::uuid) returning id`,
       [
         input.userId,
         snapshot.canonicalPurchaseKey,
@@ -171,6 +194,7 @@ export async function publishAgentThesis(input: {
         input.idempotencyKey,
         hash,
         now,
+        sealedParent,
       ],
     );
     await input.assertLease();

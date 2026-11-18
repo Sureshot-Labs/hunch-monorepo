@@ -195,6 +195,9 @@ export const discoveryPositioningSchema = z.object({
   selected: positioningSideSchema,
   opposite: positioningSideSchema,
   selectedIncreaseShare: decimal.nullable(),
+  selectedIncreaseComparison: z
+    .enum(["leads", "trails", "equal", "unavailable"])
+    .optional(),
   windowHours: z.literal(24),
   oldestSnapshotAt: iso.nullable(),
   latestSnapshotAt: iso.nullable(),
@@ -237,6 +240,7 @@ export const discoveryReasonSchema = z
       kind: z.literal("quick-wins"),
       volume24hUsd: decimal,
       liquidityUsd: decimal,
+      selectionBasis: z.literal("quote_favorite_near_market_expiry").optional(),
       grossReturnIfWin: decimal,
       returnBasis: z.literal("top_ask_excludes_depth_fees_slippage"),
       resolutionClarity: z.literal("rules_provided_not_human_reviewed"),
@@ -290,6 +294,9 @@ export const discoveryItemSchema = z.object({
   reason: discoveryReasonSchema,
   estimate: discoveryEstimateSchema.optional(),
   valuation: discoveryValuationSchema.nullable().optional(),
+  researchAskComparison: z
+    .enum(["above_ask", "at_ask", "below_ask", "unavailable"])
+    .optional(),
 });
 export const discoveryResponseSchema = z.object({
   section: z.enum(discoverySections),

@@ -74,6 +74,35 @@ export const marketMapSidebarsQuerySchema = z.object({
   sparklineBucketHours: z.coerce.number().int().min(1).max(24).optional(),
 });
 
+const sidebarBasis = z.enum([
+  "comparable",
+  "new_activity",
+  "below_precision",
+  "unknown",
+]);
+const sidebarEventSchema = z.looseObject({
+  eventId: z.string(),
+  venue: z.string(),
+  volumeLast24hChangePct: z.number().nullable().optional(),
+  liquidityChangePct24h: z.number().nullable().optional(),
+  sidebarEvidence: z
+    .object({
+      volumeBasis: sidebarBasis,
+      liquidityBasis: sidebarBasis,
+      priceMoveVolume: z.enum(["nonzero", "zero", "unknown"]),
+    })
+    .optional(),
+});
+export const marketMapSidebarsResponseSchema = z.looseObject({
+  trendingNow: z.array(sidebarEventSchema),
+  volumeMovers24h: z.array(sidebarEventSchema),
+  liquidityMovers24h: z.array(sidebarEventSchema),
+  topMovers24h: z.array(sidebarEventSchema),
+  newActivity: z.array(sidebarEventSchema),
+  newActivityStatus: z.enum(["ready", "unavailable"]).optional(),
+  generatedAt: z.string(),
+});
+
 export type MarketMapQuery = z.infer<typeof marketMapQuerySchema>;
 export type MarketMapNodeParams = z.infer<typeof marketMapNodeParamsSchema>;
 export type MarketMapNodeEventsQuery = z.infer<

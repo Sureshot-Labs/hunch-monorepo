@@ -171,6 +171,19 @@ export const itemSchema = z.object({
   historyDays: count.nullable(),
   rank: z.number().int().min(1).max(3),
   achievement: z.discriminatedUnion("kind", [move, earnings, streak]),
+  relatedMoves: z
+    .array(
+      z.object({
+        trader: z.object({
+          traderId: z.string().uuid(),
+          username: z.string().nullable(),
+          displayName: z.string().nullable(),
+        }),
+        achievement: move,
+      }),
+    )
+    .max(2)
+    .optional(),
   latestOpenPosition: z
     .object({
       instrument,

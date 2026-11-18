@@ -3701,6 +3701,7 @@ export type FeedMarketRow = {
   trade_type: string | null;
   last_update: unknown;
   market_created_at: unknown;
+  representative_volume_24h?: unknown;
 };
 
 export async function fetchFeedMarkets(
@@ -3717,6 +3718,8 @@ export async function fetchFeedMarkets(
 ): Promise<FeedMarketRow[]> {
   if (eventIds.length === 0) return [];
   const directTokenLookup = options?.directTokenLookup ?? true;
+  const representativeVolume =
+    options?.compactResponseMetadata && inputs.sort === "trending_v2";
   const useCachedChange24h =
     inputs.sort === "change24h" && options?.useCachedChange24h === true;
   const { params, add } = createParamBuilder();
@@ -4250,6 +4253,7 @@ export async function fetchFeedMarkets(
       ${marketTradeTypeExpr} as trade_type,
       m.updated_at as last_update,
       m.created_at as market_created_at
+      ${representativeVolume ? ", representative_trade.volume_24h as representative_volume_24h" : ""}
     from event_order eo
     join ${directTokenLookup ? "event_base" : "unified_events"} e on e.id = eo.event_id
     join market_base m on m.event_id = e.id
@@ -4257,6 +4261,15 @@ export async function fetchFeedMarkets(
     ${bookSnapshot.noTopJoin}
     ${historyJoins}
     ${change24hCacheJoin}
+    ${
+      representativeVolume
+        ? `left join lateral (
+      select metric.volume_24h from unified_market_trade_24h metric
+      where metric.market_id=m.id and metric.updated_at between now()-interval '1 hour' and now()
+      and metric.volume_24h>0 offset 0
+    ) representative_trade on true`
+        : ""
+    }
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 

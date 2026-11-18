@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type { output } from "zod";
 import {
   embeddingKey,
   embeddingIndex,
@@ -33,6 +34,7 @@ import {
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
   feedQuerySchema,
+  feedResponseSchema,
   resolveMinTotalVolumeFilter,
 } from "../schemas/feed.js";
 import { forYouQuerySchema } from "../schemas/for-you.js";
@@ -150,7 +152,22 @@ function filterCachedFeedBodyForVenues(
         changed = true;
         return [];
       }
-      return markets === event.markets ? [event] : [{ ...event, markets }];
+      const representative = event.representative;
+      const representativeVisible =
+        !isRecord(representative) ||
+        markets.some(
+          (market) =>
+            isRecord(market) &&
+            market.venue === representative.venue &&
+            market.marketId === representative.marketId,
+        );
+      return [
+        {
+          ...event,
+          markets,
+          ...(representativeVisible ? {} : { representative: null }),
+        },
+      ];
     });
     if (!changed) return body;
     return JSON.stringify({ ...parsed, count: data.length, data });
@@ -372,6 +389,7 @@ function buildFeedData(input: {
   eventIds: string[];
   rows: FeedMarketRow[];
   view: "events" | "markets";
+  includeRepresentative?: boolean;
 }): FeedEvent[] {
   if (input.view === "markets") {
     return input.rows.map((row) => ({
@@ -381,13 +399,40 @@ function buildFeedData(input: {
   }
 
   const eventMap: Record<string, FeedEvent> = {};
+  const volumeByMarket = new WeakMap<FeedEvent["markets"][number], number>();
   for (const row of input.rows) {
     const eventId = String(row.event_id);
     if (!eventMap[eventId]) eventMap[eventId] = buildFeedEvent(row);
-    eventMap[eventId].markets.push(buildFeedMarket(row));
+    const market = buildFeedMarket(row);
+    eventMap[eventId].markets.push(market);
+    if (input.includeRepresentative) {
+      const volume = Number(row.representative_volume_24h);
+      if (volume > 0 && Number.isFinite(volume))
+        volumeByMarket.set(market, volume);
+    }
   }
   return input.eventIds.flatMap((eventId) => {
     const event = eventMap[eventId];
+    if (event && input.includeRepresentative) {
+      const candidate = [...event.markets]
+        .filter((market) => market.acceptingOrders)
+        .sort(
+          (a, b) =>
+            (volumeByMarket.get(b) ?? 0) - (volumeByMarket.get(a) ?? 0) ||
+            b.liquidityDisplay - a.liquidityDisplay ||
+            a.venue.localeCompare(b.venue) ||
+            a.marketId.localeCompare(b.marketId),
+        )[0];
+      event.representative = candidate
+        ? {
+            marketId: candidate.marketId,
+            venue: candidate.venue,
+            basis: volumeByMarket.has(candidate)
+              ? "observed_volume_24h"
+              : "liquidity_fallback",
+          }
+        : null;
+    }
     return event ? [event] : [];
   });
 }
@@ -417,11 +462,13 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
    * Adds ETag + Cache-Control. Uses Redis string body as the single source of truth
    * so ETag always matches the exact bytes sent.
    */
-  z.get(
+  // This handler sends pre-serialized cache bytes and a body-less 304.
+  app.get<{ Querystring: output<typeof feedQuerySchema> }>(
     "/feed",
     {
       schema: {
         querystring: feedQuerySchema,
+        response: { 200: feedResponseSchema },
       },
     },
     async (req, reply) => {
@@ -482,7 +529,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v35:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v36:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       let redisStatus = redisContext.status;
@@ -765,7 +812,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                     },
                   )
                 : [];
-              data = buildFeedData({ rows, eventIds, view });
+              data = buildFeedData({
+                rows,
+                eventIds,
+                view,
+                includeRepresentative: sort === "trending_v2",
+              });
             }
           } catch (error) {
             if (isPgStatementTimeoutError(error)) {

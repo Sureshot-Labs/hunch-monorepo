@@ -55,7 +55,10 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
       )
         throw new SocialError("rate_limit_exceeded", 429);
     },
-    { limitlessPositionContract: env.limitlessConditionalTokensAddress },
+    {
+      limitlessPositionContract: env.limitlessConditionalTokensAddress,
+      feedCursorSecret: env.jwtSecret,
+    },
   );
   const optional = createAuthMiddleware({ optional: true });
   const required = createAuthMiddleware();

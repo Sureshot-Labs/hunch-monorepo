@@ -128,6 +128,13 @@ export type MarketMapNodePreview = {
 };
 
 export type MarketMapNode = {
+  heroVenue?: MarketMapVenue;
+  topicComposition?: {
+    scope: "whole_snapshot";
+    dominant: string | null;
+    mixed: boolean;
+    known: number;
+  };
   id: string;
   venue: MarketMapVenue;
   dominantVenue: MarketMapVenue | null;
@@ -191,6 +198,16 @@ export type MarketMapEventMarketPreview = MarketMapActivityMetricFields & {
 };
 
 export type MarketMapEventSummary = MarketMapActivityMetricFields & {
+  topic?: string | null;
+  sidebarEvidence?: {
+    volumeBasis: "comparable" | "new_activity" | "below_precision" | "unknown";
+    liquidityBasis:
+      | "comparable"
+      | "new_activity"
+      | "below_precision"
+      | "unknown";
+    priceMoveVolume: "nonzero" | "zero" | "unknown";
+  };
   eventId: string;
   title: string;
   venue: MarketMapVenue;
@@ -456,8 +473,22 @@ export function applyVenueFilterToNode(
         (!venues || venues.size === 0 || venues.has(venue)) &&
         stats.eventCount > 0,
     ).length || (dominantVenue && metrics.eventCount > 0 ? 1 : 0);
+  const heroExcluded =
+    node.heroVenue != null &&
+    venues != null &&
+    venues.size > 0 &&
+    !venues.has(node.heroVenue);
   return {
     ...node,
+    ...(heroExcluded
+      ? {
+          heroVenue: undefined,
+          heroEventId: null,
+          heroMarketId: null,
+          heroImage: null,
+          heroIcon: null,
+        }
+      : {}),
     venue: dominantVenue ?? node.venue,
     dominantVenue,
     venueCount,

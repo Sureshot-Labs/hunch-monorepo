@@ -45,6 +45,50 @@ const batches = <T>(arr: T[], n: number) =>
     arr.slice(i * n, (i + 1) * n),
   );
 
+/** Keep the largest free pairs first. If this underfills the cards, reroute
+ * their family assignments to cover as many distinct events as possible. */
+export function selectMoveRepresentatives<
+  T extends { eventId: string; family: string },
+>(ordered: readonly T[]): T[] {
+  const selected = new Map<string, T>();
+  const owners = new Map<string, string>();
+  const candidates = new Map<string, T[]>();
+  for (const item of ordered) {
+    const list = candidates.get(item.eventId);
+    if (list) list.push(item);
+    else candidates.set(item.eventId, [item]);
+    if (
+      selected.size < 3 &&
+      !selected.has(item.eventId) &&
+      !owners.has(item.family)
+    ) {
+      selected.set(item.eventId, item);
+      owners.set(item.family, item.eventId);
+    }
+  }
+  const visited = new Set<string>();
+  const assign = (eventId: string): boolean => {
+    for (const item of candidates.get(eventId) ?? []) {
+      if (visited.has(item.family)) continue;
+      visited.add(item.family);
+      const owner = owners.get(item.family);
+      if (owner != null && !assign(owner)) continue;
+      selected.set(eventId, item);
+      owners.set(item.family, eventId);
+      return true;
+    }
+    return false;
+  };
+  if (selected.size < Math.min(3, candidates.size)) {
+    for (const eventId of candidates.keys()) {
+      if (selected.size === 3) break;
+      if (!selected.has(eventId) && assign(eventId)) visited.clear();
+    }
+  }
+  const kept = new Set(selected.values());
+  return ordered.filter((x) => kept.has(x));
+}
+
 /** Validate the immediate baseline and both balances at the observation. A
  * later re-entry or hedge unwind cannot resurrect a previously removed move. */
 export function retainedMove(
@@ -340,7 +384,10 @@ export async function buildGlobalMoves(
     .sort()
     .map((category) => {
       const families = new Set<string>(),
+        representedFamilies = new Set<string>(),
+        representatives = new Map<string, TraderItem>(),
         items: TraderItem[] = [];
+      const eligible: typeof choices = [];
       for (const x of choices) {
         if (x.category !== category) continue;
         if (Date.parse(move(x.item).quote.validUntil) <= now * 1000) {
@@ -348,9 +395,33 @@ export async function buildGlobalMoves(
           continue;
         }
         accepted.add(x.item.trader.traderId);
-        if (families.has(x.family)) continue;
         families.add(x.family);
-        if (items.length < 3) items.push({ ...x.item, rank: items.length + 1 });
+        eligible.push(x);
+      }
+      for (const x of selectMoveRepresentatives(
+        eligible.map((candidate) => ({
+          ...candidate,
+          eventId: move(candidate.item).instrument.eventId,
+        })),
+      )) {
+        const item = { ...x.item, rank: items.length + 1 };
+        representatives.set(x.eventId, item);
+        representedFamilies.add(x.family);
+        items.push(item);
+      }
+      for (const x of eligible) {
+        if (representedFamilies.has(x.family)) continue;
+        const achievement = move(x.item);
+        const representative = representatives.get(
+          achievement.instrument.eventId,
+        );
+        if (!representative || (representative.relatedMoves?.length ?? 0) >= 2)
+          continue;
+        (representative.relatedMoves ??= []).push({
+          trader: x.item.trader,
+          achievement,
+        });
+        representedFamilies.add(x.family);
       }
       return {
         category,

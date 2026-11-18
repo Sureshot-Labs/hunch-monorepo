@@ -167,21 +167,43 @@ export async function readCollection(
   const groups = body.groups
     .filter((g) => !category || g.category === category)
     .map((g) => {
-      const items = g.items
-        .filter(
-          (item) =>
-            item.achievement.kind !== "big_move" ||
-            visibleQuote(item.achievement.quote),
-        )
-        .map((item, i) => ({
-          ...item,
-          rank: i + 1,
-          latestOpenPosition:
-            item.latestOpenPosition &&
-            visibleQuote(item.latestOpenPosition.quote)
-              ? item.latestOpenPosition
-              : null,
-        }));
+      let promoted = false;
+      const visible = g.items.flatMap((item) => {
+        const related = item.relatedMoves?.filter(({ achievement }) =>
+          visibleQuote(achievement.quote),
+        );
+        const needsReplacement =
+          item.achievement.kind === "big_move" &&
+          !visibleQuote(item.achievement.quote);
+        const replacement = needsReplacement ? related?.shift() : undefined;
+        if (needsReplacement && !replacement) return [];
+        if (replacement) promoted = true;
+        return [
+          {
+            ...item,
+            ...(replacement
+              ? {
+                  ...replacement,
+                  summary: `Position grew by approximately $${replacement.achievement.estimatedIncreaseUsd}.`,
+                }
+              : {}),
+            ...(related && { relatedMoves: related }),
+            latestOpenPosition:
+              item.latestOpenPosition &&
+              visibleQuote(item.latestOpenPosition.quote)
+                ? item.latestOpenPosition
+                : null,
+          },
+        ];
+      });
+      if (promoted) {
+        const amount = (item: (typeof visible)[number]) =>
+          item.achievement.kind === "big_move"
+            ? Number(item.achievement.estimatedIncreaseUsd)
+            : 0;
+        visible.sort((a, b) => amount(b) - amount(a));
+      }
+      const items = visible.map((item, idx) => ({ ...item, rank: idx + 1 }));
       return {
         ...g,
         items,
@@ -191,6 +213,17 @@ export async function readCollection(
             : g.status,
       };
     });
+  if (k === "top-earners-today" && !category) {
+    const leader = (group: (typeof groups)[number]) => {
+      const value = group.items[0]?.achievement;
+      return value?.kind === "top_earner_24h"
+        ? Number(value.estimatedNetPnl24hUsd)
+        : -Infinity;
+    };
+    groups.sort(
+      (a, b) => leader(b) - leader(a) || a.category.localeCompare(b.category),
+    );
+  }
   if (!handoff && category && !groups.length)
     groups.push({
       category,

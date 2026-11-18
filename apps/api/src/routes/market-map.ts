@@ -1,16 +1,19 @@
 import {
   buildMarketMapSidebarQuery,
   emptyMarketMapSidebarQualityFloors,
+  SIDEBAR_COMPARABLE_USD,
   type MarketMapSidebarKind,
   type MarketMapSidebarQualityFloors,
 } from "../repos/market-map-sidebar-candidates.js";
 import type { FastifyPluginAsync } from "fastify";
+import type { output } from "zod";
 import { marketMapSearchRoutes } from "./market-map-search.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { discoveryReadOnly } from "../repos/discovery.js";
 import { createReadSingleflight } from "../lib/read-singleflight.js";
 import {
   computeAcceptingOrders,
@@ -22,6 +25,7 @@ import { getRedisStatus } from "../redis.js";
 import { fetchMarketSignalPricingByIds } from "../repos/unified-read.js";
 import {
   marketMapSidebarsQuerySchema,
+  marketMapSidebarsResponseSchema,
   marketMapNodeEventsQuerySchema,
   marketMapNodeParamsSchema,
   marketMapQuerySchema,
@@ -271,6 +275,7 @@ function filterCachedMarketMapBody(
     "volumeMovers24h",
     "liquidityMovers24h",
     "topMovers24h",
+    "newActivity",
   ]) {
     const events = parsed[key];
     if (!Array.isArray(events)) continue;
@@ -464,6 +469,7 @@ type MarketMapEventActivityMetrics = {
 type MarketMapSidebarMoverSortBy = "percent" | "absolute";
 
 type MarketMapSidebarEventRow = MarketMapEventActivityMetricsRow & {
+  liquidity_24h_ago?: unknown;
   event_id: string;
   title: string | null;
   venue: string;
@@ -581,8 +587,39 @@ function applyEventActivityMetricsToEvents(
 function normalizeSidebarEventRow(
   row: MarketMapSidebarEventRow,
 ): MarketMapEventSummary {
+  const activity = normalizeEventActivityMetrics(row);
+  const basis = (previous: number | null, change: number | null) =>
+    previous == null || previous < 0
+      ? ("unknown" as const)
+      : previous >= SIDEBAR_COMPARABLE_USD
+        ? ("comparable" as const)
+        : change != null && change > 0
+          ? ("new_activity" as const)
+          : ("below_precision" as const);
+  const volumeBasis = basis(
+    activity.volumePrev24h,
+    activity.volumeLast24hChange,
+  );
+  const liquidityBasis = basis(
+    toNumber(row.liquidity_24h_ago),
+    activity.liquidityChange24h,
+  );
   return {
-    ...normalizeEventActivityMetrics(row),
+    ...activity,
+    volumeLast24hChangePct:
+      volumeBasis === "comparable" ? activity.volumeLast24hChangePct : null,
+    liquidityChangePct24h:
+      liquidityBasis === "comparable" ? activity.liquidityChangePct24h : null,
+    sidebarEvidence: {
+      volumeBasis,
+      liquidityBasis,
+      priceMoveVolume:
+        activity.volumeLast24h == null
+          ? "unknown"
+          : activity.volumeLast24h > 0
+            ? "nonzero"
+            : "zero",
+    },
     eventId: row.event_id,
     title: row.title?.trim() || row.event_id,
     venue: row.venue,
@@ -617,6 +654,33 @@ function normalizeSidebarEventRow(
     x: 0,
     y: 0,
   };
+}
+
+function rankNewSidebarActivity(
+  volume: MarketMapEventSummary[],
+  liquidity: MarketMapEventSummary[],
+) {
+  const eligible = new Map<
+    string,
+    { event: MarketMapEventSummary; amount: number }
+  >();
+  for (const [items, metric] of [
+    [volume, "volumeLast24hChange"],
+    [liquidity, "liquidityChange24h"],
+  ] as const) {
+    for (const event of items) {
+      const key = eventVenueKey(event.eventId, event.venue);
+      const amount = event[metric] ?? 0;
+      if (amount > (eligible.get(key)?.amount ?? 0))
+        eligible.set(key, { event, amount });
+    }
+  }
+  return [...eligible.values()]
+    .sort(
+      (a, b) =>
+        b.amount - a.amount || a.event.eventId.localeCompare(b.event.eventId),
+    )
+    .map(({ event }) => event);
 }
 
 function resolveMarketMapSidebarQualityFloors(policy: {
@@ -655,6 +719,7 @@ function marketMapSidebarQualityForKind(
   switch (kind) {
     case "volumeMovers24h":
     case "volumeMoversAbsolute24h":
+    case "newVolumeActivity":
       return {
         ...scoped,
         minVolumeBase: quality.minVolumeBase,
@@ -663,6 +728,7 @@ function marketMapSidebarQualityForKind(
       };
     case "liquidityMovers24h":
     case "liquidityMoversAbsolute24h":
+    case "newLiquidityActivity":
       return {
         ...scoped,
         minLiquidityBase: quality.minLiquidityBase,
@@ -686,6 +752,7 @@ function marketMapSidebarVenuesForKind(
   switch (kind) {
     case "liquidityMovers24h":
     case "liquidityMoversAbsolute24h":
+    case "newLiquidityActivity":
       return venues.filter((venue) =>
         MARKET_MAP_COMPARABLE_LIQUIDITY_VENUES.has(venue),
       );
@@ -743,10 +810,13 @@ async function loadMarketMapSidebarCandidates(params: {
   const { venues, limit } = params;
   if (venues.length === 0 || limit <= 0) return [];
   const query = buildMarketMapSidebarQuery(params);
-  const { rows } = await pool.query<MarketMapSidebarEventRow>(
-    query.text,
-    query.values,
-  );
+  const read = (db: Pick<typeof pool, "query">) =>
+    db.query<MarketMapSidebarEventRow>(query.text, query.values);
+  const { rows } =
+    params.kind === "newVolumeActivity" ||
+    params.kind === "newLiquidityActivity"
+      ? await discoveryReadOnly(pool, read, 500)
+      : await read(pool);
   return rows.map(normalizeSidebarEventRow);
 }
 
@@ -1622,6 +1692,7 @@ function applySignalSummaryToEvents(
 async function loadLiveMarketDataForEvents(
   events: MarketMapEventSummary[],
   perEventLimit = 1,
+  db: Pick<typeof pool, "query"> = pool,
 ): Promise<MarketMapLiveMarketBundle> {
   const primaryByEventVenue = new Map<string, MarketMapLiveMarketData>();
   const marketsByEventVenue = new Map<string, MarketMapEventMarketPreview[]>();
@@ -1642,7 +1713,7 @@ async function loadLiveMarketDataForEvents(
   });
 
   const ranked = await selectRankedRepresentativeMarketsForEvents(
-    pool,
+    db,
     inputs,
     Math.max(1, Math.trunc(perEventLimit)),
   );
@@ -2617,9 +2688,15 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  z.get(
+  // Preserve the ETag over the exact pre-serialized response.
+  app.get<{ Querystring: output<typeof marketMapSidebarsQuerySchema> }>(
     "/market-map/sidebars",
-    { schema: { querystring: marketMapSidebarsQuerySchema } },
+    {
+      schema: {
+        querystring: marketMapSidebarsQuerySchema,
+        response: { 200: marketMapSidebarsResponseSchema },
+      },
+    },
     async (request, reply) => {
       const generatedAt = new Date().toISOString();
       const policy = await resolveMarketMapPolicy(pool);
@@ -2628,6 +2705,8 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         volumeMovers24h: [] as MarketMapEventSummary[],
         liquidityMovers24h: [] as MarketMapEventSummary[],
         topMovers24h: [] as MarketMapEventSummary[],
+        newActivity: [] as MarketMapEventSummary[],
+        newActivityStatus: "unavailable" as const,
         generatedAt,
       };
 
@@ -2721,7 +2800,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         String(sparklineOptions.bucketHours ?? "auto"),
       ].join(":");
       const cacheKey = [
-        "market-map:sidebars:v7-observed-top",
+        "market-map:sidebars:v8-comparable-movers",
         lifecycle.revision,
         policyCacheVersion,
         venues.slice().sort().join(","),
@@ -2732,6 +2811,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           ? (await getRedisStatus()).redis
           : null;
         let skipCacheWrite = false;
+        let newActivityUnavailable = false;
         if (sidebarRedis) {
           try {
             const raw = await sidebarRedis.get(cacheKey);
@@ -2754,6 +2834,8 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           volumeMoverCandidates,
           liquidityMoverCandidates,
           topMoverCandidates,
+          newVolumeCandidates,
+          newLiquidityCandidates,
         ] = await Promise.all([
           loadMarketMapSidebarCandidates({
             kind: "trendingNow",
@@ -2786,6 +2868,24 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             limit: marketMapSidebarCandidateLimit(sidebarLimits.topMovers24h),
             quality: marketMapSidebarQualityForKind("topMovers24h", quality),
           }),
+          ...(["newVolumeActivity", "newLiquidityActivity"] as const).map(
+            (kind) =>
+              loadMarketMapSidebarCandidates({
+                kind,
+                venues: marketMapSidebarVenuesForKind(kind, venues),
+                limit: marketMapSidebarCandidateLimit(
+                  resolveMarketMapSidebarLimit(undefined, defaultLimit),
+                ),
+                quality: marketMapSidebarQualityForKind(kind, quality),
+              }).catch(() => {
+                newActivityUnavailable = true;
+                request.log.warn(
+                  { kind },
+                  "new activity candidates unavailable",
+                );
+                return [];
+              }),
+          ),
         ]);
         const candidatesMs = performance.now() - startedAt;
 
@@ -2795,6 +2895,26 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           liquidityMoverCandidates,
           topMoverCandidates,
         ]);
+
+        const newCandidates = rankNewSidebarActivity(
+          newVolumeCandidates ?? [],
+          newLiquidityCandidates ?? [],
+        );
+        const loadActivity = async () => {
+          if (!newCandidates.length) return null;
+          try {
+            return await discoveryReadOnly(
+              pool,
+              (client) => loadLiveMarketDataForEvents(newCandidates, 1, client),
+              600,
+            );
+          } catch {
+            newActivityUnavailable = true;
+            request.log.warn("new activity live enrichment unavailable");
+            return null;
+          }
+        };
+        const activityBundle = loadActivity();
 
         let liveBundle: MarketMapLiveMarketBundle | null = null;
         if (allCandidates.length > 0) {
@@ -2812,19 +2932,21 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         const hydrate = (
           events: MarketMapEventSummary[],
           limit: number,
+          bundle = liveBundle,
         ): MarketMapEventSummary[] => {
           const withLive =
-            liveBundle == null
+            bundle == null
               ? events
               : applyLiveMarketDataToEvents(
                   events,
-                  liveBundle.primaryByEventVenue,
-                  liveBundle.marketsByEventVenue,
+                  bundle.primaryByEventVenue,
+                  bundle.marketsByEventVenue,
                 );
           const filtered = filterUsableEvents(withLive).items;
           return filtered.slice(0, limit);
         };
 
+        const newBundle = await activityBundle;
         let payload = {
           trendingNow: hydrate(trendingCandidates, sidebarLimits.trendingNow),
           volumeMovers24h: hydrate(
@@ -2836,6 +2958,16 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             sidebarLimits.liquidityMovers24h,
           ),
           topMovers24h: hydrate(topMoverCandidates, sidebarLimits.topMovers24h),
+          newActivity: newBundle
+            ? hydrate(
+                newCandidates,
+                resolveMarketMapSidebarLimit(undefined, defaultLimit),
+                newBundle,
+              )
+            : [],
+          newActivityStatus: newActivityUnavailable
+            ? ("unavailable" as const)
+            : ("ready" as const),
           generatedAt,
         };
 
@@ -2887,7 +3019,11 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           let written: Promise<"miss" | "bypass"> | undefined;
           const writeOnce = async () => {
             try {
-              await sidebarRedis.setEx(cacheKey, cacheTtl, body);
+              await sidebarRedis.setEx(
+                cacheKey,
+                newActivityUnavailable ? Math.min(cacheTtl, 15) : cacheTtl,
+                body,
+              );
               return "miss" as const;
             } catch {
               request.log.warn("Market map sidebar cache write unavailable");
