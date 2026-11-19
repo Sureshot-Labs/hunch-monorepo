@@ -15,9 +15,9 @@ const version = process.versions.bun ?? process.versions.node;
 const [major, minor, patch] = version.split(".").map(Number);
 assert.ok(
   runtime === "bun"
-    ? major === 1 && (minor > 4 || (minor === 4 && patch >= 4))
-    : major === 24 && (minor > 22 || (minor === 22 && patch >= 1)),
-  `Expected patched Bun 1 >= 1.4.4 or Node 24 >= 24.22.1; got ${runtime} ${version}`,
+    ? major === 1 && (minor > 4 || (minor === 4 && patch >= 5))
+    : major === 24 && (minor > 22 || (minor === 22 && patch >= 3)),
+  `Expected patched Bun 1 >= 1.4.5 or Node 24 >= 24.22.3; got ${runtime} ${version}`,
 );
 const input = Buffer.from("Hunch runtime compression smoke test");
 assert.deepEqual(brotliDecompressSync(brotliCompressSync(input)), input);

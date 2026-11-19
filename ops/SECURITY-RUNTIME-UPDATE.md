@@ -1,5 +1,50 @@
 # October 2026 security update
 
+## November 19 public ingress and runtime follow-up (local develop)
+
+- Production inventory found NGINX `1.30.6-alpine` on public ports 80/443,
+  with HTTP/2 enabled for both TLS virtual hosts. Pin `1.30.7-alpine` to
+  address the November 18 release, including CVE-2026-123007 and
+  CVE-2026-123633. Keep routing, TLS and HTTP/2 settings unchanged.
+- Backend and web images pin Node `24.22.3-bookworm-slim` in every
+  build/runtime stage and Bun `1.4.5`. The running public API and web both
+  used Bun `1.4.4`; the Node security upgrade does not substitute for the
+  Bun upgrade. Public HTTP/2 and TLS terminate at the edge in this topology,
+  not at the application origin. The images still contain both runtimes.
+  Bun's tagged source now points to c-ares `1.34.9`, rather than `1.34.8`.
+- Patch only the affected same-major dependency paths: Fastify's
+  `fast-uri` v3 users to `3.1.9`, GeoIP's `ip-address` to `10.7.4`,
+  and the Limitless Socket.IO transport to parser `4.2.7` and Engine.IO's
+  WebSocket client `8.21.1`. No SDK major or application behavior changes.
+- Next `16.4.5` contains the published November security fixes;
+  `16.4.6` is not identified as a security requirement. Keep React
+  `19.2.9`, direct Fastify `5.12.8` and the current admin dependencies.
+  Production has Swagger UI disabled by default. Broad JavaScript audits
+  still find SDK and tooling dependencies; these findings are not a claim
+  of public reachability.
+- The tested NGINX and Node images report OpenSSL `3.5.9`. November's
+  OpenSSL advisories are low severity and require specific API or protocol
+  use; no affected public path was identified in the checked ingress
+  configuration. Do not count the NGINX update as fixing those OpenSSL
+  advisories. Track vendor images after the scheduled OpenSSL release.
+- PostgreSQL, Redis and the backend's own host port remain loopback-only.
+  The host's installed and cached candidate versions matched for OpenSSH,
+  Docker, containerd and runc. A later read-only check confirmed the host
+  was running `7.0.0-1017-aws` (the installed security version).
+  Cached candidate `1018` is from `noble-updates` and needs new
+  versioned kernel packages. Host maintenance is outside this patch.
+
+No production change, push, merge or restart is included. Replacing the
+running ingress image is necessary for remediation; local verification does
+not protect the live host.
+
+- [NGINX security advisories](https://nginx.org/en/security_advisories.html)
+- [Node November security release](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases)
+- [Bun 1.4.5 release notes](https://bun.com/blog/bun-v1.4.5)
+- [Next 16.4.5 security release](https://github.com/vercel/next.js/releases/tag/v16.4.5)
+- [Fastify security advisories](https://github.com/fastify/fastify/security/advisories)
+- [OpenSSL November 17 advisory](https://openssl-library.org/news/secadv/20261117.txt)
+
 ## November 4 local follow-up (not deployed)
 
 The public HTTP dependency follow-up keeps Node `24.22.1`, Bun `1.4.4`,

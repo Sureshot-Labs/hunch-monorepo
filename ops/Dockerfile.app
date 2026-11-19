@@ -1,6 +1,6 @@
-ARG BUN_VERSION=1.4.4
+ARG BUN_VERSION=1.4.5
 
-FROM node:24.22.1-bookworm-slim AS builder
+FROM node:24.22.3-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -34,13 +34,15 @@ COPY apps apps
 COPY packages packages
 COPY ops ops
 
-RUN pnpm build
+# The API TypeScript project can exceed Node's default build heap. Keep the
+# compiler headroom in this one builder command; runtime memory is unchanged.
+RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm build --env-mode=loose
 
 # Bun is a single executable. Use the official image as the binary source
 # instead of running the installer script inside the production runtime image.
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
-FROM node:24.22.1-bookworm-slim AS runtime-base
+FROM node:24.22.3-bookworm-slim AS runtime-base
 
 ARG BUN_VERSION
 WORKDIR /app
