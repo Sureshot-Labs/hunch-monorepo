@@ -129,10 +129,10 @@ import {
   type PolymarketL2Credentials,
 } from "./polymarket-clob-l2.js";
 import {
-  POLYMARKET_ORDER_TYPE_STRING,
   POLYMARKET_ORDER_TYPES,
   POLYMARKET_TYPED_DATA_SIGN_TYPES,
 } from "./polymarket-signing-schema.js";
+import { wrapDepositWalletOrderSignature } from "./polymarket-order-signature.js";
 import {
   derivePolymarketFunders,
   isCanonicalPolymarketFunderCandidate,
@@ -1351,7 +1351,7 @@ function isPolymarketInvalidApiKeyResponse(inputs: {
   );
 }
 
-async function invalidatePolymarketCredentialsForInvalidApiKey(inputs: {
+export async function invalidatePolymarketCredentialsForInvalidApiKey(inputs: {
   endpoint: string;
   log?: PolymarketRouteLogger | null;
   signer: string;
@@ -5761,6 +5761,7 @@ async function submitPolymarketClobOrderWithRetry(input: {
   creds: PolymarketL2Credentials;
   log?: PolymarketRouteLogger | null;
   logContext?: Record<string, unknown>;
+  singleAttempt?: boolean;
 }): Promise<PolymarketL2RequestResult & { submissionAttempts: number }> {
   const submitOrder = () =>
     polymarketL2Request({
@@ -5777,6 +5778,7 @@ async function submitPolymarketClobOrderWithRetry(input: {
   let upstream = await submitOrder();
   for (
     let attempt = 0;
+    !input.singleAttempt &&
     !upstream.ok &&
     isPolymarketServiceNotReadyResponse(upstream) &&
     attempt < POLYMARKET_ORDER_RETRY_DELAYS_MS.length;
@@ -7062,26 +7064,6 @@ function derivePriceAndSize(
   return { price, size };
 }
 
-function buildWrappedDepositWalletSignature(input: {
-  appDomain: Record<string, unknown>;
-  innerSignature: string;
-  message: Record<string, unknown>;
-}): string {
-  const domainSep = ethers.TypedDataEncoder.hashDomain(input.appDomain);
-  const contentsHash = ethers.TypedDataEncoder.hashStruct(
-    "Order",
-    POLYMARKET_ORDER_TYPES as unknown as Record<
-      string,
-      Array<{ name: string; type: string }>
-    >,
-    input.message,
-  );
-  const typeStringHex = ethers.hexlify(
-    ethers.toUtf8Bytes(POLYMARKET_ORDER_TYPE_STRING),
-  );
-  const lenHex = (186).toString(16).padStart(4, "0");
-  return `0x${input.innerSignature.replace(/^0x/, "")}${domainSep.slice(2)}${contentsHash.slice(2)}${typeStringHex.slice(2)}${lenHex}`;
-}
 
 function normalizePolymarketOrderForPrivyPolicy(
   order: Record<string, unknown>,
@@ -7135,7 +7117,7 @@ async function signPolymarketOrder(input: {
       signer: input.signer,
       typedData,
     });
-    return buildWrappedDepositWalletSignature({
+    return wrapDepositWalletOrderSignature({
       appDomain,
       innerSignature,
       message: signingOrder,
@@ -7165,6 +7147,9 @@ async function signPolymarketOrder(input: {
 }
 
 export async function submitPolymarketClientSignedOrder(input: {
+  /** Internal callers can durably claim the exact hash at the send boundary. */
+  beforeSubmit?: (orderHash: string) => Promise<void>;
+  onDefinitiveRejection?: () => Promise<void>;
   assertTelegramAppHandoffV2Scope?: TelegramAppHandoffV2ScopeAssertion;
   body: PolymarketClientOrderBody;
   log?: PolymarketRouteLogger | null;
@@ -7837,11 +7822,13 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
   }
+  await input.beforeSubmit?.(orderHash);
   try {
     upstream = await submitPolymarketClobOrderWithRetry({
       address: signer,
       body: payload,
       creds: clobCreds,
+      singleAttempt: Boolean(input.beforeSubmit),
       log: input.log,
       logContext: {
         signer,
@@ -7866,6 +7853,7 @@ export async function submitPolymarketClientSignedOrder(input: {
   }
 
   await notifyPolymarketDefinitiveRejection(upstream, async () => {
+    await input.onDefinitiveRejection?.();
     if (copyAttempt)
       await markCopyDefinitiveProviderRejection(
         input.pool,

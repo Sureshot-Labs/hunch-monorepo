@@ -80,6 +80,7 @@ import {
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { parseAdminEmbeddingStatus } from "../services/admin-embeddings-status.js";
 import { registerAdminFundingRoutes } from "./admin-funding.js";
+import { registerAdminHouseTrader } from "./admin-house-trader.js";
 import { registerAdminSocialRoutes } from "./admin-social.js";
 import { registerAdminAgentThesesRoutes } from "./admin-agent-theses.js";
 import { AgentPreviewService } from "../services/agent-theses-preview.js";
@@ -1869,6 +1870,7 @@ function loadSolanaKeypair(secret: string): Keypair {
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  registerAdminHouseTrader(app, pool);
 
   const agentPreview = new AgentPreviewService({
     db: pool,

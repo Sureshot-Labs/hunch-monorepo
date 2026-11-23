@@ -24,20 +24,29 @@ export async function requestPolymarketCredentials(inputs: {
   signature: string;
   timestamp: string;
   nonce: number;
+  deriveOnConflict?: boolean;
 }): Promise<PolymarketCredentialExchangeResult> {
-  const upstream = await fetch(`${env.polymarketClobBase}/auth/api-key`, {
+  const headers = {
+    accept: "application/json",
+    "content-type": "application/json; charset=utf-8",
+    "user-agent": "Hunch-API/1.0",
+    POLY_ADDRESS: inputs.walletAddress,
+    POLY_SIGNATURE: inputs.signature,
+    POLY_TIMESTAMP: inputs.timestamp,
+    POLY_NONCE: inputs.nonce.toString(),
+  };
+  let upstream = await fetch(`${env.polymarketClobBase}/auth/api-key`, {
     method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json; charset=utf-8",
-      "user-agent": "Hunch-API/1.0",
-      POLY_ADDRESS: inputs.walletAddress,
-      POLY_SIGNATURE: inputs.signature,
-      POLY_TIMESTAMP: inputs.timestamp,
-      POLY_NONCE: inputs.nonce.toString(),
-    },
+    headers,
     body: JSON.stringify({}),
+    ...(inputs.deriveOnConflict ? {signal:AbortSignal.timeout(12_000)} : {}),
   });
+  if (inputs.deriveOnConflict && [400,409].includes(upstream.status)) {
+    await upstream.body?.cancel();
+    upstream = await fetch(`${env.polymarketClobBase}/auth/derive-api-key`, {
+      headers, signal:AbortSignal.timeout(12_000),
+    });
+  }
 
   if (!upstream.ok) {
     const text = await upstream.text().catch(() => "");

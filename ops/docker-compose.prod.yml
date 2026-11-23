@@ -309,6 +309,35 @@ services:
       - packages/config/dist/run-with-secrets.js
       - apps/finance-worker/dist/main.js
 
+  house-trader-worker:
+    profiles: ["house-trader"]
+    image: ${HUNCH_BACKEND_IMAGE:-hunch-house-trader:unconfigured}
+    container_name: hunch-house-trader-worker
+    logging: *bounded-logging
+    restart: "no"
+    networks:
+      - hunch-net
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER: ${HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER:-}
+      AWS_REGION: ${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-north-1}}
+    volumes:
+      - type: bind
+        source: /run/hunch-house-trader/key.json
+        target: /run/hunch-house-trader/key.json
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - apps/api/dist/house-trader-worker.js
+
   signal-bot:
     build:
       context: .
