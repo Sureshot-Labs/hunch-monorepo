@@ -152,10 +152,37 @@ assert.deepEqual(
 );
 assert.deepEqual(closeView(exact.ev, end).items, streakCard.recentResults);
 assert.deepEqual(
+  streakCard.streakResults?.map((c) => c.instrument.marketId),
+  Array.from({ length: 8 }, (_, i) => "market" + (20 - i)),
+);
+assert.deepEqual(
   closeView({ ...exact.ev, ledgers: [...exact.ev.ledgers].reverse() }, end)
     .items,
   streakCard.recentResults,
 );
+// Ten consecutive positive observations can contain fewer than ten streak
+// members: one winner is below the stake floor, the other entered above 90¢.
+const tenWins = await run([
+  ...streakFixture.slice(0, -4),
+  fixture(32, end - 80, 0, 4, 0.2),
+  fixture(32, end - 60, 4, 0, 0.9),
+  fixture(33, end - 40, 0, 20, 0.98),
+  fixture(33, end - 30, 20, 0, 0.99),
+]);
+const tenWinsCard =
+  tenWins.ranking.choices["winning-streaks"][0].item.achievement;
+assert.ok(tenWinsCard.kind === "winning_streak");
+assert.equal(tenWinsCard.currentLength, 8);
+assert.deepEqual(
+  tenWinsCard.recentResults?.map((c) => [c.result, c.qualifiesForStreak]),
+  [
+    ["win", false],
+    ["win", false],
+    ...Array.from({ length: 8 }, () => ["win", true]),
+  ],
+);
+assert.deepEqual(tenWinsCard.streakResults, streakCard.streakResults);
+assert.deepEqual(closeView(tenWins.ev, end).items, tenWinsCard.recentResults);
 const cashRows = [...streakFixture, fixture(999, end - 3, 100, 0, 0.8)];
 async function collect<T>(reader: AsyncGenerator<void, T, void>) {
   for (;;) {

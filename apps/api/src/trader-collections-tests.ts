@@ -239,6 +239,15 @@ const r = winningRun(
 );
 assert.ok(r);
 assert.equal(r.n, 20);
+assert.deepEqual(r.recentWins, closed.slice(-10).reverse());
+const recentLoss = winningRun(
+  closed.map((c, i) => (i === 15 ? { ...c, net: -1n } : c)),
+  DEFAULT_TRADER_POLICY,
+  false,
+);
+assert.ok(recentLoss);
+assert.equal(recentLoss.n, 5);
+assert.deepEqual(recentLoss.recentWins, closed.slice(-5).reverse());
 assert.equal(winningRun(closed.slice(1), DEFAULT_TRADER_POLICY, false), null);
 assert.equal(
   winningRun(
@@ -1206,12 +1215,20 @@ await app.register(swagger, {
 });
 let clock = end,
   reads = 0,
-  unavailable = false;
+  unavailable = false,
+  legacySnapshot = false;
 await app.register(
   createTraderCollectionRoutes(
     async (k) => {
       reads++;
-      return unavailable ? null : snapshots[k];
+      if (unavailable) return null;
+      if (!legacySnapshot || k !== "winning-streaks") return snapshots[k];
+      const old = structuredClone(snapshots[k]);
+      for (const group of old.groups)
+        for (const item of group.items)
+          if (item.achievement.kind === "winning_streak")
+            delete item.achievement.streakResults;
+      return old;
     },
     () => clock * 1000,
   ),
@@ -1232,6 +1249,33 @@ try {
     assert.equal(body.diagnostics?.qualifiedWallets, 2); // families deduplicated only in public ranking
     assert.deepEqual(body.diagnostics?.exclusions, []);
     assert.ok(!first.body.includes(owner.address));
+    if (k === "winning-streaks") {
+      const achievement = body.groups[0].items[0].achievement;
+      assert.equal(achievement.kind, "winning_streak");
+      assert.equal(
+        achievement.streakResults?.length,
+        Math.min(achievement.currentLength, 10),
+      );
+      assert.ok(
+        achievement.streakResults?.every(
+          (c) => c.result === "win" && c.qualifiesForStreak,
+        ),
+      );
+      assert.ok(JSON.stringify(app.swagger()).includes('"streakResults"'));
+      legacySnapshot = true;
+      const legacy = await app.inject({
+        url: url + "?category=sports",
+        headers: { "if-none-match": String(first.headers.etag) },
+      });
+      legacySnapshot = false;
+      assert.equal(legacy.statusCode, 200, legacy.body);
+      assert.notEqual(legacy.headers.etag, first.headers.etag);
+      assert.ok(!legacy.body.includes('"streakResults"'));
+      const old = collectionSchema.parse(legacy.json()).groups[0].items[0]
+        .achievement;
+      const { streakResults: _strip, ...expectedOld } = achievement;
+      assert.deepEqual(old, expectedOld);
+    }
     const unchanged = await app.inject({
       url: url + "?category=sports",
       headers: { "if-none-match": String(first.headers.etag) },
