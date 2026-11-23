@@ -1,6 +1,7 @@
 import {
   collections,
   rejectionCodes,
+  TRADER_CLOSE_STRIP_LIMIT,
   type RejectionCode,
   type Collection,
   type CollectionResponse,
@@ -21,6 +22,7 @@ import {
   closeOrder,
   qualifiesForStreak,
   recentObservedCloses,
+  toObservedClose,
 } from "./trader-recent-closes.js";
 export const DEFAULT_TRADER_POLICY = {
   minDays: 14,
@@ -175,6 +177,9 @@ export function winningRun(
     latestInstrument: eligible[0].instrument,
     count: eligible.length,
     lowerBound: !boundary,
+    // The counted prefix ends before the first qualifying loss. Ineligible
+    // closes are already filtered out; an older win is not part of this run.
+    recentWins: eligible.slice(0, Math.min(n, TRADER_CLOSE_STRIP_LIMIT)),
   };
 }
 type Choice = {
@@ -499,6 +504,9 @@ export function evaluateTrader(
           latestWinAt: iso(run.latest),
           latestWinInstrument: run.latestInstrument,
           recentResults: recentObservedCloses([past], end, policy.dust),
+          streakResults: run.recentWins.map((c) =>
+            toObservedClose(c, policy.dust),
+          ),
         },
         `${run.lowerBound ? "At least " : ""}${run.n} observed wins, approximately +$${fmt(run.profit)} across these positions.`,
         [BigInt(run.n), run.profit, BigInt(closes.length), p30],

@@ -98,13 +98,14 @@ export const observedCloseSchema = z.object({
   qualifiesForStreak: z.boolean(),
 });
 export type ObservedClose = z.infer<typeof observedCloseSchema>;
+export const TRADER_CLOSE_STRIP_LIMIT = 10;
 export const walletCloseHistorySchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("ready"),
     windowStart: date.nullable(),
     windowEnd: date,
     coverage: z.enum(["observed_only", "known_gaps"]),
-    items: z.array(observedCloseSchema).max(10),
+    items: z.array(observedCloseSchema).max(TRADER_CLOSE_STRIP_LIMIT),
   }),
   z.object({
     status: z.enum(["preparing", "busy", "unavailable", "unsupported"]),
@@ -157,7 +158,17 @@ const streak = z.object({
   qualifyingCompletedPositions: count,
   latestWinAt: date,
   latestWinInstrument: instrument.optional(),
-  recentResults: z.array(observedCloseSchema).max(10).optional(),
+  recentResults: z
+    .array(observedCloseSchema)
+    .max(TRADER_CLOSE_STRIP_LIMIT)
+    .optional(),
+  streakResults: z
+    .array(observedCloseSchema)
+    .max(TRADER_CLOSE_STRIP_LIMIT)
+    .describe(
+      "Newest first; only wins counted in the current qualifying streak.",
+    )
+    .optional(),
 });
 export const itemSchema = z.object({
   trader: z.object({

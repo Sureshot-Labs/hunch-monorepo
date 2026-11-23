@@ -20,6 +20,18 @@ Every newly prepared instrument has `eventTitle` (the full local parent event ti
 
 Winning Streaks adds `achievement.latestWinInstrument` and `achievement.recentResults` (newest first, up to ten **observed, costed closes in the category**, not ten executed trades). Example: a completed episode can have `result: "loss", estimatedEpisodePnlUsd: "-3.25", qualifiesForStreak: false`. Show wins, losses and break-evens differently; unfilled slots are **unknown**, never losses. The raw strip need not match the qualifying streak (dust, entry-price and break-even rules). Equal timestamps are simultaneous; presentation ties do not establish a trading sequence.
 
+### iOS handoff: the winning-streak strip
+
+On `GET /intel/traders/winning-streaks`, the `winning_streak` achievement now has an optional `streakResults: [ObservedClose]?` field (a JSON array; the field can be absent, not null). Its entries have the same shape as `recentResults`. It contains only wins **in the current qualifying streak**, newest first, capped at 10. The count remains `currentLength` (prefix as “At least” when `lengthIsLowerBound` is true); don't use the array length as the count. If the UI reads left-to-right from oldest to newest, reverse the array once.
+
+- A card with `currentLength: 8` shows eight wins in the new strip even when all ten `recentResults` are profitable. For a streak of 14, the count is 14 and the strip contains the ten most recent wins in that streak. No placeholder boxes are needed.
+- Decode the field as optional: cached snapshots created before the backend change can still omit it. In that case, keep the count and omit the streak strip, or show the old `recentResults` explicitly labeled “Last 10 observed closes” as separate history. Avoid falling back to them as if they were streak members.
+- `recentResults` and profile `wallet.recentCloses` are unchanged. Keep using them for history. Don't filter `recentResults` into a streak: an older qualifying win can be on the other side of a loss, and recent non-qualifying closes can push current streak members out of that array.
+
+No endpoint, version, or cutoff changed. Existing clients can keep decoding the old fields; updating the strip requires using the new field on iOS.
+
+### Profile and collection details
+
 `GET /wallets/:walletId` additionally returns `wallet.recentCloses` for the wallet across categories. Example ready shape: `{status:"ready",windowStart,windowEnd,coverage:"observed_only"|"known_gaps",items:[{instrument,completedAt,estimatedEpisodePnlUsd,result:"win"|"loss"|"flat",qualifiesForStreak}]}`. This uses the retained public Polymarket activity and local frozen market bindings (not limited to the ranking’s 30 days) for any Polygon wallet, including traders outside the earnings/streaks shortlist. A partial reduction alone is not a close. The basis distinguishes an inferred local binary settlement from an observed full exit. The period begins at the first retained public delta (null when none); it does not promise lifetime coverage. An unknown basis is never a zero-dollar result. Use `windowEnd` as the as-of time, not the request time.
 
 The first profile visit starts a bounded local reader; wallets alternate after each page or catalog batch. On a cold profile the base profile remains available: `preparing`, `busy` (local reader saturated) or `unavailable` (temporary failure) have `items:null`; refresh the same profile with backoff (e.g. 5, 15, then 30 seconds while visible). Other chains return `unsupported`; do not poll. Only `ready` with `items:[]` means no costed closures observed in this window. Profile cache hits still check the independently refreshed result. No provider calls, trades or authenticated account fills are used.
