@@ -14,7 +14,10 @@ import {
 } from "./market-type-classifier.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
-import { loadDeliveredHolderResearchCohort } from "./holder-research-delivered-cohort.js";
+import {
+  CONFIRMED_PUBLIC_SIGNAL_SQL,
+  loadDeliveredHolderResearchCohort,
+} from "./holder-research-delivered-cohort.js";
 
 export type HolderResearchSignalSide = "YES" | "NO";
 export type HolderResearchExecutionPriority = "normal" | "high_conviction";
@@ -189,6 +192,7 @@ export type HolderResearchPerformanceAuditOptions = {
   approxEntryBeforeHours?: number;
   approxEntryAfterHours?: number;
   deliveredInitialOnly?: boolean;
+  confirmedPublicOnly?: boolean;
   asOf?: Date;
 };
 
@@ -1238,7 +1242,7 @@ export async function auditHolderResearchSignalPerformance(
     "n.note_type = 'signal'",
     "n.producer_type = 'holder_research'",
   ];
-  if (options.deliveredInitialOnly) {
+  if (options.deliveredInitialOnly && !options.confirmedPublicOnly) {
     where.push("coalesce(n.lineage->>'revision_kind', 'initial') = 'initial'");
   }
   if (options.activeOnly) {
@@ -1292,6 +1296,7 @@ export async function auditHolderResearchSignalPerformance(
           where sbm.note_id = n.id
             and sbm.message_kind = 'initial'
             and coalesce(sbm.metrics->>'status', 'sent') = 'sent'
+            ${options.confirmedPublicOnly ? `and ${CONFIRMED_PUBLIC_SIGNAL_SQL}` : ""}
         ) delivered
         where target_market_id is not null
           and target_side in ('YES', 'NO')
@@ -1404,6 +1409,7 @@ export async function auditHolderResearchSignalPerformance(
       activeOnly: options.activeOnly,
       directionalOnly: options.directionalOnly,
       minConfidence: options.minConfidence,
+      confirmedPublicOnly: options.confirmedPublicOnly,
       loadFirstDeliveries: loadRows,
     }));
   } else {

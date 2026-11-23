@@ -16,6 +16,7 @@ export async function loadDeliveredHolderResearchCohort(
     activeOnly?: boolean;
     directionalOnly?: boolean;
     minConfidence?: number | null;
+    confirmedPublicOnly?: boolean;
     loadFirstDeliveries: (
       noteIds: string[],
     ) => Promise<HolderResearchPerformanceNoteRow[]>;
@@ -39,6 +40,7 @@ export async function loadDeliveredHolderResearchCohort(
        from signal_bot_messages sbm
        where sbm.message_kind = 'initial'
          and sbm.sent_at >= $1::timestamptz and sbm.sent_at < $2::timestamptz
+         ${input.confirmedPublicOnly ? `and ${CONFIRMED_PUBLIC_SIGNAL_SQL}` : ""}
          and ($3::timestamptz is null or (sbm.sent_at, sbm.id) < ($3::timestamptz, $4::uuid))
        order by sbm.sent_at desc, sbm.id desc
        limit $5::int`,
@@ -84,3 +86,10 @@ export async function loadDeliveredHolderResearchCohort(
     truncated: ordered.length > input.limit,
   };
 }
+
+// Shared by source paging and earliest-per-target selection.
+export const CONFIRMED_PUBLIC_SIGNAL_SQL = `
+  sbm.telegram_message_id is not null
+  and coalesce(sbm.metrics->>'status', 'sent') = 'sent'
+  and coalesce(sbm.metrics->>'contentProfile', '') <> 'x_editorial_draft_v1'
+`;

@@ -18,9 +18,17 @@ export const openRouterTemperatureSchema = z.coerce
   .min(0)
   .max(2);
 
+// Only the standard Sol 6.2 route and its dated snapshots are supported here.
+// Pro and batch are separate tariffs, not production-policy aliases.
+const gpt62Sol = /^openai\/gpt-6\.2-sol(?:-\d{8})?$/;
+
 export function isModernOpenAIReasoningModel(model: string): boolean {
-  return /^openai\/(?:gpt-5\.6(?:-(?:sol|luna|terra))?|gpt-6-(?:astra|sol|luna)|gpt-6\.1-sol)(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
-    model.trim(),
+  const id = model.trim();
+  return (
+    gpt62Sol.test(id) ||
+    /^openai\/(?:gpt-5\.6(?:-(?:sol|luna|terra))?|gpt-6-(?:astra|sol|luna)|gpt-6\.1-sol)(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
+      id,
+    )
   );
 }
 
@@ -56,9 +64,10 @@ export function supportsOpenRouterReasoningEffort(
     return false;
   return !(
     model &&
-    /^openai\/(?:gpt-6-astra|gpt-6\.1-sol)(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
-      model.trim(),
-    ) &&
+    (gpt62Sol.test(model.trim()) ||
+      /^openai\/(?:gpt-6-astra|gpt-6\.1-sol)(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
+        model.trim(),
+      )) &&
     effort === "none"
   );
 }

@@ -131,13 +131,15 @@ for (const name of ["sol", "luna"]) {
   }
 }
 const hr = getIntelPolicySchema("holder_research");
-// Sol 6.1 shares the strict-output path, but unlike Sol 6 cannot disable
+// Sol 6.1 and 6.2 share the strict-output path, but unlike Sol 6 cannot disable
 // reasoning. Legacy `minimal` is normalized to `low`, never sent upstream.
 for (const model of [
   "openai/gpt-6.1-sol",
   "openai/gpt-6.1-sol-pro",
   "openai/gpt-6.1-sol-20260929",
   "openai/gpt-6.1-sol:batch",
+  "openai/gpt-6.2-sol",
+  "openai/gpt-6.2-sol-20261117",
 ]) {
   assert.equal(isModernOpenAIReasoningModel(model), true);
   assert.equal(supportsOpenRouterReasoningEffort(model, "none"), false);

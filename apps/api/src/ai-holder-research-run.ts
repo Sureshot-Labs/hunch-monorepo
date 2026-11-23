@@ -11,6 +11,7 @@ import {
 import { holderResearchExternalSearchResponseSchema } from "./schemas/holder-research.js";
 import { holderResearchPersistenceTotals } from "./services/holder-research-publication-progress.js";
 import { holderResearchPriceCheckDiagnostics } from "./services/holder-research-price-check-diagnostics.js";
+import { classifyHolderEditorialRepeat } from "./services/holder-research-editorial-repeat.js";
 import {
   applyEditorialDuplicate,
   buildEventPublicationHistory,
@@ -87,6 +88,9 @@ import {
   asContextHolderResearchOutput,
   withHolderPublicComparison,
   buildHolderResearchCandidateActionability,
+  buildHolderResearchPublicContext,
+  holderResearchCurrentAsk,
+  latestHolderResearchDeliveredAsk,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchCandidatePromptJson,
   buildHolderResearchCandidatePromptJsonV2,
@@ -107,6 +111,8 @@ import {
   enrichHolderResearchFirstObservedActivity,
   enrichHolderResearchLivePositions,
   enrichHolderResearchMarketTypeMetrics,
+  enrichHolderResearchSportsSpecialists,
+  hasHolderResearchSportsSpecialist,
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
   enrichHolderPublicComparison,
@@ -422,6 +428,8 @@ type HolderResearchRunReport = {
     finalContext: number;
     finalSkipped: number;
     technicalSkipped: number;
+    editorialDeferredBeforeSearch: number;
+    editorialRepeatReopened: number;
     persistenceRejectedByReason: Record<string, number>;
   };
   jevPreTriage: {
@@ -1667,6 +1675,7 @@ function adaptHolderResearchTriageDecisionV1(
     research_need: decision.needs_external_search ? "market_context" : "none",
     reason: decision.reason,
     research_question: decision.research_question ?? null,
+    repeat_of_note_id: decision.repeat_of_note_id ?? null,
     legacyPriority: decision.priority,
   };
 }
@@ -1959,6 +1968,59 @@ async function callHolderResearchTriageModel(params: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function decideEarlyEditorialRepeat(input: {
+  candidate: HolderResearchCandidate;
+  decision: HolderResearchTriageDecision;
+  policy: HolderResearchPolicy;
+  eventHistoryAvailable: boolean;
+  eventPublications: EventPublication[];
+  background?: HolderBackground;
+}) {
+  const { candidate, policy } = input;
+  if (
+    input.decision.action !== "skip" ||
+    !input.decision.reason_codes.includes("editorial_repeat")
+  )
+    return "not_repeat";
+
+  const before = latestHolderResearchDeliveredAsk(candidate);
+  const after = holderResearchCurrentAsk(candidate)?.ask;
+  return classifyHolderEditorialRepeat({
+    decision: input.decision,
+    history: candidate.publicationHistory,
+    side: candidate.side,
+    marketId: candidate.market.marketId,
+    currentAskKnown: after != null,
+    eventHistory: buildEventPublicationHistory({
+      enabled: policy.eventPublicationHistoryEnabled,
+      available: input.eventHistoryAvailable,
+      eventId: candidate.market.eventId,
+      loaded: input.eventPublications,
+      committed: [],
+      selectedHolderIds: [],
+    }),
+    // Incomplete quantity or quote evidence is not evidence of no change
+    // when comparing two entries on the same contract.
+    verifiedPositionChange:
+      Boolean(candidate.comparisonPositionsUnavailable) ||
+      buildHolderResearchPublicContext(candidate, policy)
+        .verifiedPositionChanges.length > 0,
+    materialAskChange:
+      Boolean(candidate.publicationHistory?.items[0]) &&
+      (before == null ||
+        after == null ||
+        Math.abs(before - after) >= policy.minMeaningfulOddsDelta),
+    hasMaterialUpdateSince: (publishedAt) =>
+      Date.parse(candidate.market.latestSharpSideActivityAt ?? "") >
+        Date.parse(publishedAt) ||
+      hasNewDatedHolderBackground(
+        input.background,
+        publishedAt,
+        policy.externalSearchWindowHours,
+      ),
+  });
 }
 
 async function callHolderResearchModel(params: {
@@ -2565,21 +2627,35 @@ export async function runHolderResearch(
 
   const client = await pool.connect();
   try {
-    const candidates = await loadHolderResearchCandidates(
+    const loadedCandidates = await loadHolderResearchCandidates(
       client,
       policy,
       mmThresholds,
     );
     toolCalls.push({
       name: "candidate_scan",
-      count: candidates.length,
+      count: loadedCandidates.length,
       status: "ok",
     });
+    const candidates = await enrichHolderResearchSportsSpecialists(
+      client,
+      loadedCandidates,
+      policy,
+    );
 
     const selection = selectHolderResearchCandidates(
       candidates,
       selectionPolicy,
     );
+    if (policy.singleGameSportsClusterOnly) {
+      toolCalls.push({
+        name: "sports_specialist_selection",
+        count: selection.selected.filter((candidate) =>
+          hasHolderResearchSportsSpecialist(candidate, policy),
+        ).length,
+        status: "ok",
+      });
+    }
     // Reserve the first input-cap slots for ordinary candidates, while keeping
     // the remaining lookahead candidates available to replace cache hits.
     const baselineCandidates = selection.selected.slice(
@@ -3197,6 +3273,8 @@ export async function runHolderResearch(
       candidate: HolderResearchCandidate;
       decision: HolderResearchTriageDecision;
     }> = [];
+    let editorialDeferredBeforeSearch = 0;
+    let editorialRepeatReopened = 0;
     const triageCanRun =
       policy.triageEnabled &&
       args.callModel &&
@@ -3301,8 +3379,29 @@ export async function runHolderResearch(
           decision: HolderResearchTriageDecision;
         }> = [];
         for (const candidate of batch) {
-          const triageDecision = decisionsByKey.get(candidate.key);
-          if (!triageDecision) continue;
+          const modelDecision = decisionsByKey.get(candidate.key);
+          if (!modelDecision) continue;
+          const editorialRepeat = decideEarlyEditorialRepeat({
+            candidate,
+            decision: modelDecision,
+            policy,
+            eventHistoryAvailable,
+            eventPublications,
+            background: backgroundByKey.get(candidate.key),
+          });
+          if (editorialRepeat === "defer") editorialDeferredBeforeSearch += 1;
+          if (editorialRepeat === "investigate") editorialRepeatReopened += 1;
+          const triageDecision: HolderResearchTriageDecision =
+            editorialRepeat === "investigate"
+              ? {
+                  ...modelDecision,
+                  action: "investigate",
+                  research_need: "market_context",
+                  reason_codes: ["research_needed"],
+                  reason:
+                    "Prior delivery does not establish an unchanged thesis.",
+                }
+              : modelDecision;
           triageByKey.set(candidate.key, triageDecision);
           triageDecisions.push({
             key: triageDecision.key,
@@ -3322,6 +3421,7 @@ export async function runHolderResearch(
           }
           if (triageDecision.action === "skip") {
             triage.skip += 1;
+            if (editorialRepeat === "defer") continue;
             await maybeWriteDecisionCache({
               redis: options.decisionCacheRedis,
               policy,
@@ -4157,6 +4257,8 @@ export async function runHolderResearch(
           (decision) => decision.output.status === "SKIP",
         ).length,
         technicalSkipped: technicalSkips.length,
+        editorialDeferredBeforeSearch,
+        editorialRepeatReopened,
         persistenceRejectedByReason: persistence?.rejectedByReason ?? {},
       },
       jevPreTriage,
