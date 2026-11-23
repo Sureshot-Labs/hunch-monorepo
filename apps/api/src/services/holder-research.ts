@@ -17,6 +17,10 @@ import {
   type HolderPublicPosition,
 } from "./holder-research-publication-history.js";
 import { buildSocialInstrument } from "./social-instrument.js";
+import {
+  publicationQuoteQuality,
+  readFrozenPublicationEntry,
+} from "./signal-publication-snapshot.js";
 import { resolveLimitlessPositionContract } from "./limitless-protocol-config.js";
 import {
   buildHolderResearchPriceMovement,
@@ -1990,6 +1994,7 @@ export function classifyHolderResearchHunchStrength(input: {
 export function evaluateHolderResearchPublishRiskGates(input: {
   candidate: HolderResearchCandidate;
   policy: HolderResearchPolicy;
+  evidenceIds?: string[];
 }): HolderResearchActionabilityBlocker[] {
   const blockers: HolderResearchActionabilityBlocker[] = [];
   const price = estimatedHolderResearchActionPrice(input.candidate);
@@ -2001,7 +2006,12 @@ export function evaluateHolderResearchPublishRiskGates(input: {
   if (
     input.policy.singleGameSportsClusterOnly &&
     quality.marketType === "single_game_sports" &&
-    quality.actorStrength !== "cluster"
+    quality.actorStrength !== "cluster" &&
+    !hasHolderResearchSportsSpecialist(
+      input.candidate,
+      input.policy,
+      input.evidenceIds,
+    )
   ) {
     blockers.push("single_game_sports_cluster_required");
   }
@@ -2023,6 +2033,104 @@ export function evaluateHolderResearchPublishRiskGates(input: {
     pushUnique(blockers, "sports_outright_context_only");
   }
   return blockers;
+}
+
+/** Reuse the existing exceptional-single credential limits. The exception
+ * also requires sufficient positive edge in this exact sport segment. */
+export function hasHolderResearchSportsSpecialist(
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPolicy,
+  evidenceIds?: string[],
+): boolean {
+  if (
+    !candidate.side ||
+    classifyHolderResearchMarketType(candidate.market) !==
+      "single_game_sports" ||
+    classifyHolderResearchMarketSegment(candidate.market) ===
+      "sports_other_game"
+  )
+    return false;
+  const actor = buildHolderResearchActorSummary({
+    candidate,
+    evidenceIds: evidenceIds ?? candidate.evidence.map((entry) => entry.id),
+    policy,
+  });
+  if (actor.mode !== "single_holder" || !actor.primaryHolder) return false;
+  const holder = candidate.market.holders.find(
+    (entry) =>
+      entry.side === candidate.side &&
+      entry.walletId === actor.primaryHolder?.walletId,
+  );
+  if (
+    !holder ||
+    (evidenceIds != null &&
+      !evidenceIds.includes(buildHolderEvidenceId(holder))) ||
+    !isSharpHolder(holder, policy) ||
+    !holderHasStrongCredential({ holder, policy })
+  )
+    return false;
+  const metric = holder.marketSegmentMetrics30d;
+  return (
+    metric != null &&
+    metric.marketSegment ===
+      classifyHolderResearchMarketSegment(candidate.market) &&
+    metric.resolvedEdgeSampleCount >= policy.minResolvedEdgeSampleCount30d &&
+    (metric.resolvedWinRateEdge ?? -Infinity) >=
+      policy.minResolvedWinRateEdge30d &&
+    (metric.resolvedEdgeZScore ?? -Infinity) >= policy.minResolvedEdgeZScore30d
+  );
+}
+
+export async function enrichHolderResearchSportsSpecialists(
+  client: Queryable,
+  candidates: HolderResearchCandidate[],
+  policy: HolderResearchPolicy,
+) {
+  if (
+    !policy.singleGameSportsClusterOnly ||
+    !policy.preTriageActionabilityEnabled
+  )
+    return candidates;
+  const nowMs = Date.now();
+  const shortlist = candidates
+    .filter((candidate) => {
+      if (
+        candidate.score < policy.minScore ||
+        quotaForBucket(candidate.bucket, policy) <= 0 ||
+        (candidate.cooldownUntil != null &&
+          Date.parse(candidate.cooldownUntil) > nowMs)
+      )
+        return false;
+      const action = buildHolderResearchCandidateActionability(
+        candidate,
+        policy,
+      );
+      return (
+        action.likelyFinalGateBlockers.length === 1 &&
+        action.likelyFinalGateBlockers[0] ===
+          "single_game_sports_cluster_required" &&
+        action.hoursToClose != null &&
+        action.hoursToClose > 0 &&
+        classifyHolderResearchMarketSegment(candidate.market) !==
+          "sports_other_game" &&
+        candidate.market.holders.some(
+          (holder) =>
+            holder.side === candidate.side &&
+            isSharpHolder(holder, policy) &&
+            holderHasStrongCredential({ holder, policy }),
+        )
+      );
+    })
+    .sort(compareHolderResearchCandidates(policy))
+    .slice(0, policy.maxCandidatesPerRun);
+  const enriched = new Map(
+    (await enrichHolderResearchMarketTypeMetrics(client, shortlist)).map(
+      (candidate) => [candidate.key, candidate],
+    ),
+  );
+  return candidates.map(
+    (candidate) => enriched.get(candidate.key) ?? candidate,
+  );
 }
 
 function livePriceBlockerToActionabilityBlocker(
@@ -2589,22 +2697,76 @@ export function withHolderPublicComparison(
   candidate: HolderResearchCandidate,
   policy: HolderResearchPolicy,
 ): Record<string, unknown> {
+  const history = candidate.publicationHistory ?? {
+    status: "unavailable" as const,
+    items: [],
+  };
   return {
     ...json,
     publicationPolicy: {
       singleGameSportsClusterOnly: policy.singleGameSportsClusterOnly,
+      sportsSpecialistException:
+        policy.singleGameSportsClusterOnly &&
+        hasHolderResearchSportsSpecialist(candidate, policy),
       sideChangeRequiresEvidence: policy.sideChangeRequiresEvidence,
     },
-    publicThesisHistory: holderPublicationPromptContext({
-      history: candidate.publicationHistory ?? {
-        status: "unavailable",
-        items: [],
-      },
-      positions: holderResearchPublicPositions(candidate, policy),
-      minUsd: policy.minMeaningfulHolderUsdDelta,
-      minPct: policy.minMeaningfulHolderPctDelta,
-    }),
+    publicThesisHistory: buildHolderResearchPublicContext(candidate, policy),
+    publicationPriceComparison: {
+      latestDeliveredSide: history.items[0]?.side ?? null,
+      latestDeliveredAt: history.items[0]?.publishedAt ?? null,
+      latestDeliveredAsk: latestHolderResearchDeliveredAsk(candidate),
+      proposedSide: candidate.side,
+      proposedQuote: holderResearchCurrentAsk(candidate),
+    },
   };
+}
+
+export function buildHolderResearchPublicContext(
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPolicy,
+) {
+  return holderPublicationPromptContext({
+    history: candidate.publicationHistory ?? {
+      status: "unavailable",
+      items: [],
+    },
+    positions: holderResearchPublicPositions(candidate, policy),
+    minUsd: policy.minMeaningfulHolderUsdDelta,
+    minPct: policy.minMeaningfulHolderPctDelta,
+  });
+}
+
+export function latestHolderResearchDeliveredAsk(
+  candidate: HolderResearchCandidate,
+): number | null {
+  const latest = candidate.publicationHistory?.items[0];
+  if (!latest) return null;
+  return readFrozenPublicationEntry({
+    snapshot: latest.priceSnapshot,
+    legacyPrice: null,
+    marketId: candidate.market.marketId,
+    venue: candidate.market.venue,
+    side: latest.side,
+    sentAt: latest.publishedAt,
+  }).price;
+}
+
+export function holderResearchCurrentAsk(
+  candidate: HolderResearchCandidate,
+  now: Date = new Date(),
+) {
+  if (!candidate.side) return null;
+  const top = candidate.market.livePriceCheck?.tops?.[candidate.side];
+  if (
+    !top ||
+    top.ask == null ||
+    publicationQuoteQuality(
+      { ask: top.ask, bid: top.bid, quoteAsOf: top.asOf },
+      now,
+    ) !== "quoted_ask"
+  )
+    return null;
+  return { ask: top.ask, asOf: top.asOf };
 }
 
 export function assessHolderCandidateSideChange(
@@ -6823,6 +6985,7 @@ export function applyHolderResearchPublishQualityGate(input: {
   const deterministicBlocker = evaluateHolderResearchPublishRiskGates({
     candidate,
     policy: input.policy,
+    evidenceIds: output.evidence_ids,
   }).find(
     (blocker) =>
       blocker !== "publish_horizon_too_long" || horizonException == null,
@@ -6842,7 +7005,7 @@ export function applyHolderResearchPublishQualityGate(input: {
       sports_outright_context_only:
         "Sports outright markets are configured as context-only.",
       single_game_sports_cluster_required:
-        "Individual matches require a same-side strong-holder cluster under the current policy.",
+        "Individual matches require a same-side strong-holder cluster or a qualifying specialist in the exact sports segment.",
     };
     return asContextHolderResearchOutput(
       output,
@@ -7090,6 +7253,7 @@ export async function persistHolderResearchNotes(
         evaluateHolderResearchPublishRiskGates({
           candidate,
           policy: params.policy,
+          evidenceIds: decision.output.evidence_ids,
         }).includes("single_game_sports_cluster_required")
       ) {
         recordHolderResearchPublicationRejection(

@@ -119,6 +119,7 @@ export const holderResearchTriageReasonCodeV2Schema = z.enum([
   "weak_credentials",
   "insufficient_evidence",
   "research_needed",
+  "editorial_repeat",
 ]);
 
 export const holderResearchTriageOutputV1Schema = z
@@ -138,6 +139,7 @@ export const holderResearchTriageOutputV1Schema = z
               .max(6)
               .optional(),
             research_question: z.string().trim().max(220).nullable().optional(),
+            repeat_of_note_id: z.string().trim().max(80).nullable().optional(),
           })
           .strict(),
       )
@@ -175,6 +177,7 @@ export const holderResearchTriageOutputV2Schema = z
             research_need: holderResearchResearchNeedV2Schema,
             reason: z.string().trim().min(4).max(220),
             research_question: z.string().trim().max(220).nullable().optional(),
+            repeat_of_note_id: z.string().trim().max(80).nullable().optional(),
           })
           .strict(),
       )
@@ -471,6 +474,8 @@ export function parseHolderResearchTriageOutputV1(
             typeof base.item.research_question === "string"
               ? asTrimmedString(base.item.research_question, "", 220) || null
               : null,
+          repeat_of_note_id:
+            asTrimmedString(base.item.repeat_of_note_id, "", 80) || null,
         };
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
@@ -522,6 +527,8 @@ export function parseHolderResearchTriageOutputV2(
           typeof base.item.research_question === "string"
             ? asTrimmedString(base.item.research_question, "", 220) || null
             : null,
+        repeat_of_note_id:
+          asTrimmedString(base.item.repeat_of_note_id, "", 80) || null,
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
@@ -698,12 +705,14 @@ export function parseHolderResearchFinalOutputV2(
 
 const HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES = [
   "publicThesisHistory is the delivered chronology of THIS exact contract, oldest to newest, across both directions. Compare against latestNoteId and the last public thesis, not only the older same-side priorNote. Event-level history is separate editorial context and can include saved, not yet delivered notes. Never infer a trader switched sides from Hunch publishing another view.",
-  "For an individual match, obey publicationPolicy.singleGameSportsClusterOnly: when true a same-side strong-holder cluster is required, even for an exceptional single holder. When false use the existing strict-sports requirements. Assess available sport/segment specialization, match stage, current price and the strongest opposing holders; several addresses do not prove independent people. News is not mandatory.",
+  "For an individual match, obey publicationPolicy.singleGameSportsClusterOnly: when true a same-side strong-holder cluster is required unless sportsSpecialistException is true. In that case the qualifying single holder must support the proposed side in this exact segment. All other checks still apply. When false use the existing strict-sports requirements. Assess available sport/segment specialization, match stage, current price and the strongest opposing holders; several addresses do not prove independent people. News is not mandatory.",
   "Preserve the supplied full outcome mapping (candidate.contract.outcomeMapping in V2, candidate.mkt side labels in V1). Internal YES/NO keys are identifiers, not a license to reinterpret named outcomes as ordinary yes/no answers. Check both sides against the exact market rules, resolution source, deadline and stage; do not substitute a related contract.",
   "For an existing-note update with a genuinely new dated external fact, populate updateEvidence={sourceUrl,matchesExactContract,factSupported,factMaterialToThesis} only after independently checking the cited freshFact against the exact contract and prior note (candidate.contract.priorNote in V2; candidate.mkt.prevNote in V1). Compare the actual event, not source URLs or summary wording. A new URL, reworded story, tracker timestamp or rediscovered old event is not a new fact. Material facts may support or challenge the selected-side thesis; updateEvidence does not override the final publication assessment. Otherwise set updateEvidence=null.",
   "Start with the exact contract: entity, outcome condition, selected side, threshold, deadline and resolution stage. A credible trader's observed position is an investigative lead. Form the strongest specific, plausible outcome thesis supported by the positioning, calibrated credentials, opposition and available context; do not invent a mechanism when the evidence supports only a directional position.",
   "Distinguish observations from interpretation. An inferred thesis is your hypothesis, not the trader's stated belief, intent or private knowledge. Be bold about a plausible scenario and explicit about uncertainty; never imply insider information, certainty or a guaranteed winner.",
   "Compare the strongest opposing evidence and the strongest plausible alternative explanation. Related positions can inform the thesis or suggest hedging, but incomplete portfolio coverage proves neither an unhedged bet nor a hedge. Do not assume different wallets are independent people. Disagreement is evidence to weigh, not an automatic veto.",
+  "Use publicationPriceComparison to compare the latest delivered side and frozen ask with the proposed side and current ask, when available. They are entry costs, not probabilities. Say why the exact thesis remains useful at today's price and what verified fact would undermine it; pay special attention when research supports the opposite side. Compare the condition, stage and deadline, not just the topic or headline.",
+  "Distinguish a new directional idea, a material update to an already covered thesis, and useful context only. For a sibling strike, first ask what changes economically (payout condition, price or evidence); use context if it adds only a useful qualification to the existing idea. Do not invent a fair value or claim positive expected return from a holder's past edge.",
   "Separate the likelihood of the contract outcome from expected trading return at today's quote. Price and price movement describe market pricing, not event truth. A move against the holder side, already-priced movement or an already-public explanation does not by itself refute the outcome thesis. Do not claim underpricing or positive expected return merely because a credible trader holds a side.",
   "Historical edge is a financial-performance credential, not this event's probability or a guarantee. Assess edge together with Z, samples, stake, trades and exposure; do not make an edge-only case. Missing same-type history, entry context or outside research is unknown, not negative evidence. Weak or contrary observed credentials still matter.",
   "A position snapshot proves observed exposure at its timestamp, not a new purchase, unchanged size or deliberate persistence. firstActivityAt is the earliest activity observed in a bounded window, not necessarily first entry. General market activity is not exact-side holder activity. Use entry, added, reduced, kept the full position or has not backed off only when supplied activity or comparable observations prove that claim.",
@@ -743,12 +752,16 @@ const HOLDER_RESEARCH_PUBLIC_COPY_RULES = [
 const HOLDER_TRIAGE_PUBLICATION_CONTEXT =
   "Read eventPublicationHistory as earlier Hunch interpretations, not independent evidence. Identify the new, checkable question left after those publications. Repeating the same unchanged thesis is low-value research; a strong candidate with a specific unanswered development may still merit investigation without a ready answer. For the opposite side of a prior call, compare its exact condition and explain what new circumstance could support the opposing view. Do not assume the earlier holder switched sides or require agreement with the earlier call. Missing or partial history is unknown, not grounds for a veto.";
 
+const HOLDER_TRIAGE_EDITORIAL_REPEAT =
+  "If an exact or sibling thesis already delivered to Telegram leaves no distinct checkable question, use skip with editorial_repeat, repeat_of_note_id equal to that delivered note's ID, no external search and null research_question. Never use a draft or committed-in-run note as that anchor. If there is a materially different condition, useful price change, new observed exposure or public fact, or a proposed opposite side worth testing, investigate the specific difference instead. Unknown history or missing comparison is not proof of repetition.";
+
 export function buildHolderResearchTriageSystemPrompt(): string {
   return [
     "You are a holder-research triage analyst for Hunch.",
     "Return exactly one JSON object matching holder_research_triage_v1.",
     "Your job is to rank which deterministic holder candidates deserve deeper research, not to decide publication.",
     HOLDER_TRIAGE_PUBLICATION_CONTEXT,
+    HOLDER_TRIAGE_EDITORIAL_REPEAT,
     "Any thesis you form here is provisional and only helps select a question. Do not settle the outcome or require the answer before choosing investigate.",
     ...HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES,
     "Prefer credible single holders or sharp clusters whose positioning supports a specific outcome question worth investigating, including a non-obvious scenario or a credible disagreement with current pricing.",
@@ -785,7 +798,9 @@ export function buildHolderResearchTriageUserPrompt(input: {
           reason:
             "one complete sentence, preferably <=160 characters; maximum 220",
           reason_codes:
-            "0-6 reason codes from strong_actor | early_position | aligned_flow | opposed_flow | already_priced | weak_credentials | insufficient_evidence | research_needed",
+            "0-6 reason codes from strong_actor | early_position | aligned_flow | opposed_flow | already_priced | weak_credentials | insufficient_evidence | research_needed | editorial_repeat",
+          repeat_of_note_id:
+            "one previously delivered note ID for editorial_repeat, or null",
           research_question:
             "one complete question most likely to inform the outcome thesis, preferably <=160 characters (maximum 220), or null",
         },
@@ -808,6 +823,7 @@ export function buildHolderResearchTriageSystemPromptV2(): string {
     "Return exactly one JSON object matching holder_research_triage_v2 and one decision per supplied key.",
     "Candidates are already ordered by deterministic selection. Filter them; do not invent a second ranking.",
     HOLDER_TRIAGE_PUBLICATION_CONTEXT,
+    HOLDER_TRIAGE_EDITORIAL_REPEAT,
     ...HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES,
     "Use decisionFeatures for holder and market facts; missing values are unknown, never zero. Deterministic gates control eligibility. A Jev-selected horizon review is an extra research option with the distant-horizon gate pending, not publication approval.",
     "Investigate when additional research could materially test a holder thesis. Skip when deeper research is unlikely to add value. Do not output watch; final synthesis decides publication.",
@@ -832,7 +848,9 @@ export function buildHolderResearchTriageUserPromptV2(input: {
           key: "one supplied key",
           action: "investigate | skip",
           reason_codes:
-            "subset of strong_actor | early_position | aligned_flow | opposed_flow | already_priced | weak_credentials | insufficient_evidence | research_needed",
+            "subset of strong_actor | early_position | aligned_flow | opposed_flow | already_priced | weak_credentials | insufficient_evidence | research_needed | editorial_repeat",
+          repeat_of_note_id:
+            "one previously delivered note ID for editorial_repeat, or null",
           research_need:
             "none | news_timing | market_context | resolution_context",
           reason:

@@ -5,10 +5,15 @@ import { auditHolderResearchSignalPerformance } from "./services/holder-research
 import { resolveHolderResearchPolicy } from "./services/runtime-policies.js";
 import { loadHolderDeliveryActivity } from "./services/holder-research-delivery-report.js";
 import { loadHolderSideChronologyReport } from "./services/holder-side-chronology-report.js";
+import {
+  loadHolderScorecardMarkouts,
+  summarizeHolderScorecard,
+} from "./services/holder-research-scorecard.js";
 
 type AuditArgs = {
   execute: boolean;
   delivered: boolean;
+  scorecard: boolean;
   force: boolean;
   json: boolean;
   includeOpen: boolean;
@@ -61,6 +66,7 @@ export function parseHolderResearchAuditArgs(argv: string[]): AuditArgs {
   return {
     execute: hasFlag(argv, "--execute"),
     delivered: hasFlag(argv, "--delivered"),
+    scorecard: hasFlag(argv, "--scorecard"),
     force: hasFlag(argv, "--force"),
     json: hasFlag(argv, "--json"),
     includeOpen: !hasFlag(argv, "--no-include-open"),
@@ -89,6 +95,17 @@ function formatResult(
 
 async function main() {
   const args = parseHolderResearchAuditArgs(process.argv.slice(2));
+  if (
+    args.scorecard &&
+    (args.execute ||
+      args.noteIds.length ||
+      !args.includeOpen ||
+      !args.includeResolved)
+  ) {
+    throw new Error(
+      "--scorecard is read-only and requires the complete date-window cohort",
+    );
+  }
   const policyResult = await resolveHolderResearchPolicy(pool);
   const policy = policyResult.effective;
   const asOf = new Date();
@@ -97,7 +114,8 @@ async function main() {
   const result = await auditHolderResearchSignalPerformance(pool, {
     lookbackHours,
     asOf,
-    deliveredInitialOnly: args.delivered,
+    deliveredInitialOnly: args.delivered || args.scorecard,
+    confirmedPublicOnly: args.scorecard,
     limit: args.limit ?? policy.performanceAuditMaxNotesPerRun,
     noteIds: args.noteIds,
     persist: args.execute,
@@ -107,6 +125,44 @@ async function main() {
     approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
     approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
   });
+  if (args.scorecard) {
+    let markouts = null;
+    const client = await pool.connect();
+    try {
+      await client.query("begin read only");
+      await client.query("set local statement_timeout = '8s'");
+      await client.query("set local lock_timeout = '2s'");
+      markouts = await loadHolderScorecardMarkouts(client, result.items, asOf);
+    } catch {
+      console.warn(
+        "[holder-research:audit] markout quotes unavailable; settlement metrics retained",
+      );
+    } finally {
+      try {
+        await client.query("rollback");
+      } finally {
+        client.release();
+      }
+    }
+    console.log(
+      JSON.stringify(
+        {
+          from: new Date(
+            asOf.getTime() - lookbackHours * 3_600_000,
+          ).toISOString(),
+          asOf: asOf.toISOString(),
+          truncated: Boolean(result.truncated),
+          coverage:
+            "Confirmed initial Telegram deliveries with retained market metadata; no drafts or open marks in gross settlement ROI.",
+          settlement: summarizeHolderScorecard(result.items),
+          markouts,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   const deliveryActivity = await loadHolderDeliveryActivity(pool, {
     noteIds: result.items.map((item) => item.noteId),
     from: new Date(asOf.getTime() - lookbackHours * 3_600_000),

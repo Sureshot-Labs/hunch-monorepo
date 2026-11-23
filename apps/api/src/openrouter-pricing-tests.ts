@@ -134,6 +134,9 @@ for (const model of [
   "openai/gpt-6.1-sol",
   "openai/gpt-6.1-sol-20260929",
   " OPENAI/GPT-6.1-SOL ",
+  "openai/gpt-6.2-sol",
+  "openai/gpt-6.2-sol-20261117",
+  " OPENAI/GPT-6.2-SOL ",
 ]) {
   assert.deepEqual(getOpenRouterModelPricingPerM(model, 272000), {
     inputPerM: 2,
@@ -161,6 +164,10 @@ try {
             id: "openai/gpt-6.1-sol",
             pricing: { prompt: "0.000001", completion: "0.000005" },
           },
+          {
+            id: "openai/gpt-6.2-sol",
+            pricing: { prompt: "0.000001", completion: "0.000005" },
+          },
         ],
       }),
     );
@@ -182,6 +189,20 @@ try {
   );
   assert.deepEqual(
     getOpenRouterModelPricingPerM("openai/gpt-6.1-sol", 272001),
+    {
+      inputPerM: 4,
+      outputPerM: 15,
+    },
+  );
+  assert.deepEqual(
+    getOpenRouterModelPricingPerM("openai/gpt-6.2-sol", 272000),
+    {
+      inputPerM: 2,
+      outputPerM: 10,
+    },
+  );
+  assert.deepEqual(
+    getOpenRouterModelPricingPerM("openai/gpt-6.2-sol", 272001),
     {
       inputPerM: 4,
       outputPerM: 15,

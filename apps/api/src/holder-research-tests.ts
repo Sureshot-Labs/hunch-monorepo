@@ -147,6 +147,7 @@ import {
   type HolderResearchSignalPerformance,
 } from "./services/holder-research-performance.js";
 import { classifyMarketTaxonomy } from "./services/market-type-classifier.js";
+import { summarizeHolderScorecard } from "./services/holder-research-scorecard.js";
 import { buildHolderResearchSignalEvidence } from "./services/holder-research-signal-evidence.js";
 import {
   buildHolderResearchUpdateV1,
@@ -5346,6 +5347,221 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           policy: p,
         }).status,
         "PUBLISH",
+      );
+    },
+  },
+  {
+    name: "live sports selection and final gate admit only supported specialists",
+    run: () => {
+      const p = policy({
+        singleGameSportsClusterOnly: true,
+        singleGameSportsStrictMode: true,
+        preTriageActionabilityEnabled: true,
+      });
+      const now = new Date();
+      const quoteAt = now.toISOString();
+      const base = market({
+        category: "Sports",
+        seriesKey: "nba",
+        eventTitle: "Lakers vs. Warriors",
+        marketTitle: "Lakers",
+        livePriceCheck: {
+          blockersBySide: { YES: [], NO: [] },
+          checkedAt: quoteAt,
+          fresh: true,
+          sideBuyPrices: { YES: 0.55, NO: 0.46 },
+          tokenIds: ["yes", "no"],
+          tops: {
+            YES: { ask: 0.55, asOf: quoteAt, bid: 0.53, tokenId: "yes" },
+            NO: { ask: 0.46, asOf: quoteAt, bid: 0.44, tokenId: "no" },
+          },
+          yesProbability: 0.54,
+        },
+      });
+      const segment = classifyMarketTaxonomy(base).marketSegment;
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        {
+          ...base,
+          holders: [
+            holder("NO", {
+              positionUsd: 30_000,
+              marketSegmentMetrics30d: {
+                walletId: holder("NO").walletId,
+                marketType: "single_game_sports",
+                marketSegment: segment,
+                period: "30d",
+                asOf: quoteAt,
+                tradesCount: 40,
+                volumeUsd: null,
+                pnlUsd: null,
+                roi: null,
+                winRate: null,
+                resolvedEdgeSampleCount: 40,
+                resolvedActualWinRate: null,
+                resolvedExpectedWinRate: null,
+                resolvedWinRateEdge: 0.2,
+                resolvedEdgeZScore: 3,
+                resolvedBrierScore: null,
+                resolvedStakeWeightedEdge: null,
+                resolvedStakeUsd: null,
+                lastTradeAt: null,
+                approximate: true,
+                unmarkedOpenLegCount: 0,
+              },
+            }),
+          ],
+        },
+        p,
+      ).find((entry) => entry.bucket === "sharp_side");
+      assert.ok(candidate);
+      const livePriceCheck = candidate.market.livePriceCheck;
+      assert.ok(livePriceCheck);
+      const citedSpecialist = candidate.evidence.find(
+        (entry) => entry.id === `holder:${holder("NO").walletId}:NO`,
+      );
+      assert.ok(citedSpecialist);
+      const miscMarket = {
+        ...candidate.market,
+        seriesKey: null,
+        eventTitle: "Falcons vs. Lynx",
+        marketTitle: "Falcons",
+        holders: candidate.market.holders.map((entry) => ({
+          ...entry,
+          marketSegmentMetrics30d: entry.marketSegmentMetrics30d
+            ? {
+                ...entry.marketSegmentMetrics30d,
+                marketSegment: "sports_other_game" as const,
+              }
+            : null,
+        })),
+      };
+      assert.equal(
+        classifyMarketTaxonomy(miscMarket).marketSegment,
+        "sports_other_game",
+      );
+      assert.equal(
+        selectHolderResearchCandidates(
+          [{ ...candidate, market: miscMarket }],
+          p,
+          now,
+        ).selected.length,
+        0,
+      );
+      assert.deepEqual(
+        selectHolderResearchCandidates([candidate], p, now).selected,
+        [candidate],
+      );
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate,
+          policy: p,
+          output: publishOutput(candidate, {
+            evidence_ids: [citedSpecialist.id],
+          }),
+        }).status,
+        "PUBLISH",
+      );
+      for (const evidenceIds of [
+        [],
+        [`market:${candidate.market.marketId}`],
+        [`holder:${holder("YES").walletId}:YES`],
+      ]) {
+        assert.equal(
+          applyHolderResearchPublishQualityGate({
+            candidate,
+            policy: p,
+            output: publishOutput(candidate, { evidence_ids: evidenceIds }),
+          }).status,
+          "CONTEXT",
+        );
+      }
+      assert.equal(
+        selectHolderResearchCandidates(
+          [candidate],
+          { ...p, minPublishEntryPrice: 0.5 },
+          now,
+        ).selected.length,
+        0,
+      );
+      assert.equal(
+        selectHolderResearchCandidates(
+          [
+            {
+              ...candidate,
+              market: {
+                ...candidate.market,
+                livePriceCheck: {
+                  ...livePriceCheck,
+                  blockersBySide: { YES: [], NO: ["live_price_stale"] },
+                },
+              },
+            },
+          ],
+          p,
+          now,
+        ).selected.length,
+        0,
+      );
+      assert.equal(
+        selectHolderResearchCandidates(
+          [
+            {
+              ...candidate,
+              market: {
+                ...candidate.market,
+                holders: [holder("NO", { positionUsd: 30_000 })],
+              },
+            },
+          ],
+          p,
+          now,
+        ).selected.length,
+        0,
+      );
+    },
+  },
+  {
+    name: "scorecard separates confirmed outcomes, measured asks and event weighting",
+    run: () => {
+      const result = summarizeHolderScorecard([
+        performanceItem({
+          outcome: "correct",
+          entryQuality: "quoted_ask",
+          entryPrice: 0.5,
+          eventId: "A",
+        }),
+        performanceItem({
+          outcome: "wrong",
+          entryQuality: "quoted_ask",
+          entryPrice: 0.9,
+          eventId: "A",
+        }),
+        performanceItem({
+          outcome: "wrong",
+          entryQuality: "quoted_ask",
+          entryPrice: 0.9,
+          eventId: "B",
+        }),
+        performanceItem({
+          outcome: "correct",
+          entryQuality: "legacy_display",
+          entryPrice: 0.9,
+        }),
+        performanceItem({
+          outcome: "open",
+          entryQuality: "quoted_ask",
+          entryPrice: 0.3,
+        }),
+      ]);
+      assert.equal(result.measuredAtAsk, 3);
+      assert.equal(result.wins, 2);
+      assert.equal(result.losses, 2);
+      assert.equal(result.unknownOrOpen, 1);
+      assert.equal(result.eventWeightedRoi, -0.5);
+      assert.ok(
+        result.grossRoiAtAskPlusOneCent != null &&
+          result.grossRoi != null &&
+          result.grossRoiAtAskPlusOneCent < result.grossRoi,
       );
     },
   },

@@ -8,6 +8,11 @@ import { buildSignalBotStatsReport } from "./services/signal-bot-stats-report.js
 import { loadEventPublications } from "./services/holder-research-event-publications.js";
 import { buildSignalPublicationSnapshot } from "./services/signal-publication-snapshot.js";
 import { loadHolderResearchObservationCalibration } from "./services/holder-research-observations.js";
+import {
+  HOLDER_SCORECARD_MARKOUT_SQL,
+  loadHolderScorecardMarkouts,
+  summarizeHolderScorecard,
+} from "./services/holder-research-scorecard.js";
 
 const pool = await createIntegrationTestPool({
   max: 1,
@@ -29,12 +34,15 @@ try {
     create temporary table unified_events (id text primary key,title text,category text,status text,end_date timestamptz,metadata jsonb);
     create temporary table unified_markets (id text primary key,event_id text,venue text,status text,title text,category text,
       close_time timestamptz,expiration_time timestamptz,best_bid numeric,best_ask numeric,last_price numeric,
-      resolved_outcome text,resolved_outcome_pct numeric,token_yes text,token_no text,clob_token_ids text,metadata jsonb);
+      resolved_outcome text,resolved_outcome_pct numeric,token_yes text,token_no text,clob_token_ids text,metadata jsonb,
+      resolution_observed_at timestamptz);
     create temporary table unified_market_tokens (market_id text,token_id text,outcome_side text);
     create temporary table ai_notes (id uuid primary key,note_type text,producer_type text,status text,direction text,confidence numeric,
       created_at timestamptz,metrics jsonb,model_meta jsonb,lineage jsonb,source_id text,title text,description text);
     create temporary table ai_note_targets (note_id uuid,target_kind text,is_primary boolean,target_id text,target_meta jsonb,created_at timestamptz);
-    create temporary table signal_bot_messages (id uuid primary key,note_id uuid,message_kind text,sent_at timestamptz,metrics jsonb);
+    create temporary table signal_bot_messages (id uuid primary key,note_id uuid,message_kind text,sent_at timestamptz,metrics jsonb, telegram_message_id bigint);
+    create temporary table unified_book_top_1m (token_id text,venue text,bucket timestamptz,avg_best_bid numeric,avg_best_ask numeric);
+    create index on unified_book_top_1m(token_id,bucket desc);
     create temporary table holder_research_candidate_observations (id int,thesis_key text,observed_at timestamptz,source_market_id text,
       side text,candidate_bucket text,feature_version smallint,decision_features jsonb);
     create index on signal_bot_messages(message_kind,sent_at);
@@ -80,7 +88,7 @@ try {
     extra: object = {},
   ) {
     await client.query(
-      `insert into signal_bot_messages values ($1,$2,'initial',$3,$4)`,
+      `insert into signal_bot_messages values ($1,$2,'initial',$3,$4,42)`,
       [
         randomUUID(),
         id,
@@ -136,7 +144,7 @@ try {
   }
   const updateOnly = await note("win");
   await client.query(
-    "insert into signal_bot_messages values ($1,$2,'research_update',$3,'{}')",
+    "insert into signal_bot_messages values ($1,$2,'research_update',$3,'{}',42)",
     [randomUUID(), updateOnly, sentAt],
   );
   const updateWithInitialDelivery = await note("win");
@@ -313,6 +321,131 @@ try {
       .length,
     1,
   );
+  const undelivered = await note("only_draft");
+  await client.query(`
+    insert into unified_markets(id,event_id,venue,status,title) values
+      ('only_draft','event','polymarket','ACTIVE','Draft fixture'),
+      ('only_no_receipt','event','polymarket','ACTIVE','Missing receipt fixture');
+  `);
+  await delivery(undelivered, "only_draft", "YES", sentAt, 0.3, {
+    contentProfile: "x_editorial_draft_v1",
+  });
+  const withoutReceipt = await note("only_no_receipt");
+  await delivery(withoutReceipt, "only_no_receipt");
+  await client.query(
+    "update signal_bot_messages set telegram_message_id=null where note_id=$1",
+    [withoutReceipt],
+  );
+  const historyAfterDraft = await loadEventPublications(db, ["event"], asOf);
+  assert.equal(
+    historyAfterDraft.some(
+      (item) => item.note_id === undelivered || item.note_id === withoutReceipt,
+    ),
+    false,
+  );
+  const strict = await auditHolderResearchSignalPerformance(db, {
+    asOf,
+    limit: 500,
+    lookbackHours: 24,
+    deliveredInitialOnly: true,
+    confirmedPublicOnly: true,
+  });
+  assert.equal(
+    strict.items.some(
+      (item) => item.noteId === undelivered || item.noteId === withoutReceipt,
+    ),
+    false,
+  );
+  // Keep the remaining legacy pagination fixtures unchanged.
+  await client.query(
+    "delete from signal_bot_messages where note_id=any($1::uuid[])",
+    [[undelivered, withoutReceipt]],
+  );
+  assert.ok(
+    strict.items.some((item) => item.noteId === updateWithInitialDelivery),
+  );
+  assert.ok(summarizeHolderScorecard(strict.items).losses > 0);
+  const open = strict.items.find((item) => item.marketId === "open");
+  assert.ok(open);
+  await client.query(`
+    delete from unified_market_tokens where market_id='open';
+    insert into unified_market_tokens values ('open','scorecard_yes','YES');
+    insert into unified_book_top_1m values
+      ('scorecard_yes','polymarket','2026-10-07T17:59Z',0.60,0.64),
+      ('scorecard_yes','polymarket','2026-10-07T18:00Z',0.80,0.82),
+      ('scorecard_yes','polymarket','2026-10-08T13:59Z',0.40,0.42);
+  `);
+  const measurement = {
+    ...open,
+    entryQuality: "quoted_ask" as const,
+    entryPrice: 0.5,
+  };
+  const marks = await loadHolderScorecardMarkouts(
+    db,
+    [measurement],
+    new Date("2026-10-08T15:00Z"),
+  );
+  assert.deepEqual(
+    marks.map((point) => point.measured),
+    [1, 1],
+  );
+  assert.equal(marks[0]?.meanBidOverEntryAskMinusOne?.toFixed(2), "0.20");
+  assert.equal(marks[1]?.meanBidOverEntryAskMinusOne?.toFixed(2), "-0.20");
+  await client.query(`
+    insert into unified_book_top_1m
+    select 'noise-' || tick_id, 'polymarket', '2026-10-07T17:59Z'::timestamptz, 0.4, 0.5
+    from generate_series(1, 20000) as tick_rows(tick_id);
+    analyze unified_book_top_1m;
+  `);
+  const plan = await client.query(
+    `explain (analyze,buffers,format json) ${HOLDER_SCORECARD_MARKOUT_SQL}`,
+    [
+      JSON.stringify([
+        {
+          request_id: 0,
+          market_id: "open",
+          outcome_side: "YES",
+          probe_at: "2026-10-07T18:00Z",
+        },
+      ]),
+      "2026-10-07T17:50Z",
+      "2026-10-07T18:00Z",
+    ],
+  );
+  const planJson = JSON.stringify(plan.rows[0]["QUERY PLAN"]);
+  assert.match(
+    planJson,
+    /"Node Type":"Index Scan"[^}]*"Relation Name":"unified_book_top_1m"/,
+  );
+  assert.doesNotMatch(
+    planJson,
+    /"Node Type":"Seq Scan"[^}]*"Relation Name":"unified_book_top_1m"/,
+  );
+  await client.query(
+    "update unified_markets set resolution_observed_at='2026-10-08T00:00Z' where id='open'",
+  );
+  const resolvedMarks = await loadHolderScorecardMarkouts(
+    db,
+    [measurement],
+    new Date("2026-10-08T15:00Z"),
+  );
+  assert.deepEqual(
+    resolvedMarks.map((point) => point.settledByHorizon),
+    [0, 1],
+  );
+  assert.deepEqual(
+    resolvedMarks.map((point) => point.measured),
+    [1, 0],
+  );
+  await client.query(
+    "insert into unified_market_tokens values ('open','ambiguous_yes','YES')",
+  );
+  const ambiguous = await loadHolderScorecardMarkouts(
+    db,
+    [measurement],
+    new Date("2026-10-07T19:00Z"),
+  );
+  assert.equal(ambiguous[0]?.measured, 0);
   // Force indexed source pagination and a visible 501st result without real data.
   for (let i = 0; i < 505; i++) {
     const id = await note("open");
@@ -355,6 +488,43 @@ try {
   tailParams[2] = "2026-10-06T15:00:00Z";
   tailParams[3] = randomUUID();
   await client.query(`explain (analyze,buffers) ${last.sql}`, tailParams);
+  const historyAtScale = await loadEventPublications(
+    traced,
+    ["event", "no-event"],
+    asOf,
+  );
+  assert.ok(historyAtScale.length > 0 && historyAtScale.length <= 7);
+  const exactHistoryQuery = queries.find(
+    ({ sql }) =>
+      sql.includes("requested_event") && sql.includes("receipt.sent_at"),
+  );
+  assert.ok(exactHistoryQuery);
+  const exactPlan = await client.query(
+    `explain (analyze,buffers,format json) ${exactHistoryQuery.sql}`,
+    exactHistoryQuery.params as unknown[],
+  );
+  assert.equal(
+    exactPlan.rows[0]["QUERY PLAN"][0].Plan["Actual Rows"],
+    historyAtScale.length,
+  );
+  const exactCohort = await auditHolderResearchSignalPerformance(traced, {
+    asOf,
+    lookbackHours: 24,
+    limit: 500,
+    deliveredInitialOnly: true,
+    confirmedPublicOnly: true,
+  });
+  assert.equal(exactCohort.items.length, 500);
+  assert.equal(exactCohort.truncated, true);
+  for (const query of queries.filter(({ sql }) =>
+    sql.includes("sbm.telegram_message_id is not null"),
+  )) {
+    const checkedPlan = await client.query(
+      `explain (analyze,buffers,format json) ${query.sql}`,
+      query.params as unknown[],
+    );
+    assert.ok(checkedPlan.rows[0]["QUERY PLAN"][0].Plan);
+  }
   console.log(
     "[holder-research-accounting-integration-tests] PG16 cohort, frozen entry, canonical/fractional payouts, coverage, 500+sentinel, resumed/empty page plans passed",
   );
