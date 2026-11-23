@@ -10,7 +10,10 @@ import {
   calculatePolymarketQuote,
   PolymarketQuoteError,
 } from "./services/polymarket-quote.js";
-import { findMaxPolymarketMarketBuyUsdForFunds } from "./services/polymarket-trading-service.js";
+import {
+  findMaxPolymarketMarketBuyUsdForFunds,
+  quotePolymarketOrder,
+} from "./services/polymarket-trading-service.js";
 
 const realNow = Date.now;
 const originalBook = polymarketClient.getOrderBook;
@@ -25,12 +28,18 @@ let slowMetadata = false;
 let slowBook = false;
 let failBook = false;
 let currentAsk = "0.50";
+let currentBid = "0.49";
+let bidSize = "100";
+let askSize = "100";
 let replaceAsk = false;
 const book = () => ({
   timestamp: String(sourceTime),
-  bids: [{ price: "0.49", size: "100" }],
+  bids: [
+    { price: currentBid, size: bidSize },
+    { price: "0.40", size: "1000" },
+  ],
   asks: [
-    { price: currentAsk, size: "100" },
+    { price: currentAsk, size: askSize },
     { price: "0.60", size: "1000" },
   ],
   tick_size: "0.01",
@@ -95,6 +104,25 @@ try {
   assert.equal(calls.get("101"), 2);
   assert.equal(refreshed.sourceAsOf, first.sourceAsOf);
   assert.equal(refreshed.expiresAt, new Date(clock + 5_000).toISOString());
+
+  const isolatedCache = createTradingBookCache(() => clock);
+  const settled = await isolatedCache.load("same", async () => ({ value: 1 }));
+  const failedFok = isolatedCache.load(
+    "same",
+    async () => {
+      throw new Error("refresh failed");
+    },
+    { fresh: true },
+  );
+  const resting = isolatedCache.load("same", async () => {
+    throw new Error("resting quote should use the settled book");
+  });
+  assert.strictEqual(await resting, settled);
+  await assert.rejects(failedFok, /refresh failed/);
+  assert.strictEqual(
+    await isolatedCache.load("same", async () => null),
+    settled,
+  );
 
   // Other venues retain their stricter source clock policy.
   const otherVenue = await createTradingBookCache(() => clock).load(
@@ -203,6 +231,75 @@ try {
   await assert.rejects(loadPolymarketBook("105"), /fixture provider/);
   failBook = false;
   assert.ok(await loadPolymarketBook("105"));
+
+  const sell = {
+    tokenId: "106",
+    side: "SELL" as const,
+    orderType: "FOK" as const,
+    amountType: "shares" as const,
+    amountSharesInput: 100,
+  };
+  const [quoted, coalescedQuote] = await Promise.all([
+    quotePolymarketOrder(pool, sell),
+    quotePolymarketOrder(pool, sell),
+  ]);
+  assert.equal(quoted.price, 0.49);
+  assert.deepEqual(quoted, coalescedQuote);
+  assert.equal(calls.get(sell.tokenId), 1);
+  currentBid = "0.52";
+  assert.equal((await quotePolymarketOrder(pool, sell)).price, 0.52);
+  assert.equal(calls.get(sell.tokenId), 2);
+  bidSize = "10";
+  const noLiquidity = (e: unknown) =>
+    e instanceof PolymarketQuoteError && e.reason === "no_liquidity";
+  await assert.rejects(quotePolymarketOrder(pool, sell), noLiquidity);
+  assert.equal(
+    (await quotePolymarketOrder(pool, { ...sell, amountSharesInput: 10 })).size,
+    10,
+  );
+  currentBid = "0.49";
+  bidSize = "32.01";
+  assert.equal(
+    (await quotePolymarketOrder(pool, { ...sell, amountSharesInput: 32.0101 }))
+      .makerAmount,
+    "32010000",
+  );
+  assert.equal(
+    (await quotePolymarketOrder(pool, { ...sell, orderType: "FAK" })).size,
+    100,
+  );
+  assert.equal(
+    (
+      await quotePolymarketOrder(pool, {
+        ...sell,
+        orderType: "GTC",
+        limitPrice: 0.48,
+      })
+    ).size,
+    100,
+  );
+
+  currentAsk = "0.50";
+  askSize = "10";
+  const buy = {
+    tokenId: "107",
+    side: "BUY" as const,
+    orderType: "FOK" as const,
+    amountType: "usd" as const,
+    amountUsdInput: 5.01,
+  };
+  await assert.rejects(quotePolymarketOrder(pool, buy), noLiquidity);
+  assert.equal(
+    (await quotePolymarketOrder(pool, { ...buy, amountUsdInput: 5 }))
+      .makerAmount,
+    "5000000",
+  );
+  askSize = "32.12";
+  assert.equal(
+    (await quotePolymarketOrder(pool, { ...buy, amountUsdInput: 16.06 }))
+      .makerAmount,
+    "16060000",
+  );
   console.log(
     "ok - quiet books, cache/coalescing, bounded refresh, expiry recovery and strict BUY/SELL price checks",
   );

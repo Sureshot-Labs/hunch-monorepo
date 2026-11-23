@@ -69,6 +69,8 @@ import {
   fetchFundingOperationForUser,
   finishFundingReconciliationLease,
   FundingPersistenceError,
+  FundingSourceCapacityChangedError,
+  checkQuoteSourceReservations,
   releaseFundingReservationInTransaction,
   renewFundingReconciliationLease,
   wakeFundingReconciliationInTransaction,
@@ -5001,6 +5003,31 @@ async function testAliasedPhysicalSourceReservation(): Promise<void> {
        where operation_id = $1 and mode = 'subtract_available'
        limit 1`,
       [deposit.operation.id, tradeComponentId],
+    );
+    await assert.rejects(
+      checkQuoteSourceReservations(
+        client,
+        userId,
+        tradePlan,
+        async (sources) => {
+          assert.equal(sources.length, 1);
+          assert.equal(sources[0]?.heldRaw, "2000000");
+          assert.equal(sources[0]?.projectedHeldRaw, "0");
+          throw new FundingSourceCapacityChangedError("fixture capacity used");
+        },
+      ),
+      (error: unknown) =>
+        error instanceof FundingSourceCapacityChangedError &&
+        error.code === "quote_invalidated",
+    );
+    await checkQuoteSourceReservations(
+      client,
+      userId,
+      makePlan(tradeComponentId, "500000"),
+      async (sources) => {
+        assert.equal(sources[0]?.reservation.rawAmount, "500000");
+        assert.equal(sources[0]?.heldRaw, "2000000");
+      },
     );
     await client.query("savepoint alias_conflict");
     await assert.rejects(

@@ -52,6 +52,7 @@ import {
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
 import {
   FundingPersistenceError,
+  FundingSourceCapacityChangedError,
   type FundingOperationRow,
 } from "../funding/persistence/funding-operation-repository.js";
 import {
@@ -593,7 +594,10 @@ async function handleFundingRequest<T>(
   } catch (error) {
     request.log.error({ err: error, userId }, input.logMessage);
     const response = {
-      error: input.publicError,
+      error:
+        error instanceof FundingSourceCapacityChangedError
+          ? "Available funds changed or are reserved. Refresh your funding options and try again."
+          : input.publicError,
       code: errorCode(error),
       ...(error instanceof FundingReceiveSessionSelectionConflictError
         ? { activeReceiveSessionId: error.activeReceiveSessionId }

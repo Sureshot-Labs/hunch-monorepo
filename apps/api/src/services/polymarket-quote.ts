@@ -250,6 +250,18 @@ function floorNumberToRaw(value: number, scale: bigint): bigint | null {
   return Number.isFinite(raw) && raw > 0 ? BigInt(raw) : null;
 }
 
+function bookSizeToRaw(size: number): bigint {
+  const scaled = size * Number(USDC_SCALE);
+  if (!Number.isFinite(scaled) || scaled <= 0) return 0n;
+  const nearest = Math.round(scaled);
+  // Recover exact microshare levels such as 32.01 after JSON decimal → Number.
+  const raw =
+    Math.abs(scaled - nearest) <= scaled * Number.EPSILON
+      ? nearest
+      : Math.floor(scaled);
+  return Number.isSafeInteger(raw) ? BigInt(raw) : 0n;
+}
+
 function roundDownToStep(value: bigint, step: bigint): bigint {
   return step > 0n ? value - (value % step) : value;
 }
@@ -737,8 +749,8 @@ function hasAvailableAskDepthForBuy(
     )
       continue;
 
-    const sizeRaw = floorNumberToRaw(ask.size, USDC_SCALE);
-    if (sizeRaw == null || sizeRaw <= 0n) continue;
+    const sizeRaw = bookSizeToRaw(ask.size);
+    if (sizeRaw <= 0n) continue;
     if (strictSlippage) {
       const priceRaw = BigInt(Math.round(ask.price * Number(USDC_SCALE)));
       availableSpendRaw += (sizeRaw * priceRaw) / USDC_SCALE;
@@ -750,6 +762,35 @@ function hasAvailableAskDepthForBuy(
   }
 
   return false;
+}
+
+/** A snapshot can disprove a FOK fill, but cannot guarantee a subsequent fill. */
+export function assertPolymarketFokDepth(
+  orderbook: PolymarketOrderbookSummary,
+  quote: PolymarketQuoteResult,
+): void {
+  if (quote.orderType !== "FOK") return;
+  if (quote.side === "BUY") {
+    // The FOK BUY must place the full signed collateral amount.
+    if (hasAvailableAskDepthForBuy(orderbook, quote, true)) return;
+  } else {
+    const sharesRaw = BigInt(quote.makerAmount);
+    const proceedsRaw = BigInt(quote.takerAmount);
+    let availableRaw = 0n;
+    for (const bid of orderbook.bids) {
+      if (!Number.isFinite(bid.price) || bid.price <= 0 || bid.price >= 1)
+        continue;
+      const bidPriceRaw = BigInt(Math.round(bid.price * Number(USDC_SCALE)));
+      if (bidPriceRaw * sharesRaw < proceedsRaw * USDC_SCALE) continue;
+      availableRaw += bookSizeToRaw(bid.size);
+      if (availableRaw >= sharesRaw) return;
+    }
+  }
+  throw new PolymarketQuoteError(
+    400,
+    "Not enough order book liquidity to fill the whole order at this price. Try a smaller amount or refresh the quote.",
+    "no_liquidity",
+  );
 }
 
 function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
@@ -826,6 +867,7 @@ export async function loadPolymarketQuoteContext(
   inputs: {
     tokenId: string;
     assetContext?: PolymarketAssetContext;
+    freshBook?: boolean;
     logWarn?: (args: {
       error: unknown;
       tokenId: string;
@@ -834,7 +876,7 @@ export async function loadPolymarketQuoteContext(
   },
 ): Promise<PolymarketQuoteContext> {
   const [orderbookResult, marketInfo, feePolicySnapshot] = await Promise.all([
-    loadPolymarketBook(inputs.tokenId).then(
+    loadPolymarketBook(inputs.tokenId, { fresh: inputs.freshBook }).then(
       (value) => ({ ok: true as const, value }),
       (error: unknown) => ({ ok: false as const, error }),
     ),
@@ -887,7 +929,7 @@ export async function loadPolymarketQuoteContext(
   // observation, never renew an old snapshot or keep retrying indefinitely.
   if (Date.parse(bookSnapshot.expiresAt) <= Date.now()) {
     try {
-      bookSnapshot = await loadPolymarketBook(inputs.tokenId);
+      bookSnapshot = await loadPolymarketBook(inputs.tokenId, { fresh: true });
     } catch (error) {
       throw polymarketOrderbookFailure(error, marketInfo);
     }
