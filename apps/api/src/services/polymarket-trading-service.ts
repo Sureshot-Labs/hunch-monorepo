@@ -2,6 +2,7 @@ import type { Pool } from "@hunch/infra";
 import type { PolymarketAssetContext } from "@hunch/shared";
 
 import {
+  assertPolymarketFokDepth,
   calculatePolymarketQuote,
   findMaxPolymarketMarketBuyUsdDetailed,
   loadPolymarketQuoteContext,
@@ -39,8 +40,9 @@ export async function quotePolymarketOrder(
     tokenId: input.tokenId,
     assetContext: input.assetContext,
     logWarn: input.logWarn,
+    freshBook: input.orderType === "FOK",
   });
-  return calculatePolymarketQuote({
+  const quote = calculatePolymarketQuote({
     tokenId: input.tokenId,
     side: input.side,
     orderType: input.orderType,
@@ -53,6 +55,8 @@ export async function quotePolymarketOrder(
     strictSlippage: input.strictSlippage,
     context,
   });
+  assertPolymarketFokDepth(context.orderbook, quote);
+  return quote;
 }
 
 export async function findMaxPolymarketMarketBuyUsdForFunds(

@@ -29,9 +29,11 @@ import {
   fundingSubjectLookupHmac,
 } from "../persistence/canonical.js";
 import {
+  checkQuoteSourceReservations,
   commitFundingOperationInTransaction,
   createFundingQuote,
   FundingPersistenceError,
+  type FundingCommitPlan,
   type FundingQuoteCommitScope,
 } from "../persistence/funding-operation-repository.js";
 import {
@@ -220,6 +222,15 @@ class CapturingFundingPlanningStore implements FundingPlanningStore {
   async fetchOwnedCurrent(): Promise<PersistedFundingPlanningSnapshot | null> {
     return null;
   }
+}
+
+function sourceCapacityOptions(plan: FundingCommitPlan) {
+  return {
+    directWithdrawal:
+      plan.operation.purpose === "withdrawal" &&
+      plan.operation.supportMetadata?.adapterId ===
+        DIRECT_WITHDRAWAL_ADAPTER_ID,
+  };
 }
 
 export class FundingPlanningRuntime {
@@ -989,6 +1000,29 @@ export class FundingPlanningRuntime {
     return new FundingQuoteService({
       db: this.db,
       planningStore: this.planningStore,
+      verifySourceCapacity: (plan) =>
+        checkQuoteSourceReservations(this.db, userId, plan, async (sources) => {
+          // A same-component hold may have arrived after the account snapshot.
+          // Recollect once only when the snapshots visibly disagree.
+          const needsRefresh = sources.some(
+            ({ reservation, projectedHeldRaw }) =>
+              BigInt(projectedHeldRaw) >
+              BigInt(
+                account.cashAvailability.components.find(
+                  (entry) => entry.componentId === reservation.componentId,
+                )?.reservedRaw ?? "0",
+              ),
+          );
+          const quoteAccount = needsRefresh
+            ? await buildAccountValueReadModel({ pool: this.db, userId })
+            : account;
+          assertSharedFundingSourceCapacity(
+            quoteAccount,
+            userId,
+            sources,
+            sourceCapacityOptions(plan),
+          );
+        }),
       revalidateWithdrawalRecipient: async (ownerId, recipientId) => {
         await this.withdrawalRuntime.resolve(ownerId, recipientId);
       },
@@ -1045,12 +1079,12 @@ export class FundingPlanningRuntime {
           pool: this.db,
           userId,
         });
-        assertSharedFundingSourceCapacity(currentAccount, userId, sources, {
-          directWithdrawal:
-            plan.operation.purpose === "withdrawal" &&
-            plan.operation.supportMetadata?.adapterId ===
-              DIRECT_WITHDRAWAL_ADAPTER_ID,
-        });
+        assertSharedFundingSourceCapacity(
+          currentAccount,
+          userId,
+          sources,
+          sourceCapacityOptions(plan),
+        );
       },
       subjectLookupHmac: (subjectUserId) =>
         fundingSubjectLookupHmac(subjectUserId, lookupKey),

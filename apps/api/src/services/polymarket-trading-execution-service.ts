@@ -7244,6 +7244,10 @@ export async function submitPolymarketClientSignedOrder(input: {
   if (
     !(await venueLifecycleAllowsTradingAction(input.pool, "polymarket", side))
   ) {
+    input.log?.warn?.(
+      { side, reason: "venue_trading_disabled" },
+      "Polymarket order rejected before submission",
+    );
     return {
       ok: false,
       statusCode: 409,
@@ -7358,7 +7362,11 @@ export async function submitPolymarketClientSignedOrder(input: {
       input.body,
     );
   } catch (error) {
-    if (error instanceof PolymarketAssetContextError)
+    if (error instanceof PolymarketAssetContextError) {
+      input.log?.warn?.(
+        { side, reason: error.code },
+        "Polymarket order rejected before submission",
+      );
       return {
         ok: false,
         statusCode: 409,
@@ -7368,6 +7376,7 @@ export async function submitPolymarketClientSignedOrder(input: {
           code: error.code,
         },
       };
+    }
     throw error;
   }
   const normalizedOrder = normalizeOrderForPayload(order, side);
@@ -7433,6 +7442,10 @@ export async function submitPolymarketClientSignedOrder(input: {
         assetContext,
       });
       if (availability.availableRaw < requestedSharesRaw) {
+        input.log?.warn?.(
+          { side, reason: POLYMARKET_SELL_BALANCE_CHANGED_CODE },
+          "Polymarket order rejected before submission",
+        );
         return {
           ok: false,
           statusCode: 409,

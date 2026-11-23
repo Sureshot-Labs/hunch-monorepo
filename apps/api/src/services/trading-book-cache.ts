@@ -13,18 +13,34 @@ export function createTradingBookCache(
 ) {
   const entries = new Map<
     string,
-    { until: number; pending: boolean; promise: Promise<TradingBookSnapshot> }
+    {
+      until: number;
+      pending: boolean;
+      promise: Promise<TradingBookSnapshot>;
+      fallback?: { until: number; promise: Promise<TradingBookSnapshot> };
+    }
   >();
   return {
     clear: () => entries.clear(),
     load(
       key: string,
       fetchBook: () => Promise<unknown>,
+      loadOptions?: { fresh?: boolean },
     ): Promise<TradingBookSnapshot> {
       const startedAt = now();
       const previous = entries.get(key);
-      if (previous && (previous.pending || previous.until > startedAt))
+      if (previous?.pending) {
+        if (
+          !loadOptions?.fresh &&
+          previous.fallback &&
+          previous.fallback.until > startedAt
+        )
+          return previous.fallback.promise;
         return previous.promise;
+      }
+      if (previous && !loadOptions?.fresh && previous.until > startedAt)
+        return previous.promise;
+      if (previous) entries.delete(key);
       for (const [entryKey, entry] of entries)
         if (!entry.pending && entry.until <= startedAt)
           entries.delete(entryKey);
@@ -37,6 +53,7 @@ export function createTradingBookCache(
         until: startedAt + 2_000,
         pending: true,
         promise: undefined as unknown as Promise<TradingBookSnapshot>,
+        fallback: previous && previous.until > startedAt ? previous : undefined,
       };
       entry.promise = fetchBook()
         .then((payload) => {
@@ -85,11 +102,15 @@ export function createTradingBookCache(
           };
         })
         .catch((error: unknown) => {
-          if (entries.get(key) === entry) entries.delete(key);
+          if (entries.get(key) === entry) {
+            if (previous && previous.until > now()) entries.set(key, previous);
+            else entries.delete(key);
+          }
           throw error;
         })
         .finally(() => {
           entry.pending = false;
+          entry.fallback = undefined;
         });
       entries.set(key, entry);
       return entry.promise;

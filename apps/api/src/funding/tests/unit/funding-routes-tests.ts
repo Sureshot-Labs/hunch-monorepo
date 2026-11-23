@@ -16,7 +16,10 @@ import type {
 } from "../../domain/types.js";
 import type { PreparationResult } from "../../domain/contracts.js";
 import type { FundingOperationStep } from "../../persistence/funding-evidence-repository.js";
-import type { FundingOperationRow } from "../../persistence/funding-operation-repository.js";
+import {
+  FundingSourceCapacityChangedError,
+  type FundingOperationRow,
+} from "../../persistence/funding-operation-repository.js";
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
 import { WithdrawalDestinationError } from "../../execution/withdrawal-destination-runtime.js";
 import { FundingPlannerError } from "../../planner/money.js";
@@ -1159,6 +1162,42 @@ await test("volatile receive receipt review uses the authenticated receipt ident
       response.json().receipt.reviewQuotePlan.requestedDestinationAmount.raw,
       "900000",
     );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("funding capacity conflicts keep the legacy code and give safe recovery steps", async () => {
+  const reject = async () => {
+    throw new FundingSourceCapacityChangedError("internal capacity detail");
+  };
+  const app = await buildApp({ quote: reject, commit: reject });
+  try {
+    for (const [url, payload] of [
+      [
+        "/funding/quotes",
+        {
+          liquidityProjectionId: liquidity().liquidityProjectionId,
+          selectedSourceOptionId: "source_fixture_12345678",
+          confirmedSourceAmount: null,
+          requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
+        },
+      ],
+      [
+        "/funding/operations",
+        {
+          quoteId: quote().quoteId,
+          consentToken: quote().consentToken,
+          idempotencyKey: "capacity_conflict_12345678",
+        },
+      ],
+    ] as const) {
+      const response = await app.inject({ method: "POST", url, payload });
+      assert.equal(response.statusCode, 409);
+      assert.equal(response.json().code, "quote_invalidated");
+      assert.match(response.json().error, /Refresh your funding options/i);
+      assert.doesNotMatch(response.body, /internal capacity detail/);
+    }
   } finally {
     await app.close();
   }

@@ -57,6 +57,12 @@ export class FundingPersistenceError extends Error {
   }
 }
 
+export class FundingSourceCapacityChangedError extends FundingPersistenceError {
+  constructor(message: string) {
+    super("quote_invalidated", message);
+  }
+}
+
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 /**
@@ -979,11 +985,12 @@ function commitReservations(
   return reservations;
 }
 
-async function lockCommitSourceReservations(
+async function checkSourceReservationCapacity(
   client: Pick<PoolClient, "query">,
   userId: string,
   reservations: readonly FundingCommitReservation[],
   verifySharedSourceCapacity: FundingCommitInput["verifySharedSourceCapacity"],
+  phase: "quote" | "commit",
 ): Promise<void> {
   // commitReservations has already rejected duplicate component/mode pairs.
   const subtractReservations = reservations.filter(
@@ -1015,14 +1022,16 @@ async function lockCommitSourceReservations(
   )) {
     const reservation = source.reservations[0];
     if (!reservation) continue;
-    await client.query(
-      `
-        select pg_advisory_xact_lock(
-          hashtextextended($1, 0)
-        )
-      `,
-      [["funding-source-reservation", key].join(":")],
-    );
+    if (phase === "commit") {
+      await client.query(
+        `
+          select pg_advisory_xact_lock(
+            hashtextextended($1, 0)
+          )
+        `,
+        [["funding-source-reservation", key].join(":")],
+      );
+    }
     const conflict = await client.query<{
       raw_amount: string;
       component_id: string;
@@ -1047,7 +1056,7 @@ async function lockCommitSourceReservations(
               and observation.finality_status = 'finalized'
           )
         order by id
-        for update
+        ${phase === "commit" ? "for update" : ""}
       `,
       [userId, reservation.locationId, reservation.networkId, source.assetId],
     );
@@ -1063,8 +1072,7 @@ async function lockCommitSourceReservations(
               entry.sourceInputRawAmount !== entry.rawAmount),
         )
       ) {
-        throw new FundingPersistenceError(
-          "quote_invalidated",
+        throw new FundingSourceCapacityChangedError(
           "source reservation requires exclusive capacity",
         );
       }
@@ -1086,6 +1094,24 @@ async function lockCommitSourceReservations(
   }
   if (sharedSources.length > 0 && verifySharedSourceCapacity)
     await verifySharedSourceCapacity(sharedSources);
+}
+
+/** A read-only early rejection; commit still verifies under its source locks. */
+export function checkQuoteSourceReservations(
+  db: Pick<Pool, "query">,
+  userId: string,
+  plan: FundingCommitPlan,
+  verifySharedSourceCapacity: NonNullable<
+    FundingCommitInput["verifySharedSourceCapacity"]
+  >,
+): Promise<void> {
+  return checkSourceReservationCapacity(
+    db,
+    userId,
+    commitReservations(plan),
+    verifySharedSourceCapacity,
+    "quote",
+  );
 }
 
 async function insertCommitReservations(
@@ -1268,11 +1294,12 @@ export async function commitFundingOperationInTransaction(
   assertQuoteMatchesCommit(quote, input, preflightNow);
   await input.verifyCurrentFacts?.(client, quote);
   const reservations = commitReservations(input.plan);
-  await lockCommitSourceReservations(
+  await checkSourceReservationCapacity(
     client,
     input.userId,
     reservations,
     input.verifySharedSourceCapacity,
+    "commit",
   );
   const { rows: clockRows } = await client.query<{ now: Date }>(
     "select clock_timestamp() as now",

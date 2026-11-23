@@ -8,5 +8,7 @@ const cache = createTradingBookCache(undefined, undefined, {
 });
 // Outcome asset IDs identify immutable instruments. Callers still validate the
 // market's CURRENT asset generation on every request, outside this public cache.
-export const loadPolymarketBook = (tokenId: string) =>
-  cache.load(tokenId, () => polymarketClient.getOrderBook(tokenId));
+export const loadPolymarketBook = (
+  tokenId: string,
+  options?: { fresh?: boolean },
+) => cache.load(tokenId, () => polymarketClient.getOrderBook(tokenId), options);
