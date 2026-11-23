@@ -81,7 +81,10 @@ import {
   matchesCanonicalMarketIdentity,
 } from "./market-context-revision.js";
 import { FundingPlannerError } from "./money.js";
-import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
+import {
+  WalletPreparationRuntimeService,
+  type DestinationInspectionTrace,
+} from "../preparation/runtime-service.js";
 import { PreparationContractError } from "../preparation/core-adapter.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { sessionSourceAccount } from "./session-source-account.js";
@@ -360,22 +363,23 @@ export class FundingPlanningRuntime {
   async destinations(
     userId: string,
     query: FundingDestinationQuery,
+    trace?: DestinationInspectionTrace,
   ): Promise<readonly FundingDestinationOption[]> {
-    return (await this.destinationAccess(userId, query)).options;
+    return (await this.destinationAccess(userId, query, trace)).options;
   }
 
   async destinationAccess(
     userId: string,
     query: FundingDestinationQuery,
+    trace?: DestinationInspectionTrace,
   ): Promise<
     Readonly<{
       options: readonly FundingDestinationOption[];
       policyDisabledOptions: readonly FundingDestinationOption[];
     }>
   > {
-    const [resolvedPolicy, rawOptions] = await Promise.all([
-      resolveFundingPolicy(this.db),
-      this.preparationRuntime.listDestinationOptions({
+    const inspection = this.preparationRuntime.listDestinationOptions(
+      {
         accountId: userId,
         purpose: query.purpose,
         marketContextId: query.marketContextId ?? null,
@@ -383,7 +387,15 @@ export class FundingPlanningRuntime {
         positionActionRef: query.positionActionRef ?? null,
         compatibleVenueBindingOptionIds: null,
         controllerWalletRef: query.controllerWalletRef ?? null,
-      }),
+      },
+      trace,
+    );
+    if (query.purpose === "sell") {
+      return { options: await inspection, policyDisabledOptions: [] };
+    }
+    const [resolvedPolicy, rawOptions] = await Promise.all([
+      resolveFundingPolicy(this.db),
+      inspection,
     ]);
     const options: FundingDestinationOption[] = [];
     const policyDisabledOptions: FundingDestinationOption[] = [];

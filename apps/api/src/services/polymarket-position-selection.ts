@@ -64,5 +64,6 @@ export async function loadOwnedPolymarketPositionSelection(
     tokenId: row.token_id,
     assetContext: context,
     positionRef: input.positionRef,
+    ownerAddress: row.wallet_address,
   };
 }

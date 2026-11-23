@@ -556,6 +556,68 @@ await test("owner-bound redemption inspects the canonical historical owner", asy
   assert.equal(resolved.frozen.preparation.binding.accountRef, exactOwner);
 });
 
+await test("Polymarket SELL probes only the frozen ledger's operator approvals", async () => {
+  const conditionId = `0x${"3".repeat(64)}`;
+  const protocol = resolvePolymarketMarketAssets({
+    version: "v1",
+    conditionId,
+    clobTokenIds: ["7", "8"],
+    outcomes: ["YES", "NO"],
+    negRisk: true,
+  });
+  const context = buildPolymarketAssetContext(market.id, protocol, "7");
+  const owner = wallets[0].walletAddress;
+  const resolved =
+    walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+      venue: "polymarket",
+      market,
+      requestedMarketClass: "neg_risk",
+      assetContext: context,
+    });
+  const reads: {
+    contractAddress: string;
+    owner: string;
+    operator: string;
+    bypassCache?: boolean;
+  }[] = [];
+  const adapterAddress = wallets[1].walletAddress;
+  const approve =
+    walletPreparationRuntimeTestHooks.inspectPolymarketSellApprovals;
+  assert.deepEqual(
+    await approve(
+      { ...resolved, adapterAddress },
+      owner,
+      true,
+      async (request) => {
+        const { contractAddress, owner, operator, bypassCache } = request;
+        reads.push({ contractAddress, owner, operator, bypassCache });
+        return operator === context.exchangeAddress;
+      },
+    ),
+    { exchange: true, adapter: false },
+  );
+  assert.deepEqual(reads, [
+    {
+      contractAddress: context.positionContract,
+      owner,
+      operator: context.exchangeAddress,
+      bypassCache: true,
+    },
+    {
+      contractAddress: context.positionContract,
+      owner,
+      operator: adapterAddress,
+      bypassCache: true,
+    },
+  ]);
+  assert.equal(
+    await approve(resolved, owner, false, async () => {
+      throw new Error("offline");
+    }),
+    null,
+  );
+});
+
 await test("Polymarket inspection preserves an exact signer-held position owner", () => {
   const signer = wallets[0].walletAddress;
   const deposit = wallets[1].walletAddress;

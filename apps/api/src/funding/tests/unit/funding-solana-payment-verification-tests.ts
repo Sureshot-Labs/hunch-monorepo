@@ -13,9 +13,11 @@ import {
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import {
+  createSolanaFundingProofFetch,
   prepareFundingSolanaPayment,
   type RelaySponsorRedis,
 } from "../../execution/relay-solana-sponsorship.js";
+import { SolanaFundingPaymentError } from "../../execution/solana-funding-payment.js";
 import { DIRECT_SOLANA_WITHDRAWAL_FEE_ONLY_POLICY } from "../../execution/direct-solana-sponsorship-policy.js";
 import {
   buildExactSolWithdrawalAction,
@@ -42,6 +44,52 @@ import type {
 } from "../../domain/types.js";
 
 const sender = Keypair.generate().publicKey;
+{
+  const outcomes = [503, 200, 429];
+  const failures: string[] = [];
+  let retries = 0;
+  let calls = 0;
+  const controller = new AbortController();
+  const wrapped = createSolanaFundingProofFetch({
+    signal: controller.signal,
+    allowRetry: true,
+    fetcher: (async () => {
+      calls += 1;
+      return new Response(null, { status: outcomes.shift() });
+    }) as typeof fetch,
+    onFailure: (code) => failures.push(code),
+    onRetry: () => {
+      retries += 1;
+    },
+  });
+  const read = { method: "POST", body: '{"method":"getMultipleAccounts"}' };
+  assert.equal((await wrapped("https://rpc.invalid", read)).status, 200);
+  assert.equal((await wrapped("https://rpc.invalid", read)).status, 429);
+  assert.equal(retries, 1, "The whole proof shares one retry");
+  assert.equal(calls, 3);
+  controller.abort();
+  await assert.rejects(wrapped("https://rpc.invalid", read));
+  assert.equal(calls, 3, "The deadline also gates the next HTTP call");
+  assert.deepEqual(failures, ["rpc_throttled", "rpc_timeout"]);
+  const nonRetryable = createSolanaFundingProofFetch({
+    signal: new AbortController().signal,
+    allowRetry: true,
+    fetcher: (async () => new Response(null, { status: 503 })) as typeof fetch,
+    onFailure: () => {},
+    onRetry: () => {
+      throw new Error("never retry a non-proof RPC");
+    },
+  });
+  assert.equal(
+    (
+      await nonRetryable("https://rpc.invalid", {
+        method: "POST",
+        body: '{"method":"sendTransaction"}',
+      })
+    ).status,
+    503,
+  );
+}
 const receiver = Keypair.generate().publicKey;
 const feePayer = Keypair.generate().publicKey;
 const asset = {
@@ -126,6 +174,7 @@ let budgetAllowed = true;
 let charged = 0;
 let failRpc = false;
 let failSimulation = false;
+let tokenAccountRent = 2039280;
 const mint = new PublicKey(RELAY_PINNED_ASSETS.solanaUsdc);
 const sourceAta = getAssociatedTokenAddressSync(mint, sender);
 const relayAta = getAssociatedTokenAddressSync(mint, feePayer);
@@ -186,7 +235,7 @@ const connection = {
       null,
     ],
   }),
-  getMinimumBalanceForRentExemption: async () => 2039280,
+  getMinimumBalanceForRentExemption: async () => tokenAccountRent,
   simulateTransaction: async () => ({
     value: {
       err: failSimulation ? "AccountNotFound" : null,
@@ -364,6 +413,65 @@ try {
   assert.ok(activeAction);
   assert.ok(activeAttempt);
   assert.ok(input.dependencies);
+  const scopedFacts: FundingLifecycleFacts = {
+    ...facts,
+    actions: [
+      {
+        ...activeAction,
+        attempts: [
+          {
+            ...activeAttempt,
+            embeddedPreparation: {
+              attemptId: "scoped-attempt",
+              expiresAt: new Date(now.getTime() + 60_000),
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const scopedInput = {
+    ...input,
+    dependencies: {
+      ...input.dependencies,
+      loadLifecycle: async () => ({
+        facts: scopedFacts,
+        lifecycle: deriveFundingLifecycle(scopedFacts),
+      }),
+    },
+  };
+  const chargedBeforeScopeCheck = charged;
+  const scopeRejected = (error: unknown) =>
+    error instanceof SolanaFundingPaymentError &&
+    error.diagnosticReason === "scoped_authorization_required";
+  await assert.rejects(prepareFundingSolanaPayment(scopedInput), scopeRejected);
+  await assert.rejects(
+    prepareFundingSolanaPayment({ ...scopedInput, execute: true }),
+    scopeRejected,
+  );
+  await assert.rejects(
+    prepareFundingSolanaPayment({
+      ...scopedInput,
+      execute: true,
+      fundingContext: {
+        operationId: "operation",
+        stepId: "step",
+        attemptId: "another-attempt",
+      },
+    }),
+    scopeRejected,
+  );
+  assert.equal(charged, chargedBeforeScopeCheck);
+  assert.ok(
+    await prepareFundingSolanaPayment({
+      ...scopedInput,
+      fundingContext: {
+        operationId: "operation",
+        stepId: "step",
+        attemptId: "scoped-attempt",
+      },
+    }),
+  );
   const uncertainFacts: FundingLifecycleFacts = {
     ...facts,
     actions: [
@@ -594,6 +702,14 @@ try {
   await verifyRoute(relayAction);
   nativeBalance = 10000000;
   await verifyRoute(relayAction);
+  tokenAccountRent = 0;
+  await assert.rejects(
+    verifyRoute(relayAction),
+    (error) =>
+      error instanceof SolanaFundingPaymentError &&
+      error.diagnosticReason === "fee_only_rent_unavailable",
+  );
+  tokenAccountRent = 2039280;
   frozen = true;
   await assert.rejects(verifyRoute(relayAction), /existing-account USDC/);
   frozen = false;
