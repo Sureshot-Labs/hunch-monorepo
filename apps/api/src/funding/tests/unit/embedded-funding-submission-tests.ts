@@ -13,6 +13,8 @@ import {
   assertEmbeddedExecutionScope,
   assertEmbeddedFundingAuthorizationSignatures,
   embeddedFundingExecutionKey,
+  isClosedUnbroadcastEmbeddedSolanaPreparation,
+  EMBEDDED_PRE_SUBMIT_LEASE_EXPIRED,
   parseEmbeddedFundingSubmission,
   validateEmbeddedFundingPayload,
   type EmbeddedFundingPayload,
@@ -43,6 +45,48 @@ const lease: EmbeddedFundingSubmission = {
   signer,
   payer: "privy_sponsor",
 };
+{
+  const closed = {
+    executorId: "wallet_profile_svm_v1",
+    actionKind: "svm_transaction",
+    outcome: "cancelled",
+    broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    now: new Date("2026-09-22T12:00:01Z"),
+    actualCosts: {
+      embeddedSubmission: { ...lease, phase: "closed" },
+      reasonCode: EMBEDDED_PRE_SUBMIT_LEASE_EXPIRED,
+    },
+  };
+  assert.equal(isClosedUnbroadcastEmbeddedSolanaPreparation(closed), true);
+  for (const incomplete of [
+    { ...closed, outcome: "ambiguous" },
+    { ...closed, broadcastMayHaveOccurred: true },
+    { ...closed, referenceKind: "signature" },
+    { ...closed, now: new Date("2026-09-22T11:59:59Z") },
+    {
+      ...closed,
+      actualCosts: {
+        ...closed.actualCosts,
+        reasonCode: "client_execution_failed",
+      },
+    },
+    {
+      ...closed,
+      actualCosts: {
+        ...closed.actualCosts,
+        embeddedSubmission: {
+          ...closed.actualCosts.embeddedSubmission,
+          admittedAt: lease.expiresAt,
+        },
+      },
+    },
+  ])
+    assert.equal(
+      isClosedUnbroadcastEmbeddedSolanaPreparation(incomplete),
+      false,
+    );
+}
 const payload: Extract<EmbeddedFundingPayload, { kind: "ethereum" }> = {
   kind: "ethereum",
   signer,

@@ -18,6 +18,7 @@ import {
   relaySolanaActionMessage,
   RELAY_SOLANA_FEE_ONLY_POLICY,
   isRelaySolanaSponsorAction,
+  type RelaySolanaFeeOnlyFailure,
 } from "../../funding-providers/relay/solana-sponsorship.js";
 import { estimateRelaySplGas } from "../../funding-providers/relay/solana-gas.js";
 import {
@@ -37,6 +38,7 @@ import {
 import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.js";
 import { inspectSolanaWithdrawalCost } from "./solana-withdrawal-cost.js";
 import type { JsonValue, WalletExecutionProfile } from "../domain/types.js";
+import type { EmbeddedFundingContext } from "./embedded-funding-submission-contract.js";
 
 export type RelaySponsorRedis = {
   get(key: string): Promise<string | null>;
@@ -107,12 +109,88 @@ export function relaySponsorIdempotencyKey(
     .digest("hex");
 }
 
+type ProofRpcFailure =
+  | "rpc_timeout"
+  | "rpc_transport"
+  | "rpc_throttled"
+  | "rpc_unavailable"
+  | "rpc_rejected";
+
+/** One read retry across the whole proof, never a retry of the signed submission. */
+export function createSolanaFundingProofFetch(input: {
+  signal: AbortSignal;
+  allowRetry: boolean;
+  onFailure: (reason: ProofRpcFailure) => void;
+  onRetry: () => void;
+  fetcher?: typeof fetch;
+}): typeof fetch {
+  const fetcher = input.fetcher ?? fetch;
+  let retryAvailable = input.allowRetry;
+  const canRetry = (body: RequestInit["body"]) => {
+    if (!retryAvailable || input.signal.aborted) return false;
+    if (typeof body !== "string") return false;
+    let method: unknown;
+    try {
+      method = (JSON.parse(body) as { method?: unknown } | null)?.method;
+    } catch {
+      return false;
+    }
+    if (
+      typeof method !== "string" ||
+      ![
+        "getAccountInfo",
+        "getMultipleAccounts",
+        "getMinimumBalanceForRentExemption",
+        "getFeeForMessage",
+        "getLatestBlockhash",
+        "simulateTransaction",
+      ].includes(method)
+    )
+      return false;
+    retryAvailable = false;
+    input.onRetry();
+    return true;
+  };
+  return async (url, init) => {
+    for (;;) {
+      if (input.signal.aborted) {
+        input.onFailure("rpc_timeout");
+        throw input.signal.reason;
+      }
+      let response: Response;
+      try {
+        response = await fetcher(url, { ...init, signal: input.signal });
+      } catch (error) {
+        if (error instanceof TypeError && canRetry(init?.body)) continue;
+        input.onFailure(input.signal.aborted ? "rpc_timeout" : "rpc_transport");
+        throw error;
+      }
+      if (response.ok) return response;
+      const transient = [408, 429, 500, 502, 503, 504].includes(
+        response.status,
+      );
+      if (!transient || !canRetry(init?.body)) {
+        input.onFailure(
+          response.status === 429
+            ? "rpc_throttled"
+            : transient
+              ? "rpc_unavailable"
+              : "rpc_rejected",
+        );
+        return response;
+      }
+      await response.body?.cancel().catch(() => undefined);
+    }
+  };
+}
+
 /**
  * This lookup is the authority boundary. The client ID only locates a candidate;
  * ownership, committed fingerprint, live lifecycle and the whole message must
  * all match. No quote is fetched in response to untrusted execution bytes.
  */
 export async function prepareFundingSolanaPayment(input: {
+  traceRequestId?: string;
   db: Pick<Pool, "query">;
   redis: RelaySponsorRedis | null;
   userId: string;
@@ -120,6 +198,7 @@ export async function prepareFundingSolanaPayment(input: {
   requestId: string;
   transaction: string;
   execute?: boolean;
+  fundingContext?: EmbeddedFundingContext;
   expectedBinding?: SolanaFundingPaymentBinding;
   requestedSponsor: boolean;
   dependencies?: {
@@ -133,6 +212,10 @@ export async function prepareFundingSolanaPayment(input: {
   payment: VerifiedSolanaFundingPayment;
 } | null> {
   let stage = "lookup";
+  let diagnosticReason: string | undefined;
+  let rpcFailure: ProofRpcFailure | undefined;
+  let rpcRetries = 0;
+  const startedAt = Date.now();
   let traceBinding: SolanaFundingPaymentBinding | undefined;
   try {
     const { rows } = await input.db.query<{
@@ -193,6 +276,18 @@ export async function prepareFundingSolanaPayment(input: {
     const attempt = attempts?.[0];
     if (!projected || attempts?.length !== 1 || !attempt)
       throw new Error("Relay sponsorship has no current funding attempt.");
+    const scope = input.fundingContext;
+    if (
+      (attempt.embeddedPreparation || scope) &&
+      (scope?.operationId !== row.operation_id ||
+        scope.stepId !== row.step_id ||
+        scope.attemptId !== attempt.embeddedPreparation?.attemptId)
+    )
+      throw new SolanaFundingPaymentError(
+        "funding_payment_mismatch",
+        "Funding authorization requires its scoped submission context.",
+        "scoped_authorization_required",
+      );
     const binding: SolanaFundingPaymentBinding = {
       operationId: row.operation_id,
       stepId: row.step_id,
@@ -233,14 +328,39 @@ export async function prepareFundingSolanaPayment(input: {
       action.addressLookupTables.length > 4
     )
       throw new Error("Relay sponsorship RPC unavailable.");
-    const signal = AbortSignal.timeout(4000);
+    const remaining =
+      Math.min(
+        facts?.expiresAt?.getTime() ?? Infinity,
+        attempt.embeddedPreparation?.expiresAt.getTime() ?? Infinity,
+      ) - Date.now();
+    if (!input.dependencies && remaining <= 0)
+      throw new SolanaFundingPaymentError(
+        "funding_payment_unavailable",
+        "Funding authorization expired. Nothing was submitted.",
+        "action_deadline",
+      );
+    const signal = AbortSignal.timeout(Math.max(1, Math.min(4_000, remaining)));
     const connection =
       input.dependencies?.connection ??
       createSolanaRpcConnection(rpcUrl ?? "", {
         commitment: "confirmed",
         disableRetryOnRateLimit: true,
-        fetch: (url, init) => fetch(url, { ...init, signal }),
+        fetch: createSolanaFundingProofFetch({
+          signal,
+          allowRetry:
+            input.execute === true &&
+            sponsored &&
+            row.provider_id === "relay" &&
+            Boolean(attempt.embeddedPreparation),
+          onFailure: (reason) => {
+            rpcFailure = reason;
+          },
+          onRetry: () => {
+            rpcRetries += 1;
+          },
+        }),
       });
+    diagnosticReason = "lookup_table_read";
     const lookupTables = await Promise.all(
       action.addressLookupTables.map(async (address) => {
         const table = await connection.getAddressLookupTable(
@@ -251,6 +371,7 @@ export async function prepareFundingSolanaPayment(input: {
         return table.value;
       }),
     );
+    diagnosticReason = "transaction_decode";
     const transaction = VersionedTransaction.deserialize(
       Buffer.from(input.transaction, "base64"),
     );
@@ -340,6 +461,7 @@ export async function prepareFundingSolanaPayment(input: {
       )
         throw new Error("Direct withdrawal sponsorship changed");
     }
+    if (!direct) diagnosticReason = "exact_message_mismatch";
     if (
       !direct &&
       !matchesRelaySolanaSponsorTransaction({
@@ -352,21 +474,36 @@ export async function prepareFundingSolanaPayment(input: {
       throw new Error(
         "Relay sponsorship transaction does not match its funding action.",
       );
-    if (
-      !direct &&
-      sponsored &&
-      (row.action_validation_result.sponsorshipPolicyId !==
-        RELAY_SOLANA_FEE_ONLY_POLICY ||
+    if (!direct && sponsored) {
+      if (
+        row.action_validation_result.sponsorshipPolicyId !==
+        RELAY_SOLANA_FEE_ONLY_POLICY
+      )
+        throw new SolanaFundingPaymentError(
+          "funding_payment_unavailable",
+          "Relay sponsorship requires an existing-account USDC transfer.",
+          "fee_only_policy_mismatch",
+        );
+      diagnosticReason = "fee_only_rpc_proof";
+      let rejectedProof: RelaySolanaFeeOnlyFailure | undefined;
+      if (
         !(await proveRelaySolanaFeeOnly({
           connection,
           action,
           signer: input.signer,
-        })))
-    )
-      throw new Error(
-        "Relay sponsorship requires an existing-account USDC transfer.",
-      );
+          onFailure: (reason) => {
+            rejectedProof = reason;
+          },
+        }))
+      )
+        throw new SolanaFundingPaymentError(
+          "funding_payment_unavailable",
+          "Relay sponsorship requires an existing-account USDC transfer.",
+          rejectedProof ?? diagnosticReason,
+        );
+    }
     if (!direct && !sponsored) {
+      diagnosticReason = "user_fee_check";
       const gas = await estimateRelaySplGas({
         connection,
         transaction,
@@ -389,6 +526,7 @@ export async function prepareFundingSolanaPayment(input: {
     );
     const prefix = SOLANA_SPONSOR_BUDGET_PREFIX;
     stage = "prepared_identity";
+    diagnosticReason = undefined;
     const preparedKey = `${prefix}prepared:${idempotencyKey}`;
     // First accepted transaction bytes win. A new client key/blockhash cannot
     // obtain an independent Privy idempotency identity for this funding action.
@@ -445,12 +583,21 @@ export async function prepareFundingSolanaPayment(input: {
         : new SolanaFundingPaymentError(
             "funding_payment_unavailable",
             localMessage,
+            stage === "message_and_cost"
+              ? (rpcFailure ?? diagnosticReason)
+              : undefined,
           );
     console.warn("[funding-solana] payment verification failed", {
-      ...traceBinding,
-      actionId: input.requestId,
+      requestId: input.traceRequestId,
+      operationId:
+        traceBinding?.operationId ?? input.expectedBinding?.operationId,
+      stepId: traceBinding?.stepId ?? input.expectedBinding?.stepId,
       stage,
       code: failure.code,
+      diagnosticReason: failure.diagnosticReason ?? stage,
+      execute: input.execute === true,
+      rpcRetries,
+      elapsedMs: Date.now() - startedAt,
     });
     throw failure;
   }

@@ -426,6 +426,7 @@ try {
       inspections.at(-1)?.resolvedMarketContext?.assetContext,
       position.assetContext,
     );
+    assert.equal(inspections.at(-1)?.requiredOwnerAccountRef, wallet);
     assert.equal(
       inspections.at(-1)?.resolvedMarketContext?.exchangeAddress,
       position.assetContext?.exchangeAddress,
@@ -487,6 +488,7 @@ try {
       position.assetContext,
       "a private position UUID preserves its historical ledger and side",
     );
+    assert.equal(selected?.ownerAddress.toLowerCase(), wallet.toLowerCase());
     assert.equal(
       await loadOwnedPolymarketPositionSelection(db, {
         userId: randomUUID(),

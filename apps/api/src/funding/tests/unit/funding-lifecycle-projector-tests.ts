@@ -775,6 +775,8 @@ function facts(
   const stopped = deriveFundingLifecycle(safelyClosed);
   assert.equal(stopped.status, "failed");
   assert.equal(stopped.progressStage, "terminal");
+  assert.equal(stopped.errorCode, "funding_partial_settled");
+  assert.deepEqual(stopped.partialSettledDestination, destination);
   assert.equal(
     stopped.safety.terminal,
     true,

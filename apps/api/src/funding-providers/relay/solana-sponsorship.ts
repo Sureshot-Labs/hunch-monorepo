@@ -17,6 +17,19 @@ import { createSolanaRpcConnection } from "../../services/rpc-client-factory.js"
 
 export const RELAY_SOLANA_FEE_ONLY_POLICY = "relay_solana_usdc_fee_only_v1";
 
+export type RelaySolanaFeeOnlyFailure =
+  | "fee_only_action_shape"
+  | "fee_only_destination_identity"
+  | "fee_only_signer_account"
+  | "fee_only_rent_unavailable"
+  | "fee_only_token_account_missing_or_rent"
+  | "fee_only_token_account_invalid"
+  | "fee_only_token_state"
+  | "fee_only_fee_unavailable"
+  | "fee_only_fee_out_of_policy"
+  | "fee_only_simulation_failed"
+  | "fee_only_unexpected_cpi";
+
 /** Narrow server-validated capability; independent kill switch, not Kalshi's. */
 export function relaySolanaSponsorshipEnabled(): boolean {
   const setting = process.env.FUNDING_RELAY_SOLANA_SPONSORSHIP_ENABLED;
@@ -103,14 +116,20 @@ export async function proveRelaySolanaFeeOnly(input: {
   connection: Connection;
   action: SvmTransactionAction;
   signer: string;
+  onFailure?: (reason: RelaySolanaFeeOnlyFailure) => void;
 }): Promise<boolean> {
-  if (!isRelaySolanaSponsorAction(input.action, input.signer)) return false;
+  const reject = (reason: RelaySolanaFeeOnlyFailure): false => {
+    input.onFailure?.(reason);
+    return false;
+  };
+  if (!isRelaySolanaSponsorAction(input.action, input.signer))
+    return reject("fee_only_action_shape");
   const instruction = input.action.instructions[0];
   const sourceAddress = instruction?.accounts[5]?.address;
   const vaultAddress = instruction?.accounts[3]?.address;
   const destinationAddress = instruction?.accounts[6]?.address;
   if (!instruction || !sourceAddress || !vaultAddress || !destinationAddress)
-    return false;
+    return reject("fee_only_action_shape");
   const source = new PublicKey(sourceAddress);
   const vault = new PublicKey(vaultAddress);
   const destination = new PublicKey(destinationAddress);
@@ -120,7 +139,7 @@ export async function proveRelaySolanaFeeOnly(input: {
       getAssociatedTokenAddressSync(new PublicKey(SOLANA_USDC), vault, true),
     )
   )
-    return false;
+    return reject("fee_only_destination_identity");
   const before = await input.connection.getMultipleAccountsInfoAndContext(
     [source, destination, new PublicKey(input.signer)],
     "confirmed",
@@ -129,6 +148,8 @@ export async function proveRelaySolanaFeeOnly(input: {
     165,
     "confirmed",
   );
+  if (!Number.isSafeInteger(rent) || rent <= 0)
+    return reject("fee_only_rent_unavailable");
   const [sourceInfo, destinationInfo, signerInfo] = before.value;
   // A token authority need not hold SOL or have a materialized system account:
   // the separate payer pays the fee. Existing token accounts and the exact
@@ -139,16 +160,22 @@ export async function proveRelaySolanaFeeOnly(input: {
       signerInfo.executable ||
       signerInfo.data.length !== 0)
   )
-    return false;
+    return reject("fee_only_signer_account");
   if (
     !sourceInfo ||
     !destinationInfo ||
     sourceInfo.lamports < rent ||
     destinationInfo.lamports < rent
   )
-    return false;
-  const sourceToken = unpackAccount(source, sourceInfo);
-  const destinationToken = unpackAccount(destination, destinationInfo);
+    return reject("fee_only_token_account_missing_or_rent");
+  let sourceToken: ReturnType<typeof unpackAccount>;
+  let destinationToken: ReturnType<typeof unpackAccount>;
+  try {
+    sourceToken = unpackAccount(source, sourceInfo);
+    destinationToken = unpackAccount(destination, destinationInfo);
+  } catch {
+    return reject("fee_only_token_account_invalid");
+  }
   const amount = Buffer.from(
     instruction.data.replace(/^0x/, ""),
     "hex",
@@ -169,7 +196,7 @@ export async function proveRelaySolanaFeeOnly(input: {
     destinationToken.closeAuthority !== null ||
     destinationToken.delegate !== null
   )
-    return false;
+    return reject("fee_only_token_state");
   const latest = await input.connection.getLatestBlockhash("confirmed");
   const message = relaySolanaActionMessage(
     input.action,
@@ -187,18 +214,20 @@ export async function proveRelaySolanaFeeOnly(input: {
       innerInstructions: true,
     }),
   ]);
-  if (!fee.value || fee.value > 15_000 || simulation.value.err) return false;
+  if (!fee.value) return reject("fee_only_fee_unavailable");
+  if (fee.value > 15_000) return reject("fee_only_fee_out_of_policy");
+  if (simulation.value.err) return reject("fee_only_simulation_failed");
   const calls = simulation.value.innerInstructions?.flatMap(
     (group) => group.instructions,
   );
-  if (calls?.length !== 1) return false;
+  if (calls?.length !== 1) return reject("fee_only_unexpected_cpi");
   const call = calls[0];
   if (
     !call ||
     !("parsed" in call) ||
     call.programId.toBase58() !== sourceInfo.owner.toBase58()
   )
-    return false;
+    return reject("fee_only_unexpected_cpi");
   const parsed = call.parsed as {
     type?: string;
     info?: {
@@ -210,12 +239,13 @@ export async function proveRelaySolanaFeeOnly(input: {
     };
   };
   return (
-    parsed.type === "transferChecked" &&
-    parsed.info?.authority === input.signer &&
-    parsed.info.source === source.toBase58() &&
-    parsed.info.destination === destination.toBase58() &&
-    parsed.info.mint === SOLANA_USDC &&
-    parsed.info.tokenAmount?.amount === amount.toString()
+    (parsed.type === "transferChecked" &&
+      parsed.info?.authority === input.signer &&
+      parsed.info.source === source.toBase58() &&
+      parsed.info.destination === destination.toBase58() &&
+      parsed.info.mint === SOLANA_USDC &&
+      parsed.info.tokenAmount?.amount === amount.toString()) ||
+    reject("fee_only_unexpected_cpi")
   );
 }
 

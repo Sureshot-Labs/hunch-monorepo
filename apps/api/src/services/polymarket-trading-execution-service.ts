@@ -1337,7 +1337,7 @@ function extractPolymarketUpstreamMessage(payload: unknown): string | null {
   return null;
 }
 
-function isPolymarketInvalidApiKeyResponse(inputs: {
+export function isPolymarketInvalidApiKeyResponse(inputs: {
   status: number;
   payload: unknown;
 }): boolean {
@@ -7943,11 +7943,20 @@ export async function submitPolymarketClientSignedOrder(input: {
     input.log?.warn?.(
       {
         upstreamStatus: upstream.status,
-        upstreamMessage,
-        upstreamPayload: upstream.payload,
-        signer,
-        funder,
-        tokenId: orderTokenId,
+        reason: tradingPaused
+          ? "trading_paused"
+          : isPolymarketDepositWalletRequiredMessage(upstreamMessage)
+            ? "deposit_wallet_required"
+            : /FOK_ORDER_NOT_FILLED_ERROR|(?:cannot|can't|couldn't|could not) be fully filled|no orders found to match/i.test(
+                  upstreamMessage ?? "",
+                )
+              ? "fok_no_fill"
+              : /INVALID_ORDER_NOT_ENOUGH_BALANCE|(?:not enough|insufficient) (?:balance|allowance)/i.test(
+                    upstreamMessage ?? "",
+                  )
+                ? "insufficient_balance_or_allowance"
+                : "upstream_rejected",
+        side,
         orderType,
       },
       "Polymarket order placement upstream failed",

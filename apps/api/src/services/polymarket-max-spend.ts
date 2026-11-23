@@ -184,7 +184,7 @@ export function polymarketPositionLockKey(
 }
 
 export function computePolymarketClobOpenPositionLocks(inputs: {
-  orders: unknown[];
+  orders: readonly unknown[];
   wallet: string;
   conditionId?: string | null;
 }): Map<string, bigint> {

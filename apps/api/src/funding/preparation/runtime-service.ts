@@ -30,11 +30,23 @@ import {
   resolveLimitlessMarketAdapter,
 } from "../../services/limitless-market-contracts.js";
 import { fetchLimitlessOnchainSnapshot } from "../../services/limitless-onchain.js";
-import { fetchOpenOrderCollateralLocks } from "../../services/open-order-collateral.js";
 import {
+  fetchOpenOrderCollateralLocks,
+  fetchPolymarketOpenOrderPositionLocks,
+} from "../../services/open-order-collateral.js";
+import {
+  extractOrderArray,
   polymarketL2Request,
   type PolymarketL2Credentials,
 } from "../../services/polymarket-clob-l2.js";
+import {
+  computePolymarketClobOpenPositionLocks,
+  polymarketPositionLockKey,
+} from "../../services/polymarket-max-spend.js";
+import {
+  fetchErc1155BalancesByOwner,
+  fetchErc1155IsApprovedForAll,
+} from "../../services/polygon-rpc.js";
 import {
   inspectPolymarketDepositWallet,
   type PolymarketDepositWalletDerivation,
@@ -46,6 +58,7 @@ import {
 import {
   fetchPolymarketAccountRoute,
   fetchPolymarketMaxSpendLiveOpenOrderLocks,
+  isPolymarketInvalidApiKeyResponse,
   resolvePolymarketFunderExecutionKindForMaxSpend,
   resolvePolymarketMaxSpendFunds,
   type PolymarketMaxSpendOnchainSnapshot,
@@ -126,6 +139,13 @@ const MAX_APPROVAL = (1n << 255n).toString();
 
 type RuntimeVenue = "limitless" | "polymarket";
 type UserWalletLoader = (accountId: string) => Promise<readonly UserWallet[]>;
+export type DestinationInspectionTrace = {
+  marketResolved?: boolean;
+  attempted?: number;
+  failed?: number;
+  failureCodes?: readonly string[];
+  positionTransferRequired?: boolean;
+};
 
 type RuntimeMarketContext = Readonly<{
   assetContext?: PolymarketAssetContext;
@@ -677,6 +697,36 @@ function runtimeMarketContextFromMarket(input: {
   };
 }
 
+async function inspectPolymarketSellApprovals(
+  context: RuntimeMarketContext,
+  owner: string,
+  forceFresh: boolean,
+  readApproval = fetchErc1155IsApprovedForAll,
+) {
+  const asset = context.assetContext;
+  if (!asset || !context.evidence.resolved) return null;
+  const approval = (operator: string) =>
+    readApproval({
+      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
+      contractAddress: asset.positionContract,
+      owner,
+      operator,
+      bypassCache: forceFresh,
+    });
+  try {
+    const [exchange, adapter] = await Promise.all([
+      approval(asset.exchangeAddress),
+      asset.protocolVersion === "v1" && asset.negRisk && context.adapterAddress
+        ? approval(context.adapterAddress)
+        : Promise.resolve(false),
+    ]);
+    return { exchange, adapter };
+  } catch {
+    return null;
+  }
+}
+
 async function loadRuntimeMarketContext(input: {
   db: Pool;
   venue: RuntimeVenue;
@@ -813,11 +863,15 @@ async function inspectPolymarketClob(input: {
   signatureType: number;
   walletDeployed: boolean;
   walletTopology: PolymarketRuntimeEvidence["topology"];
+  sell?: boolean;
+  sellConditionId?: string;
+  sellAssetId?: string;
 }): Promise<{
   credentials: RuntimeCredentialEvidence;
   l2Credentials: PolymarketL2Credentials | null;
   collateralVisible: boolean;
   safeBalanceRaw: string | null;
+  sellOrders?: readonly unknown[];
 }> {
   const credentials =
     input.credentials === undefined
@@ -853,6 +907,21 @@ async function inspectPolymarketClob(input: {
     apiSecret: credentials.apiSecret,
     apiPassphrase: credentials.apiPassphrase,
   };
+  if (input.sell && !input.sellConditionId) {
+    return {
+      credentials: {
+        present: true,
+        boundToExactWallet: bound,
+        verified: false,
+        observedAt: null,
+        stale: false,
+        validationUnavailable: true,
+      },
+      l2Credentials: null,
+      collateralVisible: false,
+      safeBalanceRaw: null,
+    };
+  }
   const params = new URLSearchParams({
     asset_type: "COLLATERAL",
     signature_type: String(input.signatureType),
@@ -864,8 +933,39 @@ async function inspectPolymarketClob(input: {
       address: input.walletAddress,
       creds: l2Credentials,
       method: "GET",
-      requestPath: `/balance-allowance?${params.toString()}`,
+      requestPath: input.sell
+        ? `/data/orders?${new URLSearchParams({ market: input.sellConditionId ?? "", ...(input.sellAssetId ? { asset_id: input.sellAssetId } : {}) }).toString()}`
+        : `/balance-allowance?${params.toString()}`,
     });
+    if (input.sell) {
+      const stale = !response.ok && isPolymarketInvalidApiKeyResponse(response);
+      // An incomplete order page is not evidence that shares are unlocked.
+      const payload = response.ok ? response.payload : null;
+      const cursor = isRecord(payload) ? payload.next_cursor : undefined;
+      const complete =
+        (Array.isArray(payload) ||
+          (isRecord(payload) &&
+            [payload.orders, payload.data, payload.results, payload.items].some(
+              Array.isArray,
+            ))) &&
+        (cursor == null || cursor === "" || cursor === "LTE=");
+      return {
+        credentials: {
+          present: true,
+          boundToExactWallet: bound,
+          verified: response.ok,
+          observedAt: new Date().toISOString(),
+          stale,
+          validationUnavailable: !response.ok && !stale,
+        },
+        l2Credentials: response.ok && bound ? l2Credentials : null,
+        collateralVisible: false,
+        safeBalanceRaw: null,
+        ...(complete && bound
+          ? { sellOrders: extractOrderArray(payload) }
+          : {}),
+      };
+    }
     const classified = classifyPolymarketClobCollateralResponse({
       balance: response.ok
         ? readPolymarketClobBalance(response.payload)
@@ -896,6 +996,7 @@ async function inspectPolymarketClob(input: {
         verified: false,
         observedAt: new Date().toISOString(),
         stale: false,
+        ...(input.sell ? { validationUnavailable: true } : {}),
       },
       l2Credentials: null,
       collateralVisible: false,
@@ -1240,6 +1341,7 @@ export class WalletPreparationRuntimeService {
     request: DestinationOptionsInput;
     canonicalMarketContextId: string | null;
     resolvedMarketContext?: RuntimeMarketContext;
+    requiredOwnerAccountRef?: string;
     forceFresh?: boolean;
   }): Promise<PreparedRuntimeDestination> {
     const key = JSON.stringify({
@@ -1252,16 +1354,19 @@ export class WalletPreparationRuntimeService {
       marketClass: input.request.marketClass,
       positionActionRef: input.request.positionActionRef ?? null,
       assetContext: input.resolvedMarketContext?.assetContext ?? null,
+      requiredOwnerAccountRef: input.requiredOwnerAccountRef ?? null,
     });
     const inflightKey = input.forceFresh ? `fresh:${key}` : key;
     const now = this.clock().getTime();
+    const reuseCompleted =
+      input.driver.venueId !== "polymarket" || input.request.purpose !== "sell";
     if (!input.forceFresh) {
       const authoritativePending = this.destinationInspectionInflight.get(
         `fresh:${key}`,
       );
       if (authoritativePending) return authoritativePending;
       const cached = this.destinationInspectionCache.get(key);
-      if (cached && cached.reusableUntil > now) {
+      if (reuseCompleted && cached && cached.reusableUntil > now) {
         return Promise.resolve(cached.value);
       }
       if (cached) this.destinationInspectionCache.delete(key);
@@ -1283,6 +1388,7 @@ export class WalletPreparationRuntimeService {
         marketClass: input.request.marketClass,
         positionActionRef: input.request.positionActionRef ?? null,
         resolvedMarketContext: input.resolvedMarketContext,
+        requiredOwnerAccountRef: input.requiredOwnerAccountRef,
         forceFresh: input.forceFresh,
       })
       .then((value) => {
@@ -1301,6 +1407,7 @@ export class WalletPreparationRuntimeService {
           evidenceExpiresAt,
         );
         if (
+          reuseCompleted &&
           reusableUntil > completedAt &&
           this.destinationInspectionGeneration.get(key) === generation
         ) {
@@ -1330,11 +1437,22 @@ export class WalletPreparationRuntimeService {
     );
     const requiredOwnerAccountRef =
       input.requiredOwnerAccountRef?.trim() || null;
+    const isSell = input.purpose === "sell";
+    // Historical shares can belong to the controller itself. Inspect the
+    // configured maker's permissions but keep the holding's own binding and
+    // balances; the client may explicitly authorize its existing transfer.
+    const legacyMaker =
+      isSell &&
+      sameAddress(requiredOwnerAccountRef, input.wallet.walletAddress) &&
+      credentials?.funderAddress &&
+      !sameAddress(credentials.funderAddress, input.wallet.walletAddress)
+        ? credentials.funderAddress
+        : null;
     let deposit: PolymarketDepositWalletDerivation | null = null;
     if (
       shouldInspectPolymarketDepositWallet({
         internalWallet: input.wallet.isInternalWallet,
-        requiredOwnerAccountRef,
+        requiredOwnerAccountRef: legacyMaker ?? requiredOwnerAccountRef,
         storedFunderAddress: credentials?.funderAddress ?? null,
         walletAddress: input.wallet.walletAddress,
       })
@@ -1360,7 +1478,7 @@ export class WalletPreparationRuntimeService {
       walletAddress: input.wallet.walletAddress,
       storedFunderAddress: credentials?.funderAddress ?? null,
       derivedDepositAddress: deposit?.address ?? null,
-      requiredOwnerAccountRef,
+      requiredOwnerAccountRef: legacyMaker ?? requiredOwnerAccountRef,
     });
     const storedL2Credentials =
       credentials?.apiKey &&
@@ -1387,22 +1505,34 @@ export class WalletPreparationRuntimeService {
       includeMagicProxy: true,
       bypassCodeCache: input.forceFresh === true,
     }).catch(() => null);
-    const accountResultPromise = fetchPolymarketAccountRoute({
-      credentialsInfo: credentials,
-      userId: input.accountId,
-      signer: input.wallet.walletAddress,
-      query: {
-        funderAddress: funder,
-        refresh: input.forceFresh === true,
-      },
-    });
-    const liveCollateralLocksPromise = storedL2Credentials
-      ? fetchPolymarketMaxSpendLiveOpenOrderLocks({
+    const accountResultPromise = isSell
+      ? Promise.resolve(null)
+      : fetchPolymarketAccountRoute({
+          credentialsInfo: credentials,
+          userId: input.accountId,
           signer: input.wallet.walletAddress,
-          creds: storedL2Credentials,
-          wallets: [funder, input.wallet.walletAddress],
-        }).catch(() => null)
+          query: {
+            funderAddress: funder,
+            refresh: input.forceFresh === true,
+          },
+        });
+    const sellApprovalsPromise = isSell
+      ? marketContextPromise.then((context) =>
+          inspectPolymarketSellApprovals(
+            context,
+            funder,
+            input.forceFresh === true,
+          ),
+        )
       : Promise.resolve(null);
+    const liveCollateralLocksPromise =
+      input.purpose !== "sell" && storedL2Credentials
+        ? fetchPolymarketMaxSpendLiveOpenOrderLocks({
+            signer: input.wallet.walletAddress,
+            creds: storedL2Credentials,
+            wallets: [funder, input.wallet.walletAddress],
+          }).catch(() => null)
+        : Promise.resolve(null);
     const funderResult = await funderResultPromise;
     const candidate = funderResult
       ? matchingFunderCandidate(funderResult.candidates, funder)
@@ -1429,50 +1559,133 @@ export class WalletPreparationRuntimeService {
       signatureType,
       walletDeployed: topology.deployed,
       walletTopology: topology.topology,
+      sell: input.purpose === "sell",
+      sellConditionId: input.resolvedMarketContext?.assetContext?.conditionId,
+      sellAssetId: input.resolvedMarketContext?.assetContext?.assetId,
     });
     /*
      * Account/RPC evidence and CLOB credential evidence are independent once
      * the exact signer/funder topology is known. Keeping them concurrent avoids
      * adding a full CLOB round trip after the onchain snapshot.
      */
-    const [marketContext, accountResult, clob, liveCollateralLocks] =
-      await Promise.all([
-        marketContextPromise,
-        accountResultPromise,
-        clobPromise,
-        liveCollateralLocksPromise,
-      ]);
+    const [
+      marketContext,
+      accountResult,
+      clob,
+      liveCollateralLocks,
+      sellApprovals,
+    ] = await Promise.all([
+      marketContextPromise,
+      accountResultPromise,
+      clobPromise,
+      liveCollateralLocksPromise,
+      sellApprovalsPromise,
+    ]);
     const effectiveMarketClass = input.marketClass ?? marketContext.marketClass;
-    const payload = accountResult.ok ? accountResult.payload : null;
-    const onchainSnapshot = polymarketMaxSpendSnapshotFromAccount(
-      accountResult.payload,
-    );
-    const rpcAvailable = accountResult.ok;
+    const payload = accountResult?.ok ? accountResult.payload : null;
+    const onchainSnapshot = polymarketMaxSpendSnapshotFromAccount(payload);
+    const rpcAvailable = accountResult?.ok === true;
     const collateralRaw = rawAt(payload, ["pusd", "balanceRaw"]);
     const binding = bindingFor({
       accountId: input.accountId,
       venue: "polymarket",
       wallet: input.wallet,
-      accountRef: funder,
+      accountRef: legacyMaker ? input.wallet.walletAddress : funder,
     });
     const observedRaw = collateralRaw ?? "0";
-    const reservedRaw = await reservedRawForLocation({
-      db: this.db,
-      userId: input.accountId,
-      locationId: binding.settlementLocation.locationId,
-      asset: binding.settlementLocation.asset,
-    });
-    const position = await loadRuntimePositionEvidence({
-      db: this.db,
-      accountId: input.accountId,
-      venueId: "polymarket",
-      positionActionRef: input.positionActionRef,
-      binding,
-    });
+    const reservedRaw =
+      input.purpose === "sell"
+        ? "0"
+        : await reservedRawForLocation({
+            db: this.db,
+            userId: input.accountId,
+            locationId: binding.settlementLocation.locationId,
+            asset: binding.settlementLocation.asset,
+          });
+    let position =
+      input.purpose === "sell" && !requiredOwnerAccountRef
+        ? null
+        : await loadRuntimePositionEvidence({
+            db: this.db,
+            accountId: input.accountId,
+            venueId: "polymarket",
+            positionActionRef: input.positionActionRef,
+            binding,
+          });
+    const positionMatchesOrderWallet =
+      !requiredOwnerAccountRef ||
+      input.purpose !== "sell" ||
+      // Some legacy web users still hold shares on a signer, before the
+      // client's explicit, signed transfer to a newly configured maker.
+      (topology.topology === "signer" &&
+        (!credentials?.funderAddress ||
+          sameAddress(credentials.funderAddress, funder))) ||
+      ((topology.topology === "deposit_wallet" ||
+        topology.topology === "safe_1_1") &&
+        !sameAddress(funder, input.wallet.walletAddress) &&
+        (!credentials ||
+          sameAddress(credentials.funderAddress, funder) ||
+          (topology.topology === "deposit_wallet" &&
+            !credentials.funderAddress)));
+    if (position && input.purpose === "sell") {
+      const context = marketContext.assetContext;
+      position = {
+        ...position,
+        ownerMatchesBinding:
+          position.ownerMatchesBinding && positionMatchesOrderWallet,
+        requiresTransfer: Boolean(legacyMaker),
+        balanceRaw: null,
+        lockedRaw: null,
+        spendabilityUnavailable: true,
+      };
+      if (position.ownerMatchesBinding && context && clob.sellOrders) {
+        const owner = requiredOwnerAccountRef ?? funder;
+        try {
+          const [balances, localLocks] = await Promise.all([
+            fetchErc1155BalancesByOwner({
+              rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
+              timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
+              contractAddress: context.positionContract,
+              owner,
+              tokenIds: [context.assetId],
+            }),
+            fetchPolymarketOpenOrderPositionLocks(this.db, {
+              userId: input.accountId,
+              wallet: owner,
+              positionContract:
+                context.assetKind === "position_manager"
+                  ? context.positionContract.toLowerCase()
+                  : "",
+            }),
+          ]);
+          const key = polymarketPositionLockKey(owner, context.assetId);
+          const upstreamLocked =
+            computePolymarketClobOpenPositionLocks({
+              orders: clob.sellOrders,
+              wallet: owner,
+              conditionId: context.conditionId,
+            }).get(key) ?? 0n;
+          const locallyLocked = localLocks.get(key) ?? 0n;
+          const balance = balances.get(context.assetId);
+          position = {
+            ...position,
+            balanceRaw: balance?.toString() ?? null,
+            lockedRaw: (upstreamLocked > locallyLocked
+              ? upstreamLocked
+              : locallyLocked
+            ).toString(),
+            spendabilityUnavailable: balance === undefined,
+          };
+        } catch {
+          // A failed exact balance/lock read is not a zero balance.
+        }
+      }
+    }
     const funderExecutionKind =
       resolvePolymarketFunderExecutionKindForMaxSpend(candidate);
     const l2Credentials = clob.l2Credentials;
     const polymarketFunding: PolymarketRouterFundingSnapshot | null =
+      input.purpose !== "sell" &&
       topology.topology === "deposit_wallet" &&
       topology.deployed === true &&
       funderExecutionKind === "deposit_wallet" &&
@@ -1536,16 +1749,17 @@ export class WalletPreparationRuntimeService {
         input.wallet.isInternalWallet && topology.executionMode === "web_client"
           ? "privy_authorization"
           : topology.executionMode,
-      rpcAvailable:
-        rpcAvailable &&
-        (effectiveMarketClass !== "protocol_v2" ||
-          input.purpose === "fund" ||
-          input.purpose === "withdraw" ||
-          input.purpose === "redeem" ||
-          (input.purpose === "buy"
-            ? rawAt(payload, ["protocolV2", "allowanceRaw"]) != null
-            : readBoolean(payload, ["protocolV2", "exchangeApproved"]) !=
-              null)),
+      rpcAvailable: isSell
+        ? sellApprovals !== null
+        : rpcAvailable &&
+          (effectiveMarketClass !== "protocol_v2" ||
+            input.purpose === "fund" ||
+            input.purpose === "withdraw" ||
+            input.purpose === "redeem" ||
+            (input.purpose === "buy"
+              ? rawAt(payload, ["protocolV2", "allowanceRaw"]) != null
+              : readBoolean(payload, ["protocolV2", "exchangeApproved"]) !=
+                null)),
       walletDeployed: topology.deployed,
       ownerVerified: topology.ownerVerified,
       credentials: clob.credentials,
@@ -1598,29 +1812,33 @@ export class WalletPreparationRuntimeService {
       negRiskAdapterAllowance: allowanceEnough(
         rawAt(payload, ["pusd", "allowance", "negRiskAdapter", "allowanceRaw"]),
       ),
-      standardExchangeApproval:
-        readBoolean(payload, [
-          "conditionalTokens",
-          "isApprovedForAll",
-          "exchange",
-        ]) === true,
-      negRiskExchangeApproval:
-        readBoolean(payload, [
-          "conditionalTokens",
-          "isApprovedForAll",
-          "negRiskExchange",
-        ]) === true,
-      negRiskAdapterApproval:
-        readBoolean(payload, [
-          "conditionalTokens",
-          "isApprovedForAll",
-          "negRiskAdapter",
-        ]) === true,
+      standardExchangeApproval: isSell
+        ? sellApprovals?.exchange === true
+        : readBoolean(payload, [
+            "conditionalTokens",
+            "isApprovedForAll",
+            "exchange",
+          ]) === true,
+      negRiskExchangeApproval: isSell
+        ? sellApprovals?.exchange === true
+        : readBoolean(payload, [
+            "conditionalTokens",
+            "isApprovedForAll",
+            "negRiskExchange",
+          ]) === true,
+      negRiskAdapterApproval: isSell
+        ? sellApprovals?.adapter === true
+        : readBoolean(payload, [
+            "conditionalTokens",
+            "isApprovedForAll",
+            "negRiskAdapter",
+          ]) === true,
       v3ExchangeAllowance: allowanceEnough(
         rawAt(payload, ["protocolV2", "allowanceRaw"]),
       ),
-      v3PositionManagerApproval:
-        readBoolean(payload, ["protocolV2", "exchangeApproved"]) === true,
+      v3PositionManagerApproval: isSell
+        ? sellApprovals?.exchange === true
+        : readBoolean(payload, ["protocolV2", "exchangeApproved"]) === true,
       observedAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       safeEvidence: {
@@ -1630,11 +1848,18 @@ export class WalletPreparationRuntimeService {
         walletDeployed: topology.deployed,
         credentialPresent: clob.credentials.present,
         credentialVerified: clob.credentials.verified,
-        collateralRaw: collateralRaw ?? "unknown",
-        clobBalanceRaw: clob.safeBalanceRaw ?? "unknown",
-        fundingRouterNonce:
-          rawAt(payload, ["fundingRouter", "nonce"]) ?? "unknown",
-        reservedRaw,
+        ...(position?.requiresTransfer
+          ? { positionTransferRequired: true }
+          : {}),
+        ...(input.purpose !== "sell"
+          ? {
+              collateralRaw: collateralRaw ?? "unknown",
+              clobBalanceRaw: clob.safeBalanceRaw ?? "unknown",
+              fundingRouterNonce:
+                rawAt(payload, ["fundingRouter", "nonce"]) ?? "unknown",
+              reservedRaw,
+            }
+          : {}),
         marketRef: marketContext.evidence.safeMarketRef,
         ...(marketContext.assetContext
           ? { positionAssetContext: { ...marketContext.assetContext } }
@@ -1656,6 +1881,7 @@ export class WalletPreparationRuntimeService {
         topology: topology.topology,
         funder,
         redemptionOperator: marketContext.adapterAddress,
+        sellAssetContext: isSell ? marketContext.assetContext : undefined,
       }),
     );
     const preparation = await adapter.inspect(inspectionInput);
@@ -1903,6 +2129,7 @@ export class WalletPreparationRuntimeService {
     resolvedMarket: ApiTradeMarket | null = null,
     allowPartialVenueCoverage = false,
     forceFresh = false,
+    trace?: DestinationInspectionTrace,
   ): Promise<readonly PreparedRuntimeDestination[]> {
     const wallets = (await this.loadWallets(input.accountId)).filter(
       (wallet) =>
@@ -1932,6 +2159,7 @@ export class WalletPreparationRuntimeService {
     // SELL preparation follows the authenticated holding, not the replaceable
     // current market generation. BUY continues to prepare the current market.
     let sellAssetContext: PolymarketAssetContext | undefined;
+    let sellOwnerAccountRef: string | undefined;
     if (
       input.purpose === "sell" &&
       targetRuntimeVenue === "polymarket" &&
@@ -1949,6 +2177,7 @@ export class WalletPreparationRuntimeService {
           "SELL preparation requires the owned position's canonical market and ledger",
         );
       sellAssetContext = selected.assetContext;
+      sellOwnerAccountRef = selected.ownerAddress;
     }
     const resolvedMarketContext =
       targetMarket && targetRuntimeVenue
@@ -1987,6 +2216,7 @@ export class WalletPreparationRuntimeService {
             request: input,
             canonicalMarketContextId: targetMarket?.id ?? null,
             resolvedMarketContext,
+            requiredOwnerAccountRef: sellOwnerAccountRef,
             forceFresh,
           }),
         ),
@@ -1999,6 +2229,28 @@ export class WalletPreparationRuntimeService {
         outcome: outcomes[index],
       })),
     );
+    if (trace) {
+      trace.marketResolved = targetMarket !== null;
+      trace.attempted = attempts.length;
+      const failures = outcomes.filter(
+        (outcome) => outcome.status === "rejected",
+      );
+      trace.failed = failures.length;
+      trace.positionTransferRequired = coverage.values.some(
+        ({ frozen }) =>
+          frozen.preparation.status === "ready" &&
+          frozen.preparation.evidence?.facts.positionTransferRequired === true,
+      );
+      trace.failureCodes = [
+        ...new Set(
+          failures.map(({ reason }) =>
+            reason instanceof PreparationContractError
+              ? reason.code
+              : "inspection_failed",
+          ),
+        ),
+      ];
+    }
     const compatibleBindingOptionIds = new Set(
       input.compatibleVenueBindingOptionIds ?? [],
     );
@@ -2159,8 +2411,11 @@ export class WalletPreparationRuntimeService {
 
   async listDestinationOptions(
     input: DestinationOptionsInput,
+    trace?: DestinationInspectionTrace,
   ): Promise<readonly FundingDestinationOption[]> {
-    const facts = await this.frozenDestinations(input, null, true);
+    const facts = (
+      await this.preparedDestinations(input, null, true, false, trace)
+    ).map((result) => result.frozen);
     const resolver = this.destinationResolver(facts);
     return resolver.listOptions(input);
   }
@@ -2225,6 +2480,7 @@ export class WalletPreparationRuntimeService {
 
 export const walletPreparationRuntimeTestHooks = {
   availableRaw,
+  inspectPolymarketSellApprovals,
   limitlessPreparationContracts,
   polymarketInspectionAccountRef,
   polymarketTopology,

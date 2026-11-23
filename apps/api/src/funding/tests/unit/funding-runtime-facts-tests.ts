@@ -424,6 +424,63 @@ function limitlessEvidence(
   };
 }
 
+await test("Polymarket SELL permits reconnect, but never claims readiness without live shares and locks", async () => {
+  const exactBinding = binding("polymarket");
+  const baseline = polymarketEvidence({ binding: exactBinding });
+  assert.ok(baseline.position);
+  const unknown = {
+    ...baseline.position,
+    balanceRaw: null,
+    lockedRaw: null,
+    spendabilityUnavailable: true,
+  };
+  const inspect = (overrides: Partial<PolymarketRuntimeEvidence>) =>
+    new PolymarketWalletPreparationAdapter(
+      async (request) =>
+        buildPolymarketRuntimeFacts(request, { ...baseline, ...overrides }),
+      () => NOW,
+    ).inspect(input(exactBinding, "sell", "standard"));
+  for (const credentials of [
+    { ...baseline.credentials, present: false, verified: false },
+    { ...baseline.credentials, stale: true, verified: false },
+  ]) {
+    const setup = await inspect({ position: unknown, credentials });
+    assert.equal(setup.status, "setup_required");
+    assert.deepEqual(
+      setup.requiredActions.map(({ kind }) => kind),
+      ["signature"],
+    );
+    assert.equal(
+      setup.postconditions.some(({ kind }) => kind === "shares_spendable"),
+      false,
+    );
+  }
+  const unverified = await inspect({ position: unknown });
+  assert.equal(unverified.status, "unavailable");
+  assert.deepEqual(unverified.reasonCodes, [
+    "position_availability_unverified",
+  ]);
+  const paused = await inspect({
+    position: unknown,
+    credentials: {
+      ...baseline.credentials,
+      verified: false,
+      validationUnavailable: true,
+    },
+  });
+  assert.equal(paused.status, "unavailable");
+  assert.ok(paused.reasonCodes.includes("provider_status_unknown"));
+  const locked = await inspect({
+    position: { ...baseline.position, lockedRaw: "1000000" },
+  });
+  assert.equal(locked.status, "unavailable");
+  assert.deepEqual(locked.reasonCodes, ["locked_funds"]);
+  const ready = await inspect({
+    position: { ...baseline.position, lockedRaw: "1" },
+  });
+  assert.equal(ready.status, "ready");
+});
+
 await test("protocol V2 requires only its own V3 exchange and PM permissions", async () => {
   const exactBinding = binding("polymarket");
   for (const purpose of ["buy", "sell"] as const) {

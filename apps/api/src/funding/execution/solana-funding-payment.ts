@@ -22,6 +22,7 @@ export class SolanaFundingPaymentError extends Error {
       | "funding_payment_mismatch"
       | "funding_sponsor_limit_reached",
     message: string,
+    readonly diagnosticReason?: string,
   ) {
     super(message);
     this.name = "SolanaFundingPaymentError";

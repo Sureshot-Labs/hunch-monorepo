@@ -106,8 +106,21 @@ function withFundingLifecycleProjection(
   operation: FundingOperationRow,
   lifecycle: FundingLifecycleProjection,
 ): FundingOperationRow {
+  const partial = lifecycle.partialSettledDestination;
   return {
     ...operation,
+    ...(partial
+      ? {
+          actualDestinationAmount: {
+            asset: {
+              networkId: partial.networkId,
+              assetId: partial.assetId,
+              decimals: partial.decimals,
+            },
+            raw: partial.raw,
+          },
+        }
+      : {}),
     errorCode: lifecycle.errorCode,
     progressStage: lifecycle.progressStage,
     recoveryMode: lifecycle.recoveryMode,
