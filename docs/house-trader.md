@@ -113,7 +113,9 @@ normal deploy starts the worker again without changing the saved strategy.
   redemption, or disable confirmed manual actions. Unknown outcomes remain
   reserved. Never clear a pending row merely because an API returned not found.
   For batch recovery, an expired deadline plus an unchanged nonce on finalized
-  Polygon proves that the old signed batch did not execute.
+  Polygon proves that the old signed batch did not execute. Relayer batches
+  are signed with a ten-minute deadline; this does not extend the three-minute
+  operator confirmation window for reaching the first send boundary.
 - If the batch acknowledgment is lost, the worker can recover withdrawal and
   redemption from bounded, exact finalized transfer/nonce evidence. If it
   cannot establish that proof, leave the batch pending. A restart can replay

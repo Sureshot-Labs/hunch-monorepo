@@ -7,6 +7,7 @@ import {
 import { AuthService } from "../auth.js";
 import { env } from "../env.js";
 import { missingHouseTraderApprovals } from "./house-trader-approvals.js";
+import { houseDepositBatchDeadline } from "./house-trader-policy.js";
 import {
   inspectPolymarketDepositWallet,
   POLYMARKET_DEPOSIT_WALLET_FACTORY,
@@ -227,7 +228,7 @@ export class HouseWallet {
     before: (nonce: string, deadline: string) => Promise<void>,
   ) {
     const nonce = await fetchPolymarketRelayerNonce(this.key.address);
-    const deadline = (Math.floor(Date.now() / 1000) + 180).toString();
+    const deadline = houseDepositBatchDeadline();
     const typed = buildDepositWalletBatchTypedData({
       depositWalletAddress: funder,
       nonce,

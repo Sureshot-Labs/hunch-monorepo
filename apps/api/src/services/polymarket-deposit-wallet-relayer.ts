@@ -22,6 +22,11 @@ export class PolymarketRelayerHttpError extends Error {
 export function safePolymarketRelayerDiagnostic(error: unknown) {
   if (!(error instanceof PolymarketRelayerHttpError))
     return { reason: "transport_or_unknown" } as const;
+  if (
+    error.status === 400 &&
+    /^deadline too soon[.!]?$/i.test(error.message.trim())
+  )
+    return { status: 400, reason: "deadline_too_soon" } as const;
   const reason =
     /call blocked|not in the allowed list|calls? to .* not permitted/i.test(
       error.message,

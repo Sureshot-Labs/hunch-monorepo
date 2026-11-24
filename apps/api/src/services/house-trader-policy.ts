@@ -93,6 +93,12 @@ export function houseModelContextMessage(input: {
   return encoded;
 }
 export const houseTraderAmount = positiveMoney;
+
+export function houseDepositBatchDeadline(now = Date.now()): string {
+  // The relayer rejected a three-minute deadline. Allow for relay validation
+  // and clock skew without extending the operator's separate consent window.
+  return String(Math.floor(now / 1000) + 10 * 60);
+}
 export function houseConfirmationIsFresh(value: unknown, now = Date.now()) {
   const at = typeof value === "string" ? Date.parse(value) : NaN;
   return Number.isFinite(at) && at <= now && now - at < 180_000;
