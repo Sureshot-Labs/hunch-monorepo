@@ -310,11 +310,13 @@ services:
       - apps/finance-worker/dist/main.js
 
   house-trader-worker:
-    profiles: ["house-trader"]
-    image: ${HUNCH_BACKEND_IMAGE:-hunch-house-trader:unconfigured}
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
     container_name: hunch-house-trader-worker
     logging: *bounded-logging
-    restart: "no"
+    restart: unless-stopped
+    stop_grace_period: 120s
     networks:
       - hunch-net
     environment:

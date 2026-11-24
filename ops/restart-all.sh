@@ -11,7 +11,7 @@ REMOTE_CMD=$(cat <<'EOF'
 set -euo pipefail
 
 compose=(docker-compose --project-directory "${APP_DIR}" -f "${APP_DIR}/ops/docker-compose.prod.yml" --env-file "${ENV_FILE}")
-restart_services=(postgres redis api indexer-polymarket indexer-limitless indexer-dflow ai-worker market-matcher finance-worker signal-bot social-media-worker nginx)
+restart_services=(postgres redis api indexer-polymarket indexer-limitless indexer-dflow ai-worker market-matcher finance-worker house-trader-worker signal-bot social-media-worker nginx)
 native_worker_enabled="$(native_onboarding_flag HUNCH_NATIVE_ONBOARDING_WORKER_ENABLED)"
 if [[ "${native_worker_enabled}" == true ]]; then
   compose+=(--profile native-onboarding)
