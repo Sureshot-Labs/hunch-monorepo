@@ -1,5 +1,37 @@
 export const WALLET_INTEL_EMPTY_OUTCOME_SIDE = "";
 
+export function buildPositiveWalletPositionSnapshotSql(alias: string): string {
+  return `(
+    coalesce(${alias}.shares, 0) > 0
+    or greatest(
+      coalesce(${alias}.size_usd, 0),
+      abs(coalesce(${alias}.shares, 0) * coalesce(${alias}.price, 0))
+    ) > 0
+  )`;
+}
+
+export function buildWalletFollowingLatestPositiveSql(
+  walletIdSql: "w.id" | "$1::uuid",
+): string {
+  // The inner DISTINCT matches the covering index's venue-first order. Only
+  // sort the last row per venue/market/side, not the wallet's entire history.
+  // The outer DISTINCT preserves the existing cross-venue market/side result.
+  return `
+    select distinct on (latest_venue.market_id, latest_venue.outcome_side)
+      latest_venue.market_id, latest_venue.outcome_side, latest_venue.shares
+    from (
+      select distinct on (ws.venue, ws.market_id, ws.outcome_side)
+        ws.market_id, ws.outcome_side, ws.shares, ws.snapshot_at
+      from wallet_position_snapshots ws
+      where ws.wallet_id = ${walletIdSql}
+        and ws.shares > 0
+        and ${buildPositiveWalletPositionSnapshotSql("ws")}
+      order by ws.venue, ws.market_id, ws.outcome_side, ws.snapshot_at desc
+    ) latest_venue
+    order by latest_venue.market_id, latest_venue.outcome_side, latest_venue.snapshot_at desc
+  `;
+}
+
 type OutcomeSideLike = {
   outcome_side: string | null | undefined;
 };

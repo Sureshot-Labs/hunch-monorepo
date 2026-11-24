@@ -80,6 +80,8 @@ import {
   mergeWalletIdsForScope,
 } from "../services/wallet-intel-filters.js";
 import {
+  buildPositiveWalletPositionSnapshotSql,
+  buildWalletFollowingLatestPositiveSql,
   normalizeOutcomeSideForApi,
   parseMarketOutcomes,
 } from "../services/wallet-intel-helpers.js";
@@ -1351,16 +1353,6 @@ export function resolveWalletPositionHistoryInitialSeed(input: {
 
 export function expandWalletPositionHistorySeed(seed: number): number {
   return seed * WALLET_POSITION_HISTORY_EXPANSION_FACTOR;
-}
-
-function buildPositiveWalletPositionSnapshotSql(alias: string): string {
-  return `(
-    coalesce(${alias}.shares, 0) > 0
-    or greatest(
-      coalesce(${alias}.size_usd, 0),
-      abs(coalesce(${alias}.shares, 0) * coalesce(${alias}.price, 0))
-    ) > 0
-  )`;
 }
 
 function normalizeMarketStatusFilter(status: string): string {
@@ -9004,14 +8996,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ) metrics on true
             left join lateral (
               with latest as (
-                select distinct on (ws.market_id, ws.outcome_side)
-                  ws.market_id,
-                  ws.outcome_side,
-                  ws.shares
-                from wallet_position_snapshots ws
-                where ws.wallet_id = w.id
-                  and ws.shares > 0
-                order by ws.market_id, ws.outcome_side, ws.snapshot_at desc
+                ${buildWalletFollowingLatestPositiveSql("w.id")}
               ),
               agg as (
                 select
