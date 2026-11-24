@@ -51,6 +51,82 @@ import {
   valueHousePosition,
 } from "./services/house-trader-valuation.js";
 import type { PolymarketHoldingMarkRow } from "./services/polymarket-holding-marks.js";
+import {
+  houseAcknowledgedTransactionHashes,
+  resolveHouseFillLocators,
+} from "./services/house-trader-fill-evidence.js";
+
+const knownFillHash = `0x${"a".repeat(64)}`;
+const otherFillHash = `0x${"b".repeat(64)}`;
+const knownFill = {
+  venue_trade_id: "trade-one",
+  provider_status: "MINED",
+  provider_tx_hash: knownFillHash,
+};
+assert.deepEqual(
+  houseAcknowledgedTransactionHashes(
+    { transactionsHashes: [knownFillHash] },
+    otherFillHash,
+    otherFillHash,
+  ),
+  [knownFillHash],
+);
+assert.deepEqual(
+  houseAcknowledgedTransactionHashes(
+    { transactionsHashes: [knownFillHash] },
+    otherFillHash,
+    knownFillHash,
+  ),
+  [],
+);
+assert.deepEqual(
+  resolveHouseFillLocators([], { state: "terminal_zero_fill" }, true),
+  {
+    pending: "clob_zero_fill_conflicts_with_saved_execution",
+  },
+);
+assert.deepEqual(
+  resolveHouseFillLocators([knownFill], { state: "not_found" }),
+  { hashes: [knownFillHash] },
+);
+assert.deepEqual(
+  resolveHouseFillLocators([knownFill], { state: "terminal_zero_fill" }),
+  { hashes: [knownFillHash] },
+);
+assert.deepEqual(resolveHouseFillLocators([], { state: "not_found" }), {
+  pending: "clob_evidence_not_found",
+});
+assert.deepEqual(
+  resolveHouseFillLocators([], { state: "terminal_zero_fill" }),
+  { noFill: true },
+);
+assert.deepEqual(
+  resolveHouseFillLocators([knownFill], { state: "identity_conflict" }),
+  { pending: "clob_evidence_identity_conflict" },
+);
+assert.deepEqual(
+  resolveHouseFillLocators([knownFill], {
+    state: "fills",
+    fills: [{ ...knownFill, provider_tx_hash: otherFillHash }],
+  }),
+  { pending: "fill_transaction_identity_conflict" },
+);
+assert.deepEqual(
+  resolveHouseFillLocators([knownFill], {
+    state: "fills",
+    fills: [
+      { ...knownFill, venue_trade_id: "trade-two", provider_tx_hash: null },
+    ],
+  }),
+  { pending: "fill_transaction_reference_pending" },
+);
+assert.deepEqual(
+  resolveHouseFillLocators([{ ...knownFill, provider_tx_hash: null }], {
+    state: "fills",
+    fills: [knownFill],
+  }),
+  { hashes: [knownFillHash] },
+);
 
 const valuationTime = Date.parse("2026-11-23T12:00:00Z");
 const asset = buildPolymarketAssetContext(

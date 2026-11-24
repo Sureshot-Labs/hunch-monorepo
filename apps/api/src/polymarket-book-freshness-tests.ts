@@ -14,6 +14,12 @@ import {
   findMaxPolymarketMarketBuyUsdForFunds,
   quotePolymarketOrder,
 } from "./services/polymarket-trading-service.js";
+import {
+  assertHouseFokBeforeSubmit,
+  indicativeSellQuote,
+  sellQuote as houseSellQuote,
+} from "./services/house-trader-orders.js";
+import { houseTraderDefault } from "./services/house-trader-policy.js";
 
 const realNow = Date.now;
 const originalBook = polymarketClient.getOrderBook;
@@ -253,6 +259,60 @@ try {
   const noLiquidity = (e: unknown) =>
     e instanceof PolymarketQuoteError && e.reason === "no_liquidity";
   await assert.rejects(quotePolymarketOrder(pool, sell), noLiquidity);
+  const houseContext = await loadPolymarketQuoteContext(pool, {
+    tokenId: sell.tokenId,
+    freshBook: true,
+  });
+  assert.throws(
+    () =>
+      houseSellQuote(
+        houseContext,
+        sell.tokenId,
+        100_000_000n,
+        houseTraderDefault,
+      ),
+    noLiquidity,
+  );
+  assert.equal(
+    houseSellQuote(houseContext, sell.tokenId, 10_000_000n, houseTraderDefault)
+      .makerAmount,
+    "10000000",
+    "a smaller executable sell can still be priced",
+  );
+  assert.equal(
+    indicativeSellQuote(
+      houseContext,
+      sell.tokenId,
+      100_000_000n,
+      houseTraderDefault,
+    ).makerAmount,
+    "100000000",
+    "a shallow top can still inform a fractional AI exit, which is quoted and checked separately",
+  );
+  const signedHouseSell = houseSellQuote(
+    houseContext,
+    sell.tokenId,
+    10_000_000n,
+    houseTraderDefault,
+  );
+  const refreshHouseBook = () =>
+    loadPolymarketQuoteContext(pool, {
+      tokenId: sell.tokenId,
+      freshBook: true,
+    });
+  clock += 5_001;
+  bidSize = "9";
+  await assert.rejects(
+    assertHouseFokBeforeSubmit(houseContext, signedHouseSell, refreshHouseBook),
+    noLiquidity,
+  );
+  bidSize = "10";
+  await assertHouseFokBeforeSubmit(
+    houseContext,
+    signedHouseSell,
+    refreshHouseBook,
+  );
+  assert.equal(signedHouseSell.makerAmount, "10000000");
   assert.equal(
     (await quotePolymarketOrder(pool, { ...sell, amountSharesInput: 10 })).size,
     10,

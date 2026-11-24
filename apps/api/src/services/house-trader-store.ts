@@ -169,6 +169,42 @@ export async function boundary(
   });
 }
 
+export async function finishHouseZeroFill(
+  db: DbQuery,
+  job: Action,
+  orderHash: string,
+) {
+  // The provider read can be slow. Recheck persisted execution in the same
+  // statement as releasing the reserve; a stale observation cannot clear it.
+  await db.query(
+    `with saved_execution as (
+       select exists(
+         select 1 from orders order_row
+          where order_row.order_hash=$3 and order_row.user_id=$2 and order_row.venue='polymarket'
+            and (coalesce(order_row.filled_size,0)>0 or lower(coalesce(order_row.status,'')) in
+                 ('matched','filled','partially_filled') or exists(
+                   select 1 from order_fills fill_row where fill_row.order_id=order_row.id
+                   and upper(coalesce(fill_row.provider_status,''))<>'FAILED'
+                 ))
+       ) as seen
+     )
+     update house_trader_actions action_row
+       set (state,reason)=(select
+            case when cannot_clear then 'submitted' else 'skipped' end,
+            case when cannot_clear then 'clob_zero_fill_conflicts_with_saved_execution' else 'venue_no_fill' end
+          from (select saved_execution.seen
+            or coalesce(action_row.result->>'acknowledgedExecution'='true',false)
+            or action_row.result @? '$.acknowledgedTransactionHashes[0]' as cannot_clear
+          ) guard_row),
+          updated_at=now()
+       from saved_execution
+       where action_row.id=$1 and action_row.account_user_id=$2 and action_row.reference=$3
+         and action_row.claim_token is not distinct from $4::uuid
+         and action_row.state in ('submitting','submitted')`,
+    [job.id, job.account_user_id, orderHash, job.claim_token],
+  );
+}
+
 export const houseBuyEligibilitySql = `select
     note_row.created_at >= now()-$7::int*interval '1 minute'
       and note_row.created_at <= now() as fresh,
@@ -305,13 +341,15 @@ export async function confirmHousePreview(
 ) {
   const {
     rows: [preview],
-  } = await db.query<Pick<Action, "kind" | "request">>(
-    `select kind,request from house_trader_actions where id=$1 and account_user_id=$2
+  } = await db.query<Action>(
+    `select * from house_trader_actions where id=$1 and account_user_id=$2
       and kind in ('sell','withdraw') and state='review' and reference is null
       and reason='confirm_preview' and updated_at>now()-interval '3 minutes'`,
     [actionId, userId],
   );
   if (!preview) return { error: "preview_expired_or_used" };
+  if (preview.kind === "sell" && !(await houseSellPosition(db, preview)))
+    return { error: "position_not_found" };
   if (
     preview.kind === "sell" &&
     typeof preview.request.positionId === "string" &&

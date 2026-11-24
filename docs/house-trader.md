@@ -10,7 +10,7 @@ maximum exposure if its raw key is compromised.
 
 - `node --import tsx apps/api/src/house-trader-tests.ts` and the same script
   under Bun verify policy, signatures and receipt parsing without network.
-- `HOUSE_FIXTURE_URL=postgresql://…@127.0.0.1:PORT/house_fixture node --import tsx apps/api/src/house-trader-pg-tests.ts`
+- `HOUSE_FIXTURE_URL=postgresql://…@127.0.0.1:PORT/house_fixture node --import tsx apps/api/src/house-trader-pg-fixture.ts`
   uses a fresh schema in an explicitly named disposable PostgreSQL 16 database.
 - Review the deployment and funding steps separately before starting any live
   process. Local tests do not attest provider allowlists, EIP-1271 verification
@@ -106,7 +106,10 @@ bash ops/house-trader-worker.sh start
   that market, another BUY on either side cannot send; the same signal cannot
   send again after a restart. A new qualifying signal may enter after a
   verified close. An uncertain submission is reconciled by its original hash,
-  not replaced. Automatic exits do not enqueue alongside another exit for the
+  not replaced. Finalized receipts can still be found from locally retained
+  transaction references when the provider order is unavailable. A missing order
+  or transaction without trustworthy evidence leaves the reserve pending and
+  needs investigation; it is not proof of no execution. Automatic exits do not enqueue alongside another exit for the
   position, and failed automatic exits wait five minutes before another try.
 - Defaults are 100 pUSD capital cap, 10/day UTC, 5/event, 2/order including
   fees; entry filters are signal age up to 30 minutes and 5 minutes to seven

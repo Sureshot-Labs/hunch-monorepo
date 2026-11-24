@@ -11,6 +11,7 @@ import {
 import {
   boundary,
   finish,
+  finishHouseZeroFill,
   houseBuyEligibility,
   houseSellPosition,
   reserveBuy,
@@ -21,8 +22,10 @@ import { houseModel } from "./house-trader-ai.js";
 import type { HouseWallet } from "./house-trader-wallet.js";
 import { signHouseOrder } from "./polymarket-order-signature.js";
 import {
+  assertPolymarketFokDepth,
   calculatePolymarketQuote,
   loadPolymarketQuoteContext,
+  PolymarketQuoteError,
   quotePolymarketMarketBuyWithinBudget,
 } from "./polymarket-quote.js";
 import {
@@ -47,6 +50,14 @@ import {
   type PolymarketAssetContext,
 } from "@hunch/shared";
 import { houseTradeReceipt } from "./house-trader-receipts.js";
+import {
+  HOUSE_MAX_FILL_EVIDENCE,
+  houseAcknowledgedTransactionHashes,
+  readHouseStoredOrder,
+  readHouseTransactionHashes,
+  resolveHouseFillLocators,
+} from "./house-trader-fill-evidence.js";
+import type { PolymarketFillObservation } from "./verified-buy-observer.js";
 import { storeOrder } from "../repos/orders-repo.js";
 
 export async function trackedShares(
@@ -78,6 +89,7 @@ export async function contextFor(
     throw new Error("instrument_missing");
   const context = await loadPolymarketQuoteContext(pool, {
     tokenId: job.token_id,
+    freshBook: true,
   });
   const instrument = context.assetContext;
   if (
@@ -90,7 +102,7 @@ export async function contextFor(
   if (
     held &&
     JSON.stringify(parsePolymarketAssetContext(instrument)) !==
-      JSON.stringify(held)
+      JSON.stringify(parsePolymarketAssetContext(held))
   )
     throw new Error("position_binding_changed");
   const priorContract = job.result.positionContract;
@@ -153,7 +165,7 @@ export async function evidenceFor(
   }));
 }
 
-export function sellQuote(
+export function indicativeSellQuote(
   context: Awaited<ReturnType<typeof loadPolymarketQuoteContext>>,
   token: string,
   amount: bigint,
@@ -171,6 +183,17 @@ export function sellQuote(
   });
 }
 
+export function sellQuote(
+  context: Awaited<ReturnType<typeof loadPolymarketQuoteContext>>,
+  token: string,
+  amount: bigint,
+  policy: HouseTraderPolicy,
+) {
+  const quote = indicativeSellQuote(context, token, amount, policy);
+  assertPolymarketFokDepth(context.orderbook, quote);
+  return quote;
+}
+
 export function sellNet(
   quote: Pick<
     ReturnType<typeof sellQuote>,
@@ -178,6 +201,29 @@ export function sellNet(
   >,
 ) {
   return BigInt(quote.takerAmount) - BigInt(quote.totalFeeEstimateRaw);
+}
+
+export async function assertHouseFokBeforeSubmit(
+  context: Awaited<ReturnType<typeof loadPolymarketQuoteContext>>,
+  quote: ReturnType<typeof sellQuote>,
+  refresh: () => Promise<
+    Awaited<ReturnType<typeof loadPolymarketQuoteContext>>
+  >,
+) {
+  const isFresh = (book: typeof context) => {
+    const expires = Date.parse(book.bookSnapshot?.expiresAt ?? "");
+    return Number.isFinite(expires) && expires > Date.now();
+  };
+  const current = isFresh(context) ? context : await refresh();
+  if (!isFresh(current))
+    throw new PolymarketQuoteError(
+      502,
+      "Orderbook expired before submission",
+      "stale_orderbook",
+    );
+  // Keep the already signed amounts and limit. A refreshed book may prove
+  // they cannot be filled; it must never reprice or replace the order.
+  assertPolymarketFokDepth(current.orderbook, quote);
 }
 
 export async function doTrade(
@@ -322,7 +368,7 @@ export async function doTrade(
       return finish(pool, job, "skipped", "position_cost_unavailable");
     if (auto && job.request.trigger === "ai") {
       if (!policy.aiExit) return finish(pool, job, "skipped", "ai_disabled");
-      const full = sellQuote(context, token, available, policy);
+      const full = indicativeSellQuote(context, token, available, policy);
       const { decision: model, reason: unavailable } = await houseModel(
         pool,
         job,
@@ -440,6 +486,11 @@ export async function doTrade(
         }))
       )
         throw new Error("venue_disabled");
+      await assertHouseFokBeforeSubmit(
+        context,
+        quote,
+        async () => (await contextFor(pool, job, instrument)).context,
+      );
       await boundary(pool, job, hash, {
         decisionReason,
         quotePrice: quote.price,
@@ -461,6 +512,12 @@ export async function doTrade(
   if (result.ok)
     await finish(pool, job, "submitted", null, {
       venueOrderId: result.payload.orderId,
+      acknowledgedExecution: result.payload.status === "matched",
+      acknowledgedTransactionHashes: houseAcknowledgedTransactionHashes(
+        result.payload.payload,
+        result.payload.orderId,
+        result.payload.orderHash,
+      ),
     });
   else {
     if (row.state === "working")
@@ -479,104 +536,121 @@ export async function observeTrade(
   pool: Pool,
   a: Account,
   job: Action,
-  budget: { remaining: number },
+  budget: { remaining: number; receiptsRemaining: number },
 ) {
-  const instrument = job.result.assetContext as
-    | PolymarketAssetContext
-    | undefined;
+  const instrument = parsePolymarketAssetContext(job.result.assetContext);
   if (
     !a.controller ||
     !job.reference ||
     !a.deposit_wallet ||
     !instrument ||
-    instrument.assetId !== job.token_id
+    instrument.assetId !== job.token_id ||
+    instrument.marketId !== job.market_id ||
+    (instrument.outcomeIndex === 0 ? "YES" : "NO") !== job.outcome
   )
     return finish(pool, job, "submitted", "order_identity_unavailable");
+  const hash = job.reference;
+  const side = job.kind === "buy" ? "BUY" : "SELL";
+  const signer = a.controller;
+  const stored = await readHouseStoredOrder(pool, {
+    userId: a.user_id,
+    hash,
+    owner: a.deposit_wallet,
+    signer,
+    asset: instrument,
+    side,
+  });
+  if (stored.state !== "ok")
+    return finish(
+      pool,
+      job,
+      "submitted",
+      stored.state === "limit"
+        ? "fill_evidence_limit_review"
+        : "stored_order_identity_conflict",
+    );
   const current = await AuthService.getVenueCredentials(
     a.user_id,
     "polymarket",
     a.controller,
   );
-  if (!current?.apiKey || !current.apiSecret || !current.apiPassphrase)
+  const acknowledged = readHouseTransactionHashes(
+    job.result.acknowledgedTransactionHashes,
+  ).map((hash) => ({ provider_tx_hash: hash, provider_status: null }));
+  const local = [...stored.fills, ...acknowledged];
+  const hasCredentials =
+    current?.apiKey && current.apiSecret && current.apiPassphrase;
+  if (!hasCredentials && !local.length)
     return finish(pool, job, "submitted", "clob_credentials_pending");
-  const hash = job.reference;
-  const side = job.kind === "buy" ? "BUY" : "SELL";
-  const signer = a.controller;
-  const request = {
-    baseUrl: env.polymarketClobBase,
-    address: a.controller,
-    timeoutMs: 8_000,
-    creds: {
-      apiKey: current.apiKey,
-      apiSecret: current.apiSecret,
-      apiPassphrase: current.apiPassphrase,
-    },
-  };
-  const result = await readPolymarketFillCandidates({
-    owner: a.deposit_wallet,
-    orderHash: hash,
-    tokenId: instrument.assetId,
-    side,
-    consume: () => {
-      if (budget.remaining <= 0) throw new EvidenceBudgetExhausted(1, 0);
-      budget.remaining--;
-    },
-    assertBudget: (count) => {
-      const available = Math.min(32, budget.remaining);
-      if (count > available)
-        throw new EvidenceBudgetExhausted(count, available);
-    },
-    readOrder: async () => {
-      const read = await fetchPolymarketOrderByHash({
-        ...request,
-        orderHash: hash,
-      });
-      if (!read.ok)
-        await invalidatePolymarketCredentialsForInvalidApiKey({
-          endpoint: "house-trader-order-observe",
-          signer,
-          upstream: read,
-          userId: a.user_id,
+  let result: PolymarketFillObservation = { state: "unavailable" };
+  if (current?.apiKey && current.apiSecret && current.apiPassphrase) {
+    const request = {
+      baseUrl: env.polymarketClobBase,
+      address: a.controller,
+      timeoutMs: 8_000,
+      creds: {
+        apiKey: current.apiKey,
+        apiSecret: current.apiSecret,
+        apiPassphrase: current.apiPassphrase,
+      },
+    };
+    result = await readPolymarketFillCandidates({
+      owner: a.deposit_wallet,
+      orderHash: hash,
+      tokenId: instrument.assetId,
+      side,
+      consume: () => {
+        if (budget.remaining <= 0) throw new EvidenceBudgetExhausted(1, 0);
+        budget.remaining--;
+      },
+      assertBudget: (count) => {
+        const available = Math.min(HOUSE_MAX_FILL_EVIDENCE, budget.remaining);
+        if (count > available)
+          throw new EvidenceBudgetExhausted(count, available);
+      },
+      readOrder: async () => {
+        const read = await fetchPolymarketOrderByHash({
+          ...request,
+          orderHash: hash,
         });
-      return read;
-    },
-    readTrades: async (id) => {
-      const read = await fetchPolymarketTrades({ ...request, query: { id } });
-      if (!read.ok)
-        await invalidatePolymarketCredentialsForInvalidApiKey({
-          endpoint: "house-trader-fill-observe",
-          signer,
-          upstream: read,
-          userId: a.user_id,
-        });
-      return read;
-    },
-  });
-  if (result.state === "terminal_zero_fill")
-    return finish(pool, job, "skipped", "venue_no_fill");
-  if (result.state !== "fills")
-    return finish(pool, job, "submitted", `clob_evidence_${result.state}`);
-  if (!result.fills.length)
-    return finish(pool, job, "submitted", "clob_fill_pending");
-  const fills = result.fills.filter(
-    (fill) => fill.provider_status?.toUpperCase() !== "FAILED",
+        if (!read.ok)
+          await invalidatePolymarketCredentialsForInvalidApiKey({
+            endpoint: "house-trader-order-observe",
+            signer,
+            upstream: read,
+            userId: a.user_id,
+          });
+        return read;
+      },
+      readTrades: async (id) => {
+        const read = await fetchPolymarketTrades({ ...request, query: { id } });
+        if (!read.ok)
+          await invalidatePolymarketCredentialsForInvalidApiKey({
+            endpoint: "house-trader-fill-observe",
+            signer,
+            upstream: read,
+            userId: a.user_id,
+          });
+        return read;
+      },
+    });
+  }
+  const locators = resolveHouseFillLocators(
+    local,
+    result,
+    stored.hasExecution || job.result.acknowledgedExecution === true,
   );
-  if (
-    !fills.length ||
-    fills.some((fill) => !/^0x[0-9a-f]{64}$/i.test(fill.provider_tx_hash ?? ""))
-  )
-    return finish(pool, job, "submitted", "fill_transaction_reference_pending");
-  const hashes = [
-    ...new Set(
-      fills.flatMap((fill) =>
-        fill.provider_tx_hash ? [fill.provider_tx_hash.toLowerCase()] : [],
-      ),
-    ),
-  ];
+  if ("noFill" in locators) return finishHouseZeroFill(pool, job, hash);
+  if ("pending" in locators)
+    return finish(pool, job, "submitted", locators.pending);
+  const { hashes } = locators;
+  if (hashes.length > budget.receiptsRemaining)
+    throw new EvidenceBudgetExhausted(hashes.length, budget.receiptsRemaining);
   let cash = 0n,
     shares = 0n,
     maker = 0n;
   for (const txHash of hashes) {
+    budget.receiptsRemaining--;
     const receipt = await fetchEmbeddedEthereumTransactionReceipt({
       chainId: 137,
       txHash,
@@ -611,11 +685,7 @@ export async function observeTrade(
   if (maker !== BigInt(String(job.result.makerRaw)))
     return finish(pool, job, "submitted", "polygon_fill_amount_mismatch");
   const price = Number(cash < 0n ? -cash : cash) / Number(shares);
-  const existing = await pool.query<{ venue_order_id: string }>(
-    "select venue_order_id from orders where user_id=$1 and venue='polymarket' and order_hash=$2 limit 1",
-    [a.user_id, hash],
-  );
-  if (!existing.rows.length)
+  if (!stored.venueOrderId)
     await storeOrder(pool, {
       userId: a.user_id,
       walletAddress: a.deposit_wallet,
@@ -639,7 +709,7 @@ export async function observeTrade(
       },
       fundingRecoveryMode: "explicit_only",
     });
-  const venueOrderId = existing.rows[0]?.venue_order_id ?? hash;
+  const venueOrderId = stored.venueOrderId ?? hash;
   const terminal = await reconcilePolymarketTerminalOrder({
     userId: a.user_id,
     venueOrderId,

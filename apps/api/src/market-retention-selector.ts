@@ -4,6 +4,7 @@ import {
   matchingProtectedReferences,
   matchingDerivedReferences,
 } from "./services/matching-retention.js";
+import { houseTraderProtectedMarketReferencesSql } from "./services/house-trader-retention.js";
 import { pool } from "./db.js";
 import {
   hasCliFlag as hasFlag,
@@ -289,12 +290,7 @@ export function protectedRefsSql(
     from ${candidatePoolTable} c join ai_notes social_note on social_note.source_kind='market' and social_note.source_id=c.market_id
     join copy_attributions attribution_row on attribution_row.source_ai_note_id=social_note.id
     ${fundingOperationsRef}
-    ${options.includeHouseTraderActions ? `
-    union
-    select distinct c.market_id, 'house_trader_actions' as reason
-    from ${candidatePoolTable} c
-    join house_trader_actions action_row on action_row.market_id=c.market_id
-    ` : ""}
+    ${options.includeHouseTraderActions ? `union ${houseTraderProtectedMarketReferencesSql(candidatePoolTable)}` : ""}
     ${options.includeMatchingHistory ? `union ${matchingProtectedReferences(candidatePoolTable)}` : ""}
     ${fundingLiquidityProjectionsRef}
     ${fundingPreparationRunsRef}

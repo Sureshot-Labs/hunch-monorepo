@@ -21,7 +21,12 @@ CREATE TABLE house_trader_actions (
   kind text NOT NULL CHECK (kind IN ('setup','buy','sell','redeem','withdraw')),
   state text NOT NULL CHECK (state IN ('queued','working','submitting','submitted','filled','done','skipped','review')),
   claim_token uuid,
-  market_id text REFERENCES unified_markets(id) ON DELETE RESTRICT,
+  market_id text,
+  -- Keep the audit ID after a market is deleted. Only live work and actual
+  -- open positions protect the market, including against concurrent cleanup.
+  protected_market_id text GENERATED ALWAYS AS (
+    CASE WHEN state IN ('queued','working','submitting','submitted','filled') THEN market_id END
+  ) STORED REFERENCES unified_markets(id) ON DELETE RESTRICT,
   event_id text,
   token_id text,
   outcome text CHECK (outcome IN ('YES','NO')),
@@ -42,6 +47,8 @@ CREATE INDEX house_trader_actions_account_recent
   ON house_trader_actions(account_user_id, created_at DESC, id DESC);
 CREATE INDEX house_trader_actions_market_ref
   ON house_trader_actions(market_id) WHERE market_id IS NOT NULL;
+CREATE INDEX house_trader_actions_protected_market_ref
+  ON house_trader_actions(protected_market_id) WHERE protected_market_id IS NOT NULL;
 CREATE INDEX house_trader_action_outstanding
   ON house_trader_actions(account_user_id, created_at, id)
   WHERE state IN ('queued','working','submitting','submitted','review');

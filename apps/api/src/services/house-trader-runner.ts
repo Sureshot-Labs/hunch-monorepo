@@ -30,6 +30,7 @@ import {
   contextFor,
   sellNet,
   sellQuote,
+  indicativeSellQuote,
   trackedShares,
   repairHouseFillHistory,
 } from "./house-trader-orders.js";
@@ -329,7 +330,12 @@ async function managePositions(pool: Pool, wallet: HouseWallet, a: Account) {
       )
         continue;
       const { context } = await contextFor(pool, pos);
-      const quote = sellQuote(context, pos.token_id, available, policy);
+      const quote = indicativeSellQuote(
+        context,
+        pos.token_id,
+        available,
+        policy,
+      );
       const net = sellNet(quote);
       // Use the canonical pUSD debit, including any charges present in the
       // fill receipt; the quote was a spending limit, not a fill.
@@ -345,6 +351,7 @@ async function managePositions(pool: Pool, wallet: HouseWallet, a: Account) {
       );
       const priceCause = cost === null ? null : priceExit(net, cost, policy);
       if (priceCause) {
+        sellQuote(context, pos.token_id, available, policy);
         await tx(pool, async (db) => {
           const current = await account(db, true);
           if (
@@ -542,7 +549,7 @@ export async function houseTick(pool: Pool, wallet: HouseWallet) {
     ).rows;
     let observed = 0;
     let observationErrors = 0;
-    const evidenceBudget = { remaining: 36 };
+    const evidenceBudget = { remaining: 36, receiptsRemaining: 36 };
     for (const job of pending) {
       const trade = job.kind === "buy" || job.kind === "sell";
       if (trade && evidenceBudget.remaining <= 0) continue;

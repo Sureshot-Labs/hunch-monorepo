@@ -7,6 +7,7 @@ import {
   boundary,
   confirmHousePreview,
   enqueue,
+  finishHouseZeroFill,
   hasHouseExitInFlight,
   houseAdminActivitySql,
   houseBuyEligibility,
@@ -19,6 +20,16 @@ import {
   type Action,
 } from "./services/house-trader-store.js";
 import { houseTraderDefault } from "./services/house-trader-policy.js";
+import {
+  buildPolymarketAssetContext,
+  resolvePolymarketMarketAssets,
+} from "@hunch/shared";
+import {
+  houseStoredFillLocatorsSql,
+  houseStoredOrderSql,
+  readHouseStoredOrder,
+} from "./services/house-trader-fill-evidence.js";
+import { houseTraderProtectedMarketReferencesSql } from "./services/house-trader-retention.js";
 import {
   houseSweepBoundarySql,
   houseSweepRevertedSql,
@@ -418,10 +429,20 @@ try {
   const newPreview = async (label: string) => {
     const item = (
       await db.query<{ id: string }>(
-        `insert into house_trader_actions(account_user_id,action_key,kind,state,revision,reason,request)
-       values($1,$2,'sell','review',0,'confirm_preview',jsonb_build_object('positionId',$3::text))
+        `insert into house_trader_actions(account_user_id,action_key,kind,state,revision,reason,request,
+          market_id,event_id,token_id,outcome)
+       values($1,$2,'sell','review',0,'confirm_preview',jsonb_build_object('positionId',$3::text),
+         $4,$5,$6,$7)
        returning id`,
-        [user, label, winner.id],
+        [
+          user,
+          label,
+          winner.id,
+          winner.market_id,
+          winner.event_id,
+          winner.token_id,
+          winner.outcome,
+        ],
       )
     ).rows[0];
     return item.id;
@@ -514,6 +535,246 @@ try {
     eligibility: await readPlan(houseBuyEligibilitySql, eligibilityBind),
     adminActivity: await readPlan(houseAdminActivitySql, [user]),
   });
+  await db.query(
+    "insert into unified_markets(id) values ('polymarket:retention-fixture')",
+  );
+  const retentionRow = (
+    await db.query<{ id: string }>(
+      `insert into house_trader_actions(account_user_id,action_key,kind,state,revision,market_id)
+     values($1,'retention-fixture','buy','filled',0,'polymarket:retention-fixture') returning id`,
+      [user],
+    )
+  ).rows[0];
+  await assert.rejects(
+    db.query(
+      "delete from unified_markets where id='polymarket:retention-fixture'",
+    ),
+    /house_trader_actions_protected_market_id_fkey/,
+  );
+  await db.query(
+    "update house_trader_actions set state='skipped',reason='category_filtered' where id=$1",
+    [retentionRow.id],
+  );
+  assert.equal(
+    (
+      await db.query(
+        "delete from unified_markets where id='polymarket:retention-fixture'",
+      )
+    ).rowCount,
+    1,
+  );
+  const audit = (
+    await db.query(
+      "select market_id,protected_market_id from house_trader_actions where id=$1",
+      [retentionRow.id],
+    )
+  ).rows[0];
+  assert.deepEqual(audit, {
+    market_id: "polymarket:retention-fixture",
+    protected_market_id: null,
+  });
+  // A retention batch selected before an action was queued must not win a
+  // race with an uncommitted FK reference from the worker.
+  await db.query(
+    "insert into unified_markets(id) values ('polymarket:retention-race')",
+  );
+  const queueClient = await db.connect();
+  const deleteClient = await db.connect();
+  try {
+    await queueClient.query("begin");
+    await queueClient.query(
+      `insert into house_trader_actions(account_user_id,action_key,kind,state,revision,market_id)
+        values($1,'retention-race','buy','queued',0,'polymarket:retention-race')`,
+      [user],
+    );
+    await deleteClient.query("begin");
+    await deleteClient.query("set local lock_timeout = '150ms'");
+    await assert.rejects(
+      deleteClient.query(
+        "delete from unified_markets where id='polymarket:retention-race'",
+      ),
+      { code: "55P03" },
+    );
+    await deleteClient.query("rollback");
+    await queueClient.query("commit");
+    await assert.rejects(
+      deleteClient.query(
+        "delete from unified_markets where id='polymarket:retention-race'",
+      ),
+      { code: "23503" },
+    );
+  } finally {
+    await queueClient.query("rollback").catch(() => {});
+    await deleteClient.query("rollback").catch(() => {});
+    queueClient.release();
+    deleteClient.release();
+  }
+  await db.query(`create table orders(id uuid primary key default gen_random_uuid(),
+    user_id uuid not null, venue text, order_hash text, venue_order_id text,
+    wallet_address text, signer_address text, token_id text, side text, order_payload jsonb,
+    status text, filled_size numeric);
+    create index idx_orders_order_hash on orders(order_hash);
+    create table order_fills(order_id uuid not null,venue_trade_id text,provider_tx_hash text,provider_status text);
+    create index idx_order_fills_order_id on order_fills(order_id);`);
+  const asset = buildPolymarketAssetContext(
+    "polymarket:1",
+    resolvePolymarketMarketAssets({
+      version: "v1",
+      conditionId: `0x${"1".repeat(64)}`,
+      clobTokenIds: ["100", "101"],
+      outcomes: ["YES", "NO"],
+    }),
+    "100",
+  );
+  const identity = {
+    userId: user,
+    asset,
+    hash: `0x${"a".repeat(64)}`,
+    owner: `0x${"2".repeat(40)}`,
+    signer: `0x${"3".repeat(40)}`,
+    side: "BUY" as const,
+  };
+  assert.deepEqual(await readHouseStoredOrder(db, identity), {
+    state: "ok",
+    venueOrderId: null,
+    fills: [],
+    hasExecution: false,
+  });
+  const storedOrder = (
+    await db.query<{ id: string }>(
+      `insert into orders(user_id,venue,order_hash,venue_order_id,wallet_address,signer_address,token_id,side,order_payload)
+      values($1,'polymarket',$2,'fixture',$3,$4,'100','BUY',$5) returning id`,
+      [
+        user,
+        identity.hash,
+        identity.owner,
+        identity.signer,
+        { assetContext: asset },
+      ],
+    )
+  ).rows[0];
+  const locator = `0x${"b".repeat(64)}`;
+  await db.query("insert into order_fills values($1,'trade-one',$2,'MINED')", [
+    storedOrder.id,
+    locator,
+  ]);
+  await db.query(
+    "update orders set status='matched',filled_size=123 where id=$1",
+    [storedOrder.id],
+  );
+  assert.deepEqual(await readHouseStoredOrder(db, identity), {
+    state: "ok",
+    venueOrderId: "fixture",
+    hasExecution: true,
+    fills: [
+      {
+        venue_trade_id: "trade-one",
+        provider_tx_hash: locator,
+        provider_status: "MINED",
+      },
+    ],
+  });
+  assert.deepEqual(
+    await readHouseStoredOrder(db, { ...identity, side: "SELL" }),
+    { state: "conflict" },
+  );
+  assert.deepEqual(
+    await readHouseStoredOrder(db, { ...identity, signer: identity.owner }),
+    { state: "conflict" },
+  );
+  const pendingOrder = (
+    await db.query<Action>(
+      `insert into house_trader_actions(account_user_id,action_key,kind,state,revision,reference,budget_raw)
+      values($1,'zero-fill-race','buy','submitted',0,$2,1000000) returning *`,
+      [user, identity.hash],
+    )
+  ).rows[0];
+  await finishHouseZeroFill(db, pendingOrder, identity.hash);
+  assert.deepEqual(
+    (
+      await db.query(
+        "select state,reason,budget_raw from house_trader_actions where id=$1",
+        [pendingOrder.id],
+      )
+    ).rows[0],
+    {
+      state: "submitted",
+      reason: "clob_zero_fill_conflicts_with_saved_execution",
+      budget_raw: "1000000",
+    },
+  );
+  await db.query("delete from order_fills where order_id=$1", [storedOrder.id]);
+  await db.query(
+    "update orders set status='unmatched',filled_size=0 where id=$1",
+    [storedOrder.id],
+  );
+  await finishHouseZeroFill(db, pendingOrder, identity.hash);
+  const cleared = (
+    await db.query(
+      "select state,reason from house_trader_actions where id=$1",
+      [pendingOrder.id],
+    )
+  ).rows[0];
+  assert.deepEqual(cleared, { state: "skipped", reason: "venue_no_fill" });
+  await db.query(
+    `insert into order_fills
+    select $1,'extra:' || series.row_num,$2,'MINED' from generate_series(1,33) series(row_num)`,
+    [storedOrder.id, locator],
+  );
+  assert.deepEqual(await readHouseStoredOrder(db, identity), {
+    state: "limit",
+  });
+  await db.query(
+    `insert into orders(user_id,venue,order_hash,venue_order_id,status)
+       select $1,'polymarket','0x'||lpad(to_hex(series.row_num),64,'0'),
+           'test-'||series.row_num,'matched' from generate_series(1,50000) series(row_num)`,
+    [user],
+  );
+  await db.query(`insert into order_fills(order_id,venue_trade_id,provider_status)
+      select order_row.id,'historic:'||series.ordinality,'MINED'
+      from orders order_row cross join generate_series(1,2) series(ordinality)
+      where order_row.venue_order_id like 'test-%';
+    insert into unified_markets(id) select 'polymarket:bulk' || series.row_num
+      from generate_series(1,4000) series(row_num);`);
+  await db.query(
+    `insert into house_trader_actions(account_user_id,action_key,kind,state,revision,market_id)
+      select $1,'historic-terminal:' || series.row_num,'buy','skipped',0,
+             'polymarket:bulk'||(series.row_num%4000+1)
+      from generate_series(1,30000) series(row_num)`,
+    [user],
+  );
+  await db.query(
+    "analyze orders; analyze order_fills; analyze house_trader_actions; analyze unified_markets",
+  );
+  const protectedSql = `with review_candidates as materialized (
+      select id as market_id from unified_markets order by id limit 1000)
+    ${houseTraderProtectedMarketReferencesSql("review_candidates")}`;
+  const protectedRows = (await db.query(protectedSql)).rows;
+  assert.ok(protectedRows.some((row) => row.market_id === winner.market_id));
+  assert.ok(
+    protectedRows.every(
+      (row) => !(row.market_id as string).startsWith("polymarket:bulk"),
+    ),
+  );
+  const plans = {
+    storedOrder: await readPlan(houseStoredOrderSql, [identity.hash, user]),
+    storedFills: await readPlan(houseStoredFillLocatorsSql, [
+      storedOrder.id,
+      33,
+    ]),
+    retention: await readPlan(protectedSql, []),
+  };
+  assert.ok(plans.storedOrder.indexes.includes("idx_orders_order_hash"));
+  assert.ok(plans.storedFills.indexes.includes("idx_order_fills_order_id"));
+  assert.ok(
+    plans.retention.indexes.includes(
+      "house_trader_actions_protected_market_ref",
+    ),
+  );
+  console.info(
+    "PG16 scale fixtures (50k orders, 100k fills, 30k historical House actions)",
+    plans,
+  );
   console.info(
     "PG16 migration, native signal admission/dedup, edits before submit, trade caps, pause fencing, confirmation fencing, portfolio and sweep recovery passed",
   );
