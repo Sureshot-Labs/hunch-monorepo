@@ -905,8 +905,17 @@ export async function reduceFundingOperationInTransaction(
   );
   // The consumer reserves the whole confirmed contribution, not just Relay.
   // Recompute from evidence on every reduction; never add to a cached total.
-  const actualDestinationAmount =
-    routedDestinationAmount == null
+  const partial = lifecycle.partialSettledDestination;
+  const actualDestinationAmount: JsonRecord | null = partial
+    ? {
+        asset: {
+          networkId: partial.networkId,
+          assetId: partial.assetId,
+          decimals: partial.decimals,
+        },
+        raw: partial.raw,
+      }
+    : routedDestinationAmount == null
       ? null
       : {
           ...routedDestinationAmount,

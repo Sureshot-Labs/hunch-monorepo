@@ -158,6 +158,7 @@ export class FundingQuoteService {
       db: Pool;
       planningStore: FundingPlanningStore;
       createQuote?: typeof createFundingQuote;
+      verifySourceCapacity?: (plan: FundingCommitPlan) => Promise<void>;
       revalidateWithdrawalRecipient?: (
         userId: string,
         recipientId: string,
@@ -388,7 +389,10 @@ export class FundingQuoteService {
             now.getTime() + quoteTtlMs,
           ),
     );
-    if (expiresAt.getTime() <= now.getTime()) {
+    await this.dependencies.verifySourceCapacity?.(plan);
+    if (
+      expiresAt.getTime() <= (this.dependencies.now?.() ?? new Date()).getTime()
+    ) {
       throw new FundingPlannerError(
         "stale_projection",
         "selected source option expired before quote creation",

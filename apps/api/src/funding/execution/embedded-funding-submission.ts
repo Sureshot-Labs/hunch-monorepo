@@ -19,6 +19,7 @@ import {
 } from "./transaction-reference-codec.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import {
+  EMBEDDED_PRE_SUBMIT_LEASE_EXPIRED,
   parseEmbeddedFundingSubmission,
   validateEmbeddedFundingPayload,
   type EmbeddedFundingContext,
@@ -430,7 +431,7 @@ export async function closeExpiredEmbeddedFundingPreparationsInTransaction(
         now,
         {
           embeddedSubmission: { ...lease, phase: "closed" },
-          reasonCode: "embedded_pre_submit_lease_expired",
+          reasonCode: EMBEDDED_PRE_SUBMIT_LEASE_EXPIRED,
         },
       ],
     );

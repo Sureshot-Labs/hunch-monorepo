@@ -16,7 +16,10 @@ import type {
 } from "../../domain/types.js";
 import type { PreparationResult } from "../../domain/contracts.js";
 import type { FundingOperationStep } from "../../persistence/funding-evidence-repository.js";
-import type { FundingOperationRow } from "../../persistence/funding-operation-repository.js";
+import {
+  FundingSourceCapacityChangedError,
+  type FundingOperationRow,
+} from "../../persistence/funding-operation-repository.js";
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
 import { WithdrawalDestinationError } from "../../execution/withdrawal-destination-runtime.js";
 import { FundingPlannerError } from "../../planner/money.js";
@@ -28,6 +31,8 @@ import {
   type FundingRouteDependencies,
 } from "../../../routes/funding.js";
 import { fundingValidationErrorResponseSchema } from "../../../schemas/funding.js";
+import { polymarketOrderSubmitLogger } from "../../../routes/polymarket-private.js";
+import { TradingServiceError } from "../../../services/trading-errors.js";
 import { buildFundingExecutionPreflight } from "../../execution/operation-execution-preflight.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import { SafeFundingSubmissionUnknownError } from "../../execution/safe-funding-submission.js";
@@ -1164,6 +1169,42 @@ await test("volatile receive receipt review uses the authenticated receipt ident
   }
 });
 
+await test("funding capacity conflicts keep the legacy code and give safe recovery steps", async () => {
+  const reject = async () => {
+    throw new FundingSourceCapacityChangedError("internal capacity detail");
+  };
+  const app = await buildApp({ quote: reject, commit: reject });
+  try {
+    for (const [url, payload] of [
+      [
+        "/funding/quotes",
+        {
+          liquidityProjectionId: liquidity().liquidityProjectionId,
+          selectedSourceOptionId: "source_fixture_12345678",
+          confirmedSourceAmount: null,
+          requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
+        },
+      ],
+      [
+        "/funding/operations",
+        {
+          quoteId: quote().quoteId,
+          consentToken: quote().consentToken,
+          idempotencyKey: "capacity_conflict_12345678",
+        },
+      ],
+    ] as const) {
+      const response = await app.inject({ method: "POST", url, payload });
+      assert.equal(response.statusCode, 409);
+      assert.equal(response.json().code, "quote_invalidated");
+      assert.match(response.json().error, /Refresh your funding options/i);
+      assert.doesNotMatch(response.body, /internal capacity detail/);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 await test("volatile receive receipt commit remains on the standard operation contract", async () => {
   let observedRequest: unknown = null;
   const app = await buildApp({
@@ -1250,6 +1291,134 @@ await test("sell destination discovery forwards the owner-scoped position refere
     assert.equal(response.statusCode, 200);
     assert.equal(observedQuery?.purpose, "sell");
     assert.equal(observedQuery?.positionActionRef, positionActionRef);
+    assert.deepEqual(response.json().sellReadiness, {
+      status: "ready",
+      reasonCodes: [],
+    });
+    assert.match(String(response.headers["x-hunch-request-id"]), /^req-/);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("empty SELL results preserve options and distinguish failed checks", async () => {
+  const app = await buildApp({
+    destinations: async (_userId, query, trace) => {
+      if (trace) {
+        trace.marketResolved = true;
+        if (query.marketContextId === "1") {
+          trace.failed = 1;
+          trace.failureCodes = ["preparation_unavailable"];
+        } else if (query.marketContextId === "2") trace.marketResolved = false;
+        else {
+          trace.failed = 1;
+          trace.failureCodes = ["binding_mismatch"];
+        }
+      }
+      return [];
+    },
+  });
+  try {
+    for (const [marketContextId, reason] of [
+      ["1", "sell_inspection_unavailable"],
+      ["2", "sell_market_unresolved"],
+      ["3", "position_owner_mismatch"],
+    ]) {
+      const response = await app.inject(
+        `/funding/destinations?purpose=sell&marketContextId=${marketContextId}`,
+      );
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), {
+        ok: true,
+        options: [],
+        sellReadiness: { status: "unavailable", reasonCodes: [reason] },
+      });
+    }
+    const legacy = await app.inject("/funding/destinations");
+    assert.deepEqual(legacy.json(), { ok: true, options: [] });
+  } finally {
+    await app.close();
+  }
+});
+
+await test("SELL diagnostics do not claim readiness when multiple wallets are selectable", async () => {
+  const app = await buildApp({
+    destinations: async () => [destination(), destination()],
+  });
+  try {
+    const response = await app.inject("/funding/destinations?purpose=sell");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().options.length, 2);
+    assert.deepEqual(response.json().sellReadiness, {
+      status: "selection_required",
+      reasonCodes: ["sell_destination_ambiguous"],
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+await test("SELL retains legacy explicit transfer flow in options but distinguishes it in diagnostics", async () => {
+  const app = await buildApp({
+    destinations: async (_userId, _query, trace) => {
+      if (trace) trace.positionTransferRequired = true;
+      return [destination()];
+    },
+  });
+  try {
+    const response = await app.inject("/funding/destinations?purpose=sell");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().options[0].preparationStatus, "ready");
+    assert.deepEqual(response.json().sellReadiness, {
+      status: "setup_required",
+      reasonCodes: ["position_funder_transfer_required"],
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+await test("Polymarket submission failures use correlated, redacted request logging", async () => {
+  const lines: string[] = [];
+  const app = Fastify({
+    logger: { stream: { write: (line) => lines.push(line) } },
+  });
+  app.setErrorHandler((err, req, reply) => {
+    req.log.error({ err }, "submit exception");
+    reply.code(500).send({ ok: false });
+  });
+  const secret = "private-wallet-or-upstream-value";
+  app.post("/order", async (req) => {
+    req.log = polymarketOrderSubmitLogger(req.log, "user-uuid", undefined);
+    req.log.warn(
+      {
+        signer: secret,
+        upstreamMessage: secret,
+        error: new Error(secret),
+        input: {
+          userId: secret,
+          body: secret,
+          data: { walletAddress: secret },
+        },
+      },
+      "upstream rejection",
+    );
+    throw new TradingServiceError({
+      code: "quote_unavailable",
+      message: secret,
+    });
+  });
+  try {
+    await app.inject({ method: "POST", url: "/order" });
+    const events = lines
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.stage === "polymarket_order_submit");
+    assert.equal(events.length, 2);
+    assert.match(events[0].accountKey, /^trade_[0-9a-f]{32}$/);
+    assert.equal(events[0].reqId, events[1].reqId);
+    assert.equal(events[1].err.code, "quote_unavailable");
+    assert.equal(events[0].error.code, "polymarket_submit_interrupted");
+    assert.ok(!lines.join("").includes(secret));
   } finally {
     await app.close();
   }

@@ -21,6 +21,7 @@ import {
   assertEmbeddedExecutionScope,
   assertEmbeddedFundingAuthorizationSignatures,
   embeddedFundingExecutionKey,
+  type EmbeddedFundingContext,
   type EmbeddedFundingPayload,
 } from "../funding/execution/embedded-funding-submission-contract.js";
 import {
@@ -183,7 +184,14 @@ async function embeddedSolanaFundingPayload(
         fetch(url, { ...init, signal: AbortSignal.timeout(10_000) }),
     });
     for (const address of addresses) {
-      const table = await connection.getAddressLookupTable(address);
+      const table = await connection
+        .getAddressLookupTable(address)
+        .catch(() => {
+          throw new FundingPersistenceError(
+            "quote_invalidated",
+            "Solana lookup verification unavailable",
+          );
+        });
       if (!table.value)
         throw new FundingPersistenceError(
           "quote_invalidated",
@@ -1734,9 +1742,9 @@ async function cacheEmbeddedSolanaPreparedRequests(inputs: {
     await redis.set(key, JSON.stringify({ requests: inputs.requests }), {
       EX: EMBEDDED_SOLANA_PREPARED_TTL_SEC,
     });
-  } catch (error) {
+  } catch {
     inputs.log.warn(
-      { error, signer: inputs.signer },
+      { code: "embedded_solana_prepared_cache_write_failed" },
       "Failed to cache prepared embedded Solana requests in Redis",
     );
   }
@@ -1785,9 +1793,9 @@ async function readCachedEmbeddedSolanaPreparedRequests(inputs: {
       const cached = parseEmbeddedSolanaPreparedRequests(await redis.get(key));
       if (cached) return cached;
     }
-  } catch (error) {
+  } catch {
     inputs.log.warn(
-      { error, signer: inputs.signer },
+      { code: "embedded_solana_prepared_cache_read_failed" },
       "Failed to read prepared embedded Solana requests from Redis",
     );
   }
@@ -1876,9 +1884,11 @@ async function deleteCachedSolanaPrefundPreparedRequest(inputs: {
 }
 
 export async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
+  traceRequestId?: string;
   user: NonNullable<FastifyRequest["user"]>;
   signer: string;
   transactions: EmbeddedSolanaTransactionSpec[];
+  fundingContext?: EmbeddedFundingContext;
   dependencies?: {
     prepareFunding: typeof prepareFundingSolanaPayment;
     getRedis: typeof getRedis;
@@ -1914,8 +1924,10 @@ export async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
               userId: inputs.user.id,
               signer: inputs.signer,
               requestId: transaction.id,
+              traceRequestId: inputs.traceRequestId,
               transaction: transaction.transaction,
               requestedSponsor: transaction.sponsor === true,
+              fundingContext: inputs.fundingContext,
             })
           : null;
       if (relay) {
@@ -2008,9 +2020,11 @@ function isEmbeddedSolanaPreparedRequestSponsored(
 }
 
 export async function validateEmbeddedSolanaSponsorshipAtExecute(inputs: {
+  traceRequestId?: string;
   user: NonNullable<FastifyRequest["user"]>;
   signer: string;
   requests: EmbeddedPrivyAuthorizationRequest[];
+  fundingContext?: EmbeddedFundingContext;
   prepareFunding?: typeof prepareFundingSolanaPayment;
   fundingRedis?: Awaited<ReturnType<typeof getRedis>>;
 }): Promise<void> {
@@ -2043,8 +2057,10 @@ export async function validateEmbeddedSolanaSponsorshipAtExecute(inputs: {
         userId: inputs.user.id,
         signer: inputs.signer,
         requestId: request.id,
+        traceRequestId: inputs.traceRequestId,
         transaction,
         execute: true,
+        fundingContext: inputs.fundingContext,
         requestedSponsor: isEmbeddedSolanaPreparedRequestSponsored(request),
         expectedBinding: request.fundingPayment,
       });
@@ -3064,6 +3080,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       schema: { body: embeddedSolanaPrepareBodySchema },
     },
     async (request, reply) => {
+      reply.header("x-hunch-request-id", request.id);
       const user = request.user;
       const signer = request.walletAddress;
       if (!user || !signer) {
@@ -3085,9 +3102,11 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           : (request.body.executionKey ?? null);
         const sponsorshipPolicy =
           await applyEmbeddedSolanaBackendSponsorshipPolicy({
+            traceRequestId: request.id,
             user,
             signer: context.signer,
             transactions: request.body.transactions,
+            fundingContext: request.body.fundingContext,
           });
         const requests = await prepareEmbeddedSolanaTransactionRequests({
           context,
@@ -3096,9 +3115,13 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           fundingPayment: sponsorshipPolicy.fundingPayment,
           embeddedSolanaSponsorshipEnabled:
             sponsorshipPolicy.embeddedSolanaSponsorshipEnabled,
-          onSponsorBalanceFetchError: (error) => {
-            app.log.warn(
-              { error, userId: user.id, signer: context.signer },
+          onSponsorBalanceFetchError: () => {
+            request.log.warn(
+              {
+                operationId: request.body.fundingContext?.operationId,
+                stepId: request.body.fundingContext?.stepId,
+                diagnosticReason: "rpc_balance",
+              },
               "Embedded Solana balance fetch failed",
             );
           },
@@ -3125,9 +3148,12 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           });
         }
         if (sponsorshipPolicy.fundingPayment && requests[0])
-          app.log.info(
+          request.log.info(
             {
-              ...sponsorshipPolicy.fundingPayment.binding,
+              operationId: sponsorshipPolicy.fundingPayment.binding.operationId,
+              stepId: sponsorshipPolicy.fundingPayment.binding.stepId,
+              attemptNumber:
+                sponsorshipPolicy.fundingPayment.binding.attemptNumber,
               stage: "embedded_prepare",
               finalSponsor: isEmbeddedSolanaPreparedRequestSponsored(
                 requests[0],
@@ -3139,7 +3165,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           signer: context.signer,
           executionKey,
           requests,
-          log: app.log,
+          log: request.log,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -3148,16 +3174,20 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           requests,
         });
       } catch (error) {
-        app.log.error(
+        request.log.error(
           {
-            error,
-            userId: user.id,
-            signer,
+            operationId: request.body.fundingContext?.operationId,
+            stepId: request.body.fundingContext?.stepId,
             stage: "embedded_prepare",
-            actionIds: request.body.transactions.map((entry) => entry.id),
             code:
               error instanceof SolanaFundingPaymentError
                 ? error.code
+                : error instanceof FundingPersistenceError
+                  ? error.code
+                  : "embedded_prepare_failed",
+            diagnosticReason:
+              error instanceof SolanaFundingPaymentError
+                ? error.diagnosticReason
                 : undefined,
           },
           "Failed to prepare embedded Solana transactions",
@@ -3186,6 +3216,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       schema: { body: embeddedSolanaExecuteBodySchema },
     },
     async (request, reply) => {
+      reply.header("x-hunch-request-id", request.id);
       const user = request.user;
       const signer = request.walletAddress;
       if (!user || !signer) {
@@ -3218,7 +3249,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           const requests = await readCachedEmbeddedSolanaPreparedRequests({
             signer: context.signer,
             executionKey: embeddedFundingExecutionKey(fundingContext),
-            log: app.log,
+            log: request.log,
           });
           if (
             !requests ||
@@ -3239,8 +3270,10 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           // server cache metadata can supply this copy; signed bytes retain the
           // scoped key and cannot be replayed through the generic endpoint.
           await validateEmbeddedSolanaSponsorshipAtExecute({
+            traceRequestId: request.id,
             user,
             signer: context.signer,
+            fundingContext,
             requests: requests.map((entry) => ({
               ...entry,
               input: {
@@ -3323,14 +3356,18 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               );
             const submit = async () => {
               await validateEmbeddedSolanaSponsorshipAtExecute({
+                traceRequestId: request.id,
                 user,
                 signer: context.signer,
                 requests,
               });
-              if (requests[0]?.fundingPayment)
-                app.log.info(
+              const verifiedFunding = requests[0]?.fundingPayment;
+              if (verifiedFunding)
+                request.log.info(
                   {
-                    ...requests[0].fundingPayment,
+                    operationId: verifiedFunding.operationId,
+                    stepId: verifiedFunding.stepId,
+                    attemptNumber: verifiedFunding.attemptNumber,
                     stage: "embedded_execute",
                     finalSponsor: isEmbeddedSolanaPreparedRequestSponsored(
                       requests[0],
@@ -3375,16 +3412,22 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(result);
       } catch (error) {
-        app.log.error(
+        request.log.error(
           {
-            error,
-            userId: user.id,
-            executionKey: request.body.executionKey,
-            signer,
+            operationId: request.body.fundingContext?.operationId,
+            stepId: request.body.fundingContext?.stepId,
             stage: "embedded_execute",
             code:
               error instanceof SolanaFundingPaymentError
                 ? error.code
+                : error instanceof FundingPersistenceError
+                  ? error.code
+                  : error instanceof EmbeddedFundingSubmissionUnknownError
+                    ? "funding_submission_unknown"
+                    : "embedded_execute_failed",
+            diagnosticReason:
+              error instanceof SolanaFundingPaymentError
+                ? error.diagnosticReason
                 : undefined,
           },
           "Failed to execute embedded Solana transactions",

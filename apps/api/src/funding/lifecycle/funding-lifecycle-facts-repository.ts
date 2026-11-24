@@ -10,6 +10,10 @@ import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs
 import { parseSafeFundingSubmission } from "../execution/safe-funding-submission-contract.js";
 import { isClosedUnbroadcastSolanaPreparation } from "../execution/solana-preparation.js";
 import {
+  isClosedUnbroadcastEmbeddedSolanaPreparation,
+  parseEmbeddedFundingSubmission,
+} from "../execution/embedded-funding-submission-contract.js";
+import {
   listFundingObservationsForOperations,
   type FundingObservationRow,
 } from "../persistence/funding-operation-repository.js";
@@ -48,6 +52,7 @@ type LifecycleActionRow = Readonly<{
   action_validation_result: JsonRecord;
   attempt_actual_costs: JsonRecord | null;
   attempt_number: number | null;
+  attempt_id: string | null;
   attempt_outcome: FundingLifecycleActionAttempt["outcome"] | null;
   attempt_reference_kind: FundingLifecycleActionAttempt["referenceKind"] | null;
   attempt_started_at: Date | null;
@@ -484,6 +489,9 @@ function compileFundingLifecycleFacts(
   const actionsById = new Map<string, FundingLifecycleActionFact>();
   for (const row of actionRows) {
     const existing = actionsById.get(row.id);
+    const embeddedLease = parseEmbeddedFundingSubmission(
+      row.attempt_actual_costs?.embeddedSubmission,
+    );
     const attempt =
       row.attempt_number === null ||
       row.attempt_outcome === null ||
@@ -496,7 +504,24 @@ function compileFundingLifecycleFacts(
             outcome: row.attempt_outcome,
             broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
             referenceKind: row.attempt_reference_kind,
+            ...(embeddedLease?.phase === "prepared" && row.attempt_id
+              ? {
+                  embeddedPreparation: {
+                    attemptId: row.attempt_id,
+                    expiresAt: new Date(embeddedLease.expiresAt),
+                  },
+                }
+              : {}),
             unbroadcastSolanaPreparationClosed:
+              isClosedUnbroadcastEmbeddedSolanaPreparation({
+                executorId: row.executor_id,
+                actionKind: row.action_kind,
+                outcome: row.attempt_outcome,
+                broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
+                referenceKind: row.attempt_reference_kind,
+                actualCosts: row.attempt_actual_costs,
+                now,
+              }) ||
               isClosedUnbroadcastSolanaPreparation({
                 executorId: row.executor_id,
                 actionKind: row.action_kind,
@@ -787,6 +812,7 @@ export async function loadFundingLifecycleFactsForOperationsInTransaction(
              step.action_expires_at,
              step.executor_id,
              attempt.attempt_number,
+             attempt.id as attempt_id,
              attempt.outcome as attempt_outcome,
              attempt.broadcast_may_have_occurred,
              attempt.reference_kind as attempt_reference_kind,

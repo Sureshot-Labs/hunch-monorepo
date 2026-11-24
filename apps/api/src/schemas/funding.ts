@@ -961,6 +961,18 @@ export const fundingDestinationsResponseSchema = z
   .object({
     ok: z.literal(true),
     options: z.array(fundingDestinationOptionSchema).max(128),
+    sellReadiness: z
+      .object({
+        status: z.enum([
+          "ready",
+          "setup_required",
+          "selection_required",
+          "unavailable",
+        ]),
+        reasonCodes: z.array(z.string()).max(24),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

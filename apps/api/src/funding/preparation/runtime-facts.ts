@@ -24,6 +24,7 @@ export type RuntimeWalletAuthority = Readonly<{
 }>;
 
 export type RuntimeCredentialEvidence = Readonly<{
+  validationUnavailable?: boolean;
   present: boolean;
   boundToExactWallet: boolean;
   verified: boolean;
@@ -63,6 +64,8 @@ export type RuntimeMarketEvidence = Readonly<{
 
 export type RuntimePositionEvidence = Readonly<{
   ownerMatchesBinding: boolean;
+  requiresTransfer?: boolean;
+  spendabilityUnavailable?: boolean;
   balanceRaw: string | null;
   lockedRaw: string | null;
   conditionResolved: boolean | null;
@@ -340,6 +343,12 @@ function credentialsCheck(
       }),
     });
   }
+  if (evidence.validationUnavailable)
+    return unavailable(
+      "credentials_valid",
+      `${label} connection could not be checked`,
+      "provider_status_unknown",
+    );
   if (!evidence.verified || evidence.stale) {
     return required({
       checkId: "credentials_valid",
@@ -507,6 +516,7 @@ function polymarketFundingRouterChecks(
 function positionChecks(
   position: RuntimePositionEvidence | null,
   canonicalCheckId: string,
+  awaitingCredentials = false,
 ): PreparationFactCheck[] {
   if (!position) {
     return [
@@ -542,20 +552,38 @@ function positionChecks(
       ? satisfied("position_owner", "Position belongs to the exact binding")
       : unavailable(
           "position_owner",
-          "Position belongs to another wallet binding",
-          "position_owner_mismatch",
+          position.requiresTransfer
+            ? "Position shares are held by the signer, not the trading wallet"
+            : "Position belongs to another wallet binding",
+          position.requiresTransfer
+            ? "position_funder_transfer_required"
+            : "position_owner_mismatch",
         ),
-    spendableRaw(position.balanceRaw, position.lockedRaw)
-      ? satisfied("shares_spendable", "Position shares are spendable")
-      : unavailable(
-          "shares_spendable",
-          positiveRaw(position.balanceRaw)
-            ? "Position shares are locked"
-            : "No spendable position shares are available",
-          positiveRaw(position.balanceRaw)
-            ? "locked_funds"
-            : "market_evidence_unavailable",
-        ),
+    position.spendabilityUnavailable
+      ? awaitingCredentials
+        ? {
+            ...satisfied(
+              "shares_spendable",
+              "Live locks will be checked after reconnecting",
+            ),
+            postcondition: null,
+          }
+        : unavailable(
+            "shares_spendable",
+            "Live position balance or locks could not be verified",
+            "position_availability_unverified",
+          )
+      : spendableRaw(position.balanceRaw, position.lockedRaw)
+        ? satisfied("shares_spendable", "Position shares are spendable")
+        : unavailable(
+            "shares_spendable",
+            positiveRaw(position.balanceRaw)
+              ? "Position shares are locked"
+              : "No spendable position shares are available",
+            positiveRaw(position.balanceRaw)
+              ? "locked_funds"
+              : "market_evidence_unavailable",
+          ),
     position.conditionResolved === true
       ? satisfied("condition_resolved", "Position condition is resolved")
       : unavailable(
@@ -783,7 +811,13 @@ export function buildPolymarketRuntimeFacts(
       internal,
       safeLabel: "Approve conditional tokens for the neg-risk adapter",
     }),
-    ...positionChecks(evidence.position, "canonical_redemption_plan"),
+    ...positionChecks(
+      evidence.position,
+      "canonical_redemption_plan",
+      input.purpose === "sell" &&
+        (credential.status === "action_required" ||
+          credential.status === "user_action_required"),
+    ),
     evidence.position?.operatorApproved !== false
       ? satisfied(
           "redemption_operator_approval",

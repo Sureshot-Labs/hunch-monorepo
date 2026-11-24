@@ -92,8 +92,10 @@ export type FundingLifecycleActionAttempt = Readonly<{
   clientExecutionFailed?: boolean;
   /** Versioned server-owned Safe hash identity exists before submission. */
   safeSubmissionRecoverable?: boolean;
-  /** Negotiated Solana lease closed by the server before signature registration. */
+  /** Negotiated Solana preparation closed by the server before any admission. */
   unbroadcastSolanaPreparationClosed?: boolean;
+  /** Server-side scoped lease; action/provider deadline may be later. */
+  embeddedPreparation?: Readonly<{ attemptId: string; expiresAt: Date }>;
   startedAt: Date;
   updatedAt: Date;
   receipt: FundingLifecycleActionReceipt | null;
@@ -311,6 +313,7 @@ export type FundingLifecycleProjection = Readonly<{
   recoveryMode: "automatic_evidence" | "manual_review" | null;
   /** Observable lifecycle reason derived from facts, never a previous cache value. */
   errorCode: string | null;
+  partialSettledDestination?: FundingLifecycleMoney;
   actions: readonly FundingLifecycleActionProjection[];
   segments: readonly FundingLifecycleSegmentProjection[];
   safety: FundingLifecycleSafetyProjection;
@@ -1645,6 +1648,12 @@ export function deriveFundingLifecycle(
     evidence.routeLegsRefunded &&
     !facts.consumer.unresolved &&
     facts.reservations.every((reservation) => reservation.state !== "consumed");
+  const partialSettlement = status === "failed" && settledPartialBuy;
+  const requestedDestination = facts.plan.requestedDestination;
+  const partialCredit = partialSettlement
+    ? (sumDestination(facts.transfers, facts.plan) ?? 0n) +
+      verifiedFundingPreparationContributionRaw(facts)
+    : 0n;
   return {
     status,
     progressStage,
@@ -1654,8 +1663,9 @@ export function deriveFundingLifecycle(
           ? "manual_review"
           : "automatic_evidence"
         : null,
-    errorCode:
-      status === "failed" && facts.terminalFailure != null
+    errorCode: partialSettlement
+      ? "funding_partial_settled"
+      : status === "failed" && facts.terminalFailure != null
         ? facts.terminalFailure.code
         : status === "recovery_required" && facts.manualRecovery != null
           ? facts.manualRecovery.code
@@ -1685,6 +1695,14 @@ export function deriveFundingLifecycle(
                         )
                       ? "funding_wallet_submission_unknown"
                       : null,
+    ...(requestedDestination && partialCredit > 0n
+      ? {
+          partialSettledDestination: {
+            ...requestedDestination,
+            raw: partialCredit.toString(),
+          },
+        }
+      : {}),
     actions,
     segments,
     safety: {

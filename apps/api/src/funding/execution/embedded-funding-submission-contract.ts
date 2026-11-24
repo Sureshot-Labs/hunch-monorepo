@@ -7,6 +7,8 @@ import { FundingPersistenceError } from "../persistence/funding-operation-reposi
 import { relaySolanaActionMessage } from "../../funding-providers/relay/solana-sponsorship.js";
 
 export const EMBEDDED_FUNDING_PREPARATION_LEASE_MS = 120_000;
+export const EMBEDDED_PRE_SUBMIT_LEASE_EXPIRED =
+  "embedded_pre_submit_lease_expired";
 export type EmbeddedFundingContext = {
   operationId: string;
   stepId: string;
@@ -34,6 +36,32 @@ export function parseEmbeddedFundingSubmission(
     ["user", "privy_sponsor"].includes(String(row.payer))
     ? (row as EmbeddedFundingSubmission)
     : null;
+}
+/** A server-closed, never-admitted attempt is not evidence of a broadcast. */
+export function isClosedUnbroadcastEmbeddedSolanaPreparation(input: {
+  executorId: string;
+  actionKind: string | null;
+  outcome: string;
+  broadcastMayHaveOccurred: boolean;
+  referenceKind: string | null;
+  actualCosts: Readonly<Record<string, unknown>> | null;
+  now: Date;
+}): boolean {
+  const lease = parseEmbeddedFundingSubmission(
+    input.actualCosts?.embeddedSubmission,
+  );
+  return (
+    input.executorId === "wallet_profile_svm_v1" &&
+    input.actionKind === "svm_transaction" &&
+    input.outcome === "cancelled" &&
+    !input.broadcastMayHaveOccurred &&
+    input.referenceKind === null &&
+    input.actualCosts?.reasonCode === EMBEDDED_PRE_SUBMIT_LEASE_EXPIRED &&
+    lease?.phase === "closed" &&
+    lease.requestFingerprint === undefined &&
+    lease.admittedAt === undefined &&
+    Date.parse(lease.expiresAt) <= input.now.getTime()
+  );
 }
 export function embeddedFundingExecutionKey(
   context: EmbeddedFundingContext,

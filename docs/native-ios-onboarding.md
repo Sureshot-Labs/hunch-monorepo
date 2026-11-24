@@ -166,6 +166,16 @@ and missing cache rows; it does not remain pinned to the old maximum UUID.
    statistics and source processing running. Correct the secret and recreate only
    this worker to recover. Deployment readiness rejects an explicitly requested
    but unavailable Apple delivery; it does not stop the running statistics loop.
+   Recreate the worker after changing Compose env or secret values so the new
+   process reloads both. Keep `HUNCH_NATIVE_ONBOARDING_WORKER_ENABLED=true` in
+   the production deployment env file. Never include private key values in a
+   deployment-trigger commit.
+   Check `native-onboarding-health.js --require-delivery` after recreation:
+   `delivery=ready` confirms local configuration and worker progress, not Apple
+   authentication or device display. Inspect natural `native_push_delivery`
+   counters separately; `sent` means APNs accepted the request, not that the
+   notification appeared on a device. Do not trigger broadcast notifications
+   merely to validate a release.
 6. Ship the matching iOS build after API availability. Debug uses the
    development entitlement/sandbox; Release/TestFlight uses production. The
    app's bundle ID, signed entitlement and API device environment must agree.

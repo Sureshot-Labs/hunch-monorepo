@@ -948,6 +948,8 @@ export const FUNDING_REASON_CODES = [
   "policy_gate_closed",
   "position_action_required",
   "position_owner_mismatch",
+  "position_funder_transfer_required",
+  "position_availability_unverified",
   "provider_capability_disabled",
   "provider_quote_economics_rejected",
   "provider_quote_invalid",

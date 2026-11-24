@@ -3,11 +3,11 @@ import { sameAsset } from "../domain/asset-identity.js";
 import { withdrawalRawAvailabilityKnown } from "../domain/withdrawal-capacity.js";
 import { senderNativeFeeRequirement } from "../domain/network-fees.js";
 import {
-  FundingPersistenceError,
+  FundingSourceCapacityChangedError,
   type FundingSharedSourceReservation,
 } from "../persistence/funding-operation-repository.js";
 
-/** The account must be collected under the commit's source locks, not at prepare time. */
+/** Commit must collect this account under its source locks, not at prepare time. */
 export function assertSharedFundingSourceCapacity(
   account: Readonly<{
     projection: Pick<AccountValueReadModel["projection"], "components">;
@@ -67,8 +67,7 @@ export function assertSharedFundingSourceCapacity(
       BigInt(availability.availableRaw) <
         BigInt(reservation.rawAmount) + gasReserve + unprojectedPhysicalHold
     ) {
-      throw new FundingPersistenceError(
-        "quote_invalidated",
+      throw new FundingSourceCapacityChangedError(
         "free source balance could not cover the new funding reservation",
       );
     }

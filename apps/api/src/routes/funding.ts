@@ -12,6 +12,7 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { buildAccountValueReadModel } from "../account-value/runtime-service.js";
+import { stableOpaqueId } from "../account-value/canonical.js";
 import type {
   FundingCommitRequest,
   FundingDestinationOption,
@@ -42,6 +43,7 @@ import {
 } from "../funding/receive/receive-session-service.js";
 import type { FundingReceiveOptionsResponse } from "../funding/receive/receive-option-catalog.js";
 import { PreparationContractError } from "../funding/preparation/core-adapter.js";
+import type { DestinationInspectionTrace } from "../funding/preparation/runtime-service.js";
 import type { FundingActionFailureCode } from "../funding/execution/action-report.js";
 import { WithdrawalDestinationError } from "../funding/execution/withdrawal-destination-runtime.js";
 import {
@@ -52,6 +54,7 @@ import {
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
 import {
   FundingPersistenceError,
+  FundingSourceCapacityChangedError,
   type FundingOperationRow,
 } from "../funding/persistence/funding-operation-repository.js";
 import {
@@ -186,6 +189,7 @@ export type FundingRouteDependencies = Readonly<{
   destinations(
     userId: string,
     query: FundingDestinationQuery,
+    trace?: DestinationInspectionTrace,
   ): Promise<readonly FundingDestinationOption[]>;
   receiveOptions(userId: string): Promise<FundingReceiveOptionsResponse>;
   inspectPreparation(
@@ -375,6 +379,55 @@ function publicOperation(operation: FundingOperationRow) {
     expiresAt: operation.expiresAt.toISOString(),
     completedAt: operation.completedAt?.toISOString() ?? null,
   };
+}
+
+function summarizeSellReadiness(
+  options: readonly FundingDestinationOption[],
+  trace: DestinationInspectionTrace,
+) {
+  if (trace.marketResolved === false)
+    return {
+      status: "unavailable" as const,
+      reasonCodes: ["sell_market_unresolved"],
+    };
+  if (options.filter((option) => option.selectable).length > 1)
+    return {
+      status: "selection_required" as const,
+      reasonCodes: ["sell_destination_ambiguous"],
+    };
+  const ready = options.some(
+    (option) => option.selectable && option.preparationStatus === "ready",
+  );
+  if (ready && trace.positionTransferRequired)
+    return {
+      status: "setup_required" as const,
+      reasonCodes: ["position_funder_transfer_required"],
+    };
+  const setup = options.filter(
+    (option) =>
+      option.selectable &&
+      (option.preparationStatus === "setup_required" ||
+        option.preparationStatus === "user_action_required"),
+  );
+  const status = ready
+    ? ("ready" as const)
+    : setup.length
+      ? ("setup_required" as const)
+      : ("unavailable" as const);
+  const relevant = setup.length ? setup : options;
+  const reasonCodes: string[] = ready
+    ? []
+    : [...new Set(relevant.flatMap((option) => option.reasonCodes))];
+  if (!ready && !reasonCodes.length) {
+    if (
+      trace.failureCodes?.length === 1 &&
+      trace.failureCodes[0] === "binding_mismatch"
+    )
+      reasonCodes.push("position_owner_mismatch");
+    else if (trace.failed) reasonCodes.push("sell_inspection_unavailable");
+    else reasonCodes.push("sell_destination_no_match");
+  }
+  return { status, reasonCodes: reasonCodes.slice(0, 24) };
 }
 
 function publicPreparationRun(run: FundingPreparationRun) {
@@ -591,9 +644,23 @@ async function handleFundingRequest<T>(
   try {
     return await execute(userId);
   } catch (error) {
-    request.log.error({ err: error, userId }, input.logMessage);
+    if (input.endpoint === "destinations") {
+      request.log.warn(
+        {
+          code: errorCode(error),
+          status: errorStatus(error),
+          accountKey: stableOpaqueId("trade", userId),
+        },
+        input.logMessage,
+      );
+    } else {
+      request.log.error({ err: error, userId }, input.logMessage);
+    }
     const response = {
-      error: input.publicError,
+      error:
+        error instanceof FundingSourceCapacityChangedError
+          ? "Available funds changed or are reserved. Refresh your funding options and try again."
+          : input.publicError,
       code: errorCode(error),
       ...(error instanceof FundingReceiveSessionSelectionConflictError
         ? { activeReceiveSessionId: error.activeReceiveSessionId }
@@ -823,6 +890,9 @@ export function registerFundingRoutes(
   z.get(
     "/funding/destinations",
     {
+      onRequest: async (request, reply) => {
+        reply.header("x-hunch-request-id", request.id);
+      },
       preHandler: dependencies.authenticate,
       schema: {
         querystring: fundingDestinationsQuerySchema,
@@ -840,12 +910,37 @@ export function registerFundingRoutes(
           publicError: "Funding destinations are unavailable",
         },
         async (userId) => {
+          const sell = request.query.purpose === "sell";
+          const trace: DestinationInspectionTrace | undefined = sell
+            ? {}
+            : undefined;
           const options = await dependencies.destinations(
             userId,
             request.query,
+            trace,
           );
+          const sellReadiness = trace
+            ? summarizeSellReadiness(options, trace)
+            : undefined;
+          if (sellReadiness) {
+            request.log.info(
+              {
+                ...sellReadiness,
+                accountKey: stableOpaqueId("trade", userId),
+                inspection: trace,
+                optionCount: options.length,
+                positionScoped: Boolean(request.query.positionActionRef),
+                controllerScoped: Boolean(request.query.controllerWalletRef),
+              },
+              "Funding SELL destination inspected",
+            );
+          }
           return reply.send(
-            fundingDestinationsResponseSchema.parse({ ok: true, options }),
+            fundingDestinationsResponseSchema.parse({
+              ok: true,
+              options,
+              sellReadiness,
+            }),
           );
         },
       ),
@@ -1685,7 +1780,8 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
         },
       ),
     capabilities: () => runtime.capabilities(),
-    destinations: (userId, query) => runtime.destinations(userId, query),
+    destinations: (userId, query, trace) =>
+      runtime.destinations(userId, query, trace),
     receiveOptions: (userId) => receiveSessions.options(userId),
     withdrawalCapacity: (userId, request) =>
       runtime.withdrawalCapacity(userId, request),

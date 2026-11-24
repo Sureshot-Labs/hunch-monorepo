@@ -1,5 +1,8 @@
 import { Interface } from "ethers";
-import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
+import {
+  POLYMARKET_PROTOCOL_CONTRACTS,
+  type PolymarketAssetContext,
+} from "@hunch/shared";
 
 import type { UserWallet } from "../../auth.js";
 import { buildEmbeddedPersonalSignRequest } from "../../services/embedded-privy.js";
@@ -68,7 +71,27 @@ function deterministicNonce(input: {
 function spenderForPolymarketCheck(
   checkId: string,
   redemptionOperator: string | null,
+  sellAssetContext?: PolymarketAssetContext,
 ): { token: string; spender: string; kind: "erc20" | "erc1155" } | null {
+  if (sellAssetContext) {
+    const operator =
+      checkId === "ctf_neg_risk_adapter_approval"
+        ? redemptionOperator
+        : [
+              "ctf_exchange_approval",
+              "ctf_neg_risk_exchange_approval",
+              "position_manager_v3_approval",
+            ].includes(checkId)
+          ? sellAssetContext.exchangeAddress
+          : null;
+    return operator
+      ? {
+          token: sellAssetContext.positionContract,
+          spender: operator,
+          kind: "erc1155",
+        }
+      : null;
+  }
   if (checkId === "erc20_v3_exchange_allowance")
     return {
       token: POLYMARKET_PROTOCOL_CONTRACTS.collateral,
@@ -182,6 +205,7 @@ export function createPolymarketRuntimeActionMaterializer(input: {
     | "unknown_contract";
   funder: string;
   redemptionOperator: string | null;
+  sellAssetContext?: PolymarketAssetContext;
 }): PreparationActionMaterializer {
   return async ({ request, facts, inspectionRevision, requiredActions }) => {
     const timestamp = operationTimestamp(facts.observedAt);
@@ -261,6 +285,7 @@ export function createPolymarketRuntimeActionMaterializer(input: {
       const approval = spenderForPolymarketCheck(
         checkId,
         input.redemptionOperator,
+        input.sellAssetContext,
       );
       if (!approval) {
         throw new Error(

@@ -1,6 +1,7 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
+import { stableOpaqueId } from "../account-value/canonical.js";
 import { pool } from "../db.js";
 import { getRedis } from "../redis.js";
 import {
@@ -47,6 +48,46 @@ import {
   syncPolymarketOrdersRoute,
 } from "../services/polymarket-trading-execution-service.js";
 import { matchesTelegramAppHandoffV2CurrentScope } from "../services/telegram-bot-trading.js";
+import { TradingServiceError } from "../services/trading-errors.js";
+
+export function polymarketOrderSubmitLogger(
+  log: FastifyBaseLogger,
+  userId: string,
+  operationId: string | undefined,
+): FastifyBaseLogger {
+  const serializeError = (error: unknown) =>
+    error instanceof TradingServiceError
+      ? { code: error.code, status: error.statusCode }
+      : { code: "polymarket_submit_interrupted" };
+  return log.child(
+    {
+      stage: "polymarket_order_submit",
+      accountKey: stableOpaqueId("trade", userId),
+      operationId,
+    },
+    {
+      serializers: { err: serializeError, error: serializeError },
+      redact: {
+        paths: [
+          "userId",
+          "signer",
+          "funder",
+          "walletAddress",
+          "tokenId",
+          "orderHash",
+          "upstreamMessage",
+          "upstreamPayload",
+          "input",
+          "conditionId",
+          "txHash",
+          "sourceId",
+          "orderId",
+        ],
+        remove: true,
+      },
+    },
+  );
+}
 
 // Mounted under /trade/polymarket.
 export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
@@ -759,6 +800,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/order",
     {
+      onRequest: async (request, reply) => {
+        reply.header("x-hunch-request-id", request.id);
+      },
       preHandler: createAuthMiddleware(),
       schema: { body: polymarketPlaceOrderBodySchema },
     },
@@ -777,6 +821,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const log = polymarketOrderSubmitLogger(
+        request.log,
+        user.id,
+        request.body.fundingOperationId,
+      );
+      // Global exception logging also uses the redacted request logger.
+      request.log = log;
+      log.info("Polymarket order submission requested");
       const result = await submitPolymarketClientSignedOrder({
         assertTelegramAppHandoffV2Scope: async (sealed) => {
           return matchesTelegramAppHandoffV2CurrentScope({
@@ -785,12 +837,19 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           });
         },
         body: request.body,
-        log: request.log,
+        log,
         pool,
         signer,
         userId: user.id,
       });
       if (!result.ok) {
+        log.info(
+          {
+            status: result.statusCode,
+            code: result.payload.code ?? "polymarket_submit_rejected",
+          },
+          "Polymarket order submission returned an error",
+        );
         reply.code(result.statusCode);
         return reply.send(result.payload);
       }

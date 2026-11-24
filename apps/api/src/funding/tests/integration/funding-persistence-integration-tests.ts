@@ -10,6 +10,7 @@ import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.j
 
 import { tx } from "@hunch/infra";
 import { closeExpiredSolanaPreparationsInTransaction } from "../../execution/solana-preparation.js";
+import { closeExpiredEmbeddedFundingPreparationsInTransaction } from "../../execution/embedded-funding-submission.js";
 import type { PoolClient } from "pg";
 
 import "../../../integration-test-database-guard.js";
@@ -69,6 +70,8 @@ import {
   fetchFundingOperationForUser,
   finishFundingReconciliationLease,
   FundingPersistenceError,
+  FundingSourceCapacityChangedError,
+  checkQuoteSourceReservations,
   releaseFundingReservationInTransaction,
   renewFundingReconciliationLease,
   wakeFundingReconciliationInTransaction,
@@ -2308,7 +2311,11 @@ async function testOwnedRouteCompetitionQueryParses(): Promise<void> {
 }
 
 async function testPartialRelayReceiptSettlement(
-  omittedAttempt: "none" | "server_closed_solana" | "client_cancelled" = "none",
+  omittedAttempt:
+    | "none"
+    | "server_closed_solana"
+    | "server_closed_embedded"
+    | "client_cancelled" = "none",
 ): Promise<void> {
   const userId = await insertUser(pool);
   const base = buildPlan({ purpose: "trade_shortfall", venueId: "limitless" });
@@ -2430,8 +2437,22 @@ async function testPartialRelayReceiptSettlement(
               },
             }
           : {}),
+        ...(omittedAttempt === "server_closed_embedded"
+          ? {
+              embeddedSubmission: {
+                version: 1 as const,
+                phase: "prepared" as const,
+                expiresAt: new Date(now.getTime() - 1).toISOString(),
+                signer: "11111111111111111111111111111111",
+                payer: "privy_sponsor" as const,
+              },
+            }
+          : {}),
       });
-      if (omittedAttempt === "server_closed_solana") {
+      if (
+        omittedAttempt === "server_closed_solana" ||
+        omittedAttempt === "server_closed_embedded"
+      ) {
         await tx(pool, async (client) => {
           assert.ok(operationId);
           await client.query(
@@ -2439,11 +2460,11 @@ async function testPartialRelayReceiptSettlement(
             [operationId],
           );
           assert.equal(
-            await closeExpiredSolanaPreparationsInTransaction(
-              client,
-              operationId,
-              now,
-            ),
+            await (
+              omittedAttempt === "server_closed_solana"
+                ? closeExpiredSolanaPreparationsInTransaction
+                : closeExpiredEmbeddedFundingPreparationsInTransaction
+            )(client, operationId, now),
             true,
           );
         });
@@ -2513,6 +2534,19 @@ async function testPartialRelayReceiptSettlement(
       omittedAttempt === "client_cancelled" ? "recovery_required" : "failed",
       "partial settled funding stops the Buy instead of waiting for an unsigned expired leg",
     );
+    if (omittedAttempt === "server_closed_embedded") {
+      const { rows } = await pool.query<{
+        error_code: string;
+        credited: string;
+      }>(
+        "select error_code,actual_destination_amount->>'raw' as credited from funding_operations where id=$1",
+        [operationId],
+      );
+      assert.deepEqual(rows[0], {
+        error_code: "funding_partial_settled",
+        credited: "990000",
+      });
+    }
     const reservations = await pool.query<{ state: string }>(
       "select state from balance_reservations where operation_id=$1",
       [operationId],
@@ -5001,6 +5035,31 @@ async function testAliasedPhysicalSourceReservation(): Promise<void> {
        where operation_id = $1 and mode = 'subtract_available'
        limit 1`,
       [deposit.operation.id, tradeComponentId],
+    );
+    await assert.rejects(
+      checkQuoteSourceReservations(
+        client,
+        userId,
+        tradePlan,
+        async (sources) => {
+          assert.equal(sources.length, 1);
+          assert.equal(sources[0]?.heldRaw, "2000000");
+          assert.equal(sources[0]?.projectedHeldRaw, "0");
+          throw new FundingSourceCapacityChangedError("fixture capacity used");
+        },
+      ),
+      (error: unknown) =>
+        error instanceof FundingSourceCapacityChangedError &&
+        error.code === "quote_invalidated",
+    );
+    await checkQuoteSourceReservations(
+      client,
+      userId,
+      makePlan(tradeComponentId, "500000"),
+      async (sources) => {
+        assert.equal(sources[0]?.reservation.rawAmount, "500000");
+        assert.equal(sources[0]?.heldRaw, "2000000");
+      },
     );
     await client.query("savepoint alias_conflict");
     await assert.rejects(
@@ -9457,6 +9516,7 @@ console.log(
 );
 await testPartialRelayReceiptSettlement();
 await testPartialRelayReceiptSettlement("server_closed_solana");
+await testPartialRelayReceiptSettlement("server_closed_embedded");
 await testPartialRelayReceiptSettlement("client_cancelled");
 await testOwnedRouteCompetitionQueryParses();
 console.log(
