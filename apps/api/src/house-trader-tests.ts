@@ -32,6 +32,8 @@ import {
 import {
   adverseEntry,
   costBasisForShares,
+  houseConfirmationIsFresh,
+  houseDepositBatchDeadline,
   houseDepositSetupRetry,
   houseModelContextMessage,
   houseTraderDefault,
@@ -41,6 +43,8 @@ import {
 } from "./services/house-trader-policy.js";
 import {
   PolymarketRelayerHttpError,
+  buildDepositWalletBatchTypedData,
+  buildDepositWalletSubmitBody,
   safePolymarketRelayerDiagnostic,
 } from "./services/polymarket-deposit-wallet-relayer.js";
 
@@ -82,6 +86,40 @@ assert.deepEqual(
 assert.deepEqual(
   safePolymarketRelayerDiagnostic(new Error("sensitive transport failure")),
   { reason: "transport_or_unknown" },
+);
+assert.deepEqual(
+  safePolymarketRelayerDiagnostic(
+    new PolymarketRelayerHttpError(400, "deadline too soon"),
+  ),
+  { status: 400, reason: "deadline_too_soon" },
+);
+assert.deepEqual(
+  safePolymarketRelayerDiagnostic(
+    new PolymarketRelayerHttpError(500, "deadline too soon"),
+  ),
+  { status: 500, reason: "upstream_failure" },
+);
+const batchNow = 1_800_000_000_900;
+const batchDeadline = houseDepositBatchDeadline(batchNow);
+assert.equal(batchDeadline, "1800000600");
+const batchParams = {
+  ownerAddress: ethers.ZeroAddress,
+  depositWalletAddress: "0x0000000000000000000000000000000000000001",
+  nonce: "0",
+  deadline: batchDeadline,
+  calls: [],
+};
+assert.equal(
+  buildDepositWalletBatchTypedData(batchParams).message.deadline,
+  buildDepositWalletSubmitBody({ ...batchParams, signature: "0x" })
+    .depositWalletParams.deadline,
+);
+assert.equal(
+  houseConfirmationIsFresh(
+    new Date(batchNow).toISOString(),
+    batchNow + 180_000,
+  ),
+  false,
 );
 import {
   houseValuationContext,
