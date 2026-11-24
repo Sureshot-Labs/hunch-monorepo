@@ -39,13 +39,6 @@ if [[ ! "$image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 69
 fi
 
-# A strict Engine bind fails if the source is missing instead of creating a
-# directory. Standalone Compose v1 cannot express this in the service file.
-docker run --rm --pull never --network none --read-only \
-  --mount type=bind,source=/run/hunch-house-trader/key.json,target=/run/hunch-house-trader/key.json,readonly \
-  --entrypoint node "$image" \
-  -e 'if (!require("node:fs").statSync("/run/hunch-house-trader/key.json").isFile()) process.exit(1)'
-
 HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" run --rm "${compose_worker_flags[@]}" "$worker" \
   node apps/api/dist/house-trader-worker.js --check-config
 

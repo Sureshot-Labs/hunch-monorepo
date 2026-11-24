@@ -1,19 +1,12 @@
 import assert from "node:assert/strict";
 import {
-  chmodSync,
-  existsSync,
-  mkdtempSync,
-  rmdirSync,
-  symlinkSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import {
-  readHouseTraderKeyFile,
+  parseHouseTraderKey,
   readHouseTraderPublicSettings,
-} from "./services/house-trader-key-file.js";
+} from "./services/house-trader-key.js";
+import {
+  houseApprovalBatchSettled,
+  missingHouseTraderApprovals,
+} from "./services/house-trader-approvals.js";
 import {
   houseReceiptMatchesFinalized,
   houseWithdrawalRecipient,
@@ -371,55 +364,183 @@ assert.equal(
   "stop_loss",
 );
 const key = ethers.Wallet.createRandom();
-const keyDir = mkdtempSync(join(tmpdir(), "hunch-house-trader-test-"));
-const keyFile = join(keyDir, "key.json");
-const keyLink = join(keyDir, "key-link.json");
-try {
-  writeFileSync(
-    keyFile,
-    JSON.stringify({ HUNCH_HOUSE_TRADER_PRIVATE_KEY: key.privateKey }),
-    { flag: "wx", mode: 0o600 },
-  );
-  assert.equal(
-    readHouseTraderKeyFile(keyFile, key.address).controller,
-    key.address,
-  );
+const secret = { HUNCH_HOUSE_TRADER_PRIVATE_KEY: key.privateKey };
+assert.equal(parseHouseTraderKey(secret, key.address).controller, key.address);
+assert.throws(
+  () => parseHouseTraderKey(secret, ethers.Wallet.createRandom().address),
+  /controller_mismatch/,
+);
+for (const malformed of [
+  {},
+  { ...secret, UNRELATED: "not allowed" },
+  { HUNCH_HOUSE_TRADER_PRIVATE_KEY: 42 },
+  { HUNCH_HOUSE_TRADER_PRIVATE_KEY: "bad" },
+])
   assert.throws(
-    () => readHouseTraderKeyFile(keyFile, ethers.Wallet.createRandom().address),
-    /controller_mismatch/,
+    () => parseHouseTraderKey(malformed, key.address),
+    /invalid_house_trader_key/,
   );
-  chmodSync(keyFile, 0o644);
-  assert.throws(
-    () => readHouseTraderKeyFile(keyFile, key.address),
-    /unsafe_house_trader_key_file/,
-  );
-  chmodSync(keyFile, 0o400);
-  symlinkSync(keyFile, keyLink);
-  assert.throws(() => readHouseTraderKeyFile(keyLink, key.address));
-  assert.throws(
-    () =>
-      readHouseTraderPublicSettings({
-        HUNCH_HOUSE_TRADER_PRIVATE_KEY: "accidental_env_injection",
-      }),
-    /file_only/,
-  );
-  const pub = {
+assert.throws(
+  () => readHouseTraderPublicSettings(secret),
+  /key_in_environment/,
+);
+assert.equal(
+  readHouseTraderPublicSettings({
     HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER: key.address,
-  };
-  assert.equal(readHouseTraderPublicSettings(pub).expected, key.address);
-  assert.throws(
-    () =>
-      readHouseTraderPublicSettings({
-        ...pub,
-        HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER: ethers.ZeroAddress,
-      }),
-    /invalid_house_trader_controller/,
-  );
-} finally {
-  if (existsSync(keyLink)) unlinkSync(keyLink);
-  if (existsSync(keyFile)) unlinkSync(keyFile);
-  rmdirSync(keyDir);
+  }).expected,
+  key.address,
+);
+assert.throws(
+  () =>
+    readHouseTraderPublicSettings({
+      HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER: ethers.ZeroAddress,
+    }),
+  /invalid_house_trader_controller/,
+);
+
+const approvalAbi = new ethers.Interface([
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)",
+  "function isApprovedForAll(address,address) view returns (bool)",
+  "function setApprovalForAll(address,bool)",
+]);
+const ctfAdapter = "0xAdA100Db00Ca00073811820692005400218FcE1f";
+const negRiskCtfAdapter = "0xadA2005600Dec949baf300f4C6120000bDB6eAab";
+const negRiskAdapter = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
+assert.equal(houseApprovalBatchSettled(null, 123, "batch:5:123456", 6n), false);
+assert.equal(
+  houseApprovalBatchSettled(
+    { status: 1, blockNumber: 124 },
+    123,
+    "batch:5:123456",
+    6n,
+  ),
+  false,
+);
+assert.equal(
+  houseApprovalBatchSettled(
+    { status: 1, blockNumber: 123 },
+    123,
+    "batch:5:123456",
+    6n,
+  ),
+  true,
+);
+assert.equal(
+  houseApprovalBatchSettled(
+    { status: 1, blockNumber: 123 },
+    123,
+    "batch:5:123456",
+    5n,
+  ),
+  false,
+);
+assert.equal(
+  houseApprovalBatchSettled(
+    { status: 1, blockNumber: 123 },
+    123,
+    "invalid",
+    6n,
+  ),
+  false,
+);
+assert.equal(
+  houseApprovalBatchSettled(
+    { status: 0, blockNumber: 124 },
+    123,
+    "batch:5:123456",
+    null,
+  ),
+  true,
+);
+async function approvalPlan(
+  granted: (token: string, operator: string) => boolean,
+) {
+  const reads: string[] = [];
+  const result = await missingHouseTraderApprovals({
+    funder: key.address,
+    collateral: contracts.collateral,
+    ctfRedemptionAdapters: [
+      ctfAdapter,
+      negRiskCtfAdapter,
+      ctfAdapter.toLowerCase(),
+    ],
+    blockTag: 123,
+    read: async ({ to, data, blockTag }) => {
+      assert.equal(blockTag, 123);
+      const parsed = approvalAbi.parseTransaction({ data });
+      assert.ok(parsed);
+      const { name, args } = parsed;
+      assert.equal(args[0], key.address);
+      assert.equal(
+        name,
+        to === contracts.collateral ? "allowance" : "isApprovedForAll",
+      );
+      reads.push(`${to}:${args[1]}`);
+      const approved = granted(to, args[1]);
+      return approvalAbi.encodeFunctionResult(name, [
+        name === "allowance" ? (approved ? ethers.MaxUint256 : 0n) : approved,
+      ]);
+    },
+  });
+  assert.equal(reads.length, 11);
+  assert.equal(new Set(reads).size, reads.length);
+  return result.map(({ target, data, value }) => {
+    const parsed = approvalAbi.parseTransaction({ data });
+    assert.ok(parsed);
+    const { name, args } = parsed;
+    assert.equal(value, "0");
+    assert.equal(
+      name,
+      target === contracts.collateral ? "approve" : "setApprovalForAll",
+    );
+    assert.equal(args[1], name === "approve" ? ethers.MaxUint256 : true);
+    return `${target}:${args[0]}`;
+  });
 }
+const expectedBuyOperators = [
+  contracts.exchangeV2,
+  contracts.negRiskExchangeV2,
+  negRiskAdapter,
+  contracts.exchangeV3,
+];
+assert.deepEqual(
+  new Set(await approvalPlan(() => false)),
+  new Set([
+    ...expectedBuyOperators.map(
+      (operator) => `${contracts.collateral}:${operator}`,
+    ),
+    ...[
+      contracts.exchangeV2,
+      contracts.negRiskExchangeV2,
+      negRiskAdapter,
+      ctfAdapter,
+      negRiskCtfAdapter,
+    ].map((operator) => `${contracts.conditionalTokens}:${operator}`),
+    ...[contracts.exchangeV3, contracts.router].map(
+      (operator) => `${contracts.positionManager}:${operator}`,
+    ),
+  ]),
+);
+assert.deepEqual(await approvalPlan(() => true), []);
+assert.deepEqual(
+  await approvalPlan((_, operator) => operator !== negRiskAdapter),
+  [
+    `${contracts.collateral}:${negRiskAdapter}`,
+    `${contracts.conditionalTokens}:${negRiskAdapter}`,
+  ],
+);
+await assert.rejects(
+  missingHouseTraderApprovals({
+    funder: key.address,
+    collateral: contracts.collateral,
+    ctfRedemptionAdapters: [ctfAdapter, negRiskCtfAdapter],
+    read: async () => {
+      throw new Error("rpc_failed");
+    },
+  }),
+  /rpc_failed/,
+);
 const owner = "0x0000000000000000000000000000000000000011";
 const other = "0x0000000000000000000000000000000000000022";
 const cash = "0x0000000000000000000000000000000000000033";

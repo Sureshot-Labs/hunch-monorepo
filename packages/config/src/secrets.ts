@@ -20,6 +20,7 @@ export type LoadRuntimeSecretsOptions = {
   logger?: Logger;
   fetchImpl?: FetchLike;
   now?: Date;
+  forbiddenBundleKeys?: ReadonlySet<string>;
 };
 
 export type LoadRuntimeSecretsResult = {
@@ -255,6 +256,8 @@ export async function loadRuntimeSecrets(
       });
       loadedBundles.push(ref.secretId);
       for (const [key, value] of Object.entries(bundle)) {
+        if (options.forbiddenBundleKeys?.has(key))
+          throw new Error("[secrets] Bundle contains a forbidden key");
         if (typeof value !== "string") {
           throw new Error(
             `[secrets] ${ref.secretId} key ${key} must be a string value`,
@@ -333,10 +336,18 @@ function validateRequiredSecrets(raw: string | undefined): void {
 
 async function getAwsSecretJson(
   secretId: string,
-  options: { fetchImpl: FetchLike; now?: Date },
+  options: { fetchImpl: FetchLike; now?: Date; containerOnly?: boolean },
 ): Promise<Record<string, string>> {
   const region = resolveAwsRegion();
-  const credentials = await resolveAwsCredentials(options.fetchImpl);
+  const credentials = options.containerOnly
+    ? await tryResolveEcsCredentials(options.fetchImpl)
+    : await resolveAwsCredentials(options.fetchImpl);
+  if (
+    !credentials?.accessKeyId ||
+    !credentials.secretAccessKey ||
+    (options.containerOnly && !credentials.sessionToken)
+  )
+    throw new Error("[secrets] Workload credentials are unavailable");
   const body = JSON.stringify({ SecretId: secretId });
   const res = await signedAwsJsonRequest({
     body,
@@ -368,6 +379,27 @@ async function getAwsSecretJson(
     throw new Error(`[secrets] ${secretId} SecretString must be a JSON object`);
   }
   return parsed as Record<string, string>;
+}
+
+/** Use the same Secrets Manager reader, but never fall back to the shared
+ * instance role or static environment credentials for a workload-only secret. */
+export function readAwsWorkloadSecret(
+  secretId: string,
+  options: { fetchImpl?: FetchLike; now?: Date } = {},
+): Promise<Record<string, unknown>> {
+  const transport = options.fetchImpl ?? fetch;
+  return getAwsSecretJson(secretId, {
+    now: options.now,
+    containerOnly: true,
+    fetchImpl: (input, init) =>
+      transport(input, {
+        ...init,
+        signal: AbortSignal.any([
+          AbortSignal.timeout(10_000),
+          ...(init?.signal ? [init.signal] : []),
+        ]),
+      }),
+  });
 }
 
 function resolveAwsRegion(): string {

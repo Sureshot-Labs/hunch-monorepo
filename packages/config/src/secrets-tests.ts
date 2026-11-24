@@ -7,6 +7,7 @@ import {
   buildSecretBundles,
   loadRuntimeSecrets,
   parseSecretBundleRefs,
+  readAwsWorkloadSecret,
 } from "./secrets.js";
 
 type Test = {
@@ -40,6 +41,135 @@ test("parseSecretBundleRefs accepts aws-sm and bare secret ids", () => {
     { provider: "aws-sm", secretId: "/a/b" },
     { provider: "aws-sm", secretId: "/c/d" },
   ]);
+});
+
+test("workload-only secret does not use static credentials or IMDS", async () => {
+  const envBefore = snapshotEnv();
+  try {
+    process.env.AWS_REGION = "eu-north-1";
+    process.env.AWS_ACCESS_KEY_ID = "shared-key";
+    process.env.AWS_SECRET_ACCESS_KEY = "shared-secret";
+    delete process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
+    delete process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
+    let attempts = 0;
+    await assert.rejects(
+      readAwsWorkloadSecret("/dedicated", {
+        fetchImpl: async () => {
+          attempts += 1;
+          throw new Error("must not fall back");
+        },
+      }),
+      /Workload credentials are unavailable/,
+    );
+    assert.equal(attempts, 0);
+  } finally {
+    restoreEnv(envBefore);
+  }
+});
+
+test("workload signer reads only the named AWS secret and leaves process env unchanged", async () => {
+  const envBefore = snapshotEnv();
+  try {
+    process.env.AWS_REGION = "eu-north-1";
+    process.env.AWS_ACCESS_KEY_ID = "shared-key";
+    process.env.AWS_SECRET_ACCESS_KEY = "shared-secret";
+    delete process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
+    process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI = "/v2/credentials/test";
+    delete process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE;
+    delete process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN;
+    delete process.env.TEST_WORKLOAD_KEY;
+    let reads = 0;
+    const fetchImpl = async (input: string | URL, init?: RequestInit) => {
+      assert.ok(init?.signal);
+      if (String(input) === "http://169.254.170.2/v2/credentials/test")
+        return Response.json({
+          AccessKeyId: "workload-key",
+          SecretAccessKey: "workload-secret",
+          Token: "workload-session",
+        });
+      reads++;
+      assert.equal(
+        String(input),
+        "https://secretsmanager.eu-north-1.amazonaws.com/",
+      );
+      assert.match(
+        new Headers(init.headers).get("authorization") ?? "",
+        /Credential=workload-key\//,
+      );
+      assert.equal(
+        new Headers(init.headers).get("x-amz-security-token"),
+        "workload-session",
+      );
+      assert.deepEqual(JSON.parse(String(init.body)), {
+        SecretId: "/dedicated",
+      });
+      return Response.json({
+        SecretString: JSON.stringify({ TEST_WORKLOAD_KEY: "test-value" }),
+      });
+    };
+    assert.deepEqual(await readAwsWorkloadSecret("/dedicated", { fetchImpl }), {
+      TEST_WORKLOAD_KEY: "test-value",
+    });
+    assert.equal(reads, 1);
+    assert.equal(process.env.TEST_WORKLOAD_KEY, undefined);
+    await assert.rejects(
+      readAwsWorkloadSecret("/dedicated", {
+        fetchImpl: async (input, init) =>
+          String(input).includes("secretsmanager")
+            ? Response.json(
+                { __type: "AccessDeniedException" },
+                { status: 400 },
+              )
+            : fetchImpl(input, init),
+      }),
+      /AccessDeniedException/,
+    );
+    assert.equal(process.env.TEST_WORKLOAD_KEY, undefined);
+    await assert.rejects(
+      readAwsWorkloadSecret("/dedicated", {
+        fetchImpl: async (input) => {
+          assert.equal(
+            String(input),
+            "http://169.254.170.2/v2/credentials/test",
+          );
+          return Response.json({
+            AccessKeyId: "static-key",
+            SecretAccessKey: "static-secret",
+          });
+        },
+      }),
+      /Workload credentials are unavailable/,
+    );
+  } finally {
+    restoreEnv(envBefore);
+  }
+});
+
+test("forbidden bundle keys are rejected before environment injection", async () => {
+  const envBefore = snapshotEnv();
+  try {
+    process.env.AWS_REGION = "eu-north-1";
+    process.env.AWS_ACCESS_KEY_ID = "test";
+    process.env.AWS_SECRET_ACCESS_KEY = "secret";
+    process.env.HUNCH_SECRETS_MODE = "strict";
+    process.env.HUNCH_SECRET_BUNDLES = "aws-sm:/common";
+    delete process.env.TEST_WORKLOAD_KEY;
+    await assert.rejects(
+      loadRuntimeSecrets({
+        envPath: "/dev/null",
+        logger: silentLogger,
+        forbiddenBundleKeys: new Set(["TEST_WORKLOAD_KEY"]),
+        fetchImpl: async () =>
+          Response.json({
+            SecretString: JSON.stringify({ TEST_WORKLOAD_KEY: "test-value" }),
+          }),
+      }),
+      /contains a forbidden key/,
+    );
+    assert.equal(process.env.TEST_WORKLOAD_KEY, undefined);
+  } finally {
+    restoreEnv(envBefore);
+  }
 });
 
 test("mode off keeps dotenv-only behavior", async () => {
