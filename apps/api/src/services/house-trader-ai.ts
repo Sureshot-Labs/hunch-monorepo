@@ -2,7 +2,10 @@ import { z } from "zod";
 import type { Pool } from "@hunch/infra";
 import { env } from "../env.js";
 import { buildOpenRouterReasoningOptions } from "../lib/openrouter-reasoning.js";
-import type { HouseTraderPolicy } from "./house-trader-policy.js";
+import {
+  houseModelContextMessage,
+  type HouseTraderPolicy,
+} from "./house-trader-policy.js";
 import { reserveHouseModelCost, type Action } from "./house-trader-store.js";
 
 const response = z
@@ -57,7 +60,7 @@ export async function houseModel(
             },
             {
               role: "user",
-              content: JSON.stringify({
+              content: houseModelContextMessage({
                 operatorInstruction:
                   position === "entry"
                     ? policy.aiEntryInstruction
@@ -66,7 +69,7 @@ export async function houseModel(
                 buyMax: policy.maxOrderUsd,
                 maxSellBps: policy.aiMaxSellBps,
                 facts,
-              }).slice(0, 8000),
+              }),
             },
           ],
           response_format: {

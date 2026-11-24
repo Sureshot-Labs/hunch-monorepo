@@ -175,7 +175,7 @@ export async function setupHouse(
         job,
         approvals,
         "approvals",
-        { approvalTries: tries + 1 },
+        { approvalTries: tries + 1, relayerDiagnostic: null },
       );
     // A deployed wallet proves deployment; the next distinct action can start.
     if (job.result.phase === "deploy")
