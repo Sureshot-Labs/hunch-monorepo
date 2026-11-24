@@ -62,6 +62,9 @@ mode `0400`, parent root-only). It is bind-mounted read-only only into
 `house-trader-worker`. It disappears after a host reboot and must be staged
 again. The worker has no automatic restart policy. Never switch to the new
 key for an existing funded controller or to recover an in-flight operation.
+The Compose file supports standalone Compose 1.29 as well as Compose v2.
+The launcher's strict Docker bind check rejects a missing key file before
+Compose can create a directory at that path.
 The optional worker is not in the normal deployment service list. Pause and
 stop it before subsequent backend releases with `bash ops/house-trader-worker.sh stop`.
 Starting it again automatically selects the new healthy API image; no image

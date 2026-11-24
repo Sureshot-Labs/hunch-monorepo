@@ -8,7 +8,19 @@ if [[ "$#" != 1 || ! "$1" =~ ^(check|start|stop)$ ]]; then
 fi
 
 app_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-compose=(docker compose --project-directory "$app_dir" --env-file /opt/hunch/.env
+compose_worker_flags=(--no-deps)
+if docker compose version >/dev/null 2>&1; then
+  compose=(docker compose)
+  compose_worker_flags+=(--pull never)
+elif command -v docker-compose >/dev/null; then
+  # V1 has no --pull never. The immutable image below is already present
+  # locally and referenced by the running API; up also uses --no-build.
+  compose=(docker-compose)
+else
+  echo "Docker Compose is required" >&2
+  exit 69
+fi
+compose+=(--project-directory "$app_dir" --env-file /opt/hunch/.env
   -f "$app_dir/ops/docker-compose.prod.yml" --profile house-trader)
 worker=house-trader-worker
 
@@ -27,7 +39,14 @@ if [[ ! "$image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 69
 fi
 
-HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" run --rm --no-deps --pull never "$worker" \
+# A strict Engine bind fails if the source is missing instead of creating a
+# directory. Standalone Compose v1 cannot express this in the service file.
+docker run --rm --pull never --network none --read-only \
+  --mount type=bind,source=/run/hunch-house-trader/key.json,target=/run/hunch-house-trader/key.json,readonly \
+  --entrypoint node "$image" \
+  -e 'if (!require("node:fs").statSync("/run/hunch-house-trader/key.json").isFile()) process.exit(1)'
+
+HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" run --rm "${compose_worker_flags[@]}" "$worker" \
   node apps/api/dist/house-trader-worker.js --check-config
 
 if [[ "$1" == start ]]; then
@@ -35,5 +54,5 @@ if [[ "$1" == start ]]; then
     echo "The API image changed during the check; run start again after the release" >&2
     exit 75
   fi
-  HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build --pull never "$worker"
+  HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" up -d --no-build "${compose_worker_flags[@]}" "$worker"
 fi

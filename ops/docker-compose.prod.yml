@@ -322,12 +322,12 @@ services:
       HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER: ${HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER:-}
       AWS_REGION: ${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-north-1}}
     volumes:
+      # Production docker-compose 1.29 does not support create_host_path.
+      # The opt-in launcher checks the file with Docker's strict --mount.
       - type: bind
         source: /run/hunch-house-trader/key.json
         target: /run/hunch-house-trader/key.json
         read_only: true
-        bind:
-          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
