@@ -9,6 +9,10 @@ import { deriveFundingLifecycleBeforeActionBroadcast } from "../funding/lifecycl
 import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
 import {
+  fetchLimitlessClobMarket,
+  marketLimitlessFeePolicy,
+} from "./limitless-clob-fee-runtime.js";
+import {
   isPolymarketV2ApprovalCall,
   isPolymarketV2RedemptionCall,
 } from "./polymarket-v2-call-validation.js";
@@ -60,6 +64,10 @@ type SponsoredTransaction = Readonly<{
 export type EmbeddedEvmSponsorshipDependencies = Readonly<{
   isAuthorizedDestination: (address: string) => Promise<boolean>;
   isKnownLimitlessMarket: (address: string) => Promise<boolean>;
+  isLimitlessFeeModuleForMarket?: (
+    slug: string,
+    address: string,
+  ) => Promise<boolean>;
   isKnownLimitlessNegRiskAdapter: (address: string) => Promise<boolean>;
   isKnownLimitlessNegRiskRedemption: (
     adapterAddress: string,
@@ -220,6 +228,24 @@ async function validateErc20Call(input: {
   if (!decoded || !isNonPayable(input.transaction)) return false;
   const target = normalizedAddress(input.transaction.to);
   if (!target) return false;
+  const feeMarketSlug = input.transaction.limitlessFeeMarketSlug;
+  if (feeMarketSlug) {
+    // The client supplies only the market locator, never spender authority.
+    // This branch cannot authorize transfers, other assets, or other chains.
+    const spender = normalizedAddress(String(decoded.args[0] ?? ""));
+    const amount = positiveBigInt(decoded.args[1]);
+    return Boolean(
+      input.chainId === BASE_CHAIN_ID &&
+      addressesEqual(target, env.limitlessUsdcAddress) &&
+      decoded.name === "approve" &&
+      spender &&
+      amount &&
+      (await input.dependencies.isLimitlessFeeModuleForMarket?.(
+        feeMarketSlug,
+        spender,
+      )),
+    );
+  }
 
   if (decoded.name === "transfer") {
     const recipient = normalizedAddress(String(decoded.args[0] ?? ""));
@@ -996,6 +1022,19 @@ function defaultDependencies(
     isAuthorizedDestination: (address) =>
       isAuthorizedDestination(userId, address),
     isKnownLimitlessMarket: (address) => isKnownLimitlessMarket(db, address),
+    isLimitlessFeeModuleForMarket: async (slug, address) => {
+      try {
+        const policy = marketLimitlessFeePolicy(
+          await fetchLimitlessClobMarket(slug),
+        );
+        return (
+          policy.mode === "collateral" &&
+          addressesEqual(policy.feeModule, address)
+        );
+      } catch {
+        return false;
+      }
+    },
     isKnownLimitlessNegRiskAdapter: (address) =>
       isKnownLimitlessNegRiskAdapter(db, address),
     isKnownLimitlessNegRiskRedemption: (adapterAddress, conditionId) =>

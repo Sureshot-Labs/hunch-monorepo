@@ -22,6 +22,7 @@ import {
 import { fetchKalshiNormalizedOrderStatus } from "./kalshi-executions.js";
 import { recoverCopyPurchaseLinks } from "./social-copy.js";
 import { AuthService } from "../auth.js";
+import { readDirectLimitlessHistory } from "../funding/reconciliation/limitless-trade-attempt-reconciler.js";
 import { createVerifiedRepairLaneRunner } from "./verified-repair-lanes.js";
 import { readPolymarketFillCandidates } from "./verified-buy-polymarket-provider.js";
 import {
@@ -112,6 +113,19 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
         orderId: providerOrderId,
         clientOrderId,
       });
+    },
+    readLimitlessHistoryPage: (scope) => {
+      consume();
+      return readDirectLimitlessHistory(
+        {
+          apiBase: env.limitlessApiBase,
+          apiVersion: env.limitlessApiVersion,
+          hmacSecret: env.limitlessHmacSecret,
+          hmacTokenId: env.limitlessHmacTokenId,
+          timeoutMs: env.limitlessApiTimeoutMs,
+        },
+        scope,
+      );
     },
     readDflowOrder: async (signature) => {
       consume();

@@ -16,6 +16,12 @@ import type { PolymarketAssetContext } from "@hunch/shared";
 import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
 import type { LimitlessClobSubmissionContext } from "./limitless-clob-evidence-identity.js";
 import { retainLimitlessCopySubmission } from "./limitless-copy-submission.js";
+import { appendLimitlessObservedLocatorSql } from "../repos/limitless-observed-locator.js";
+import {
+  lockLimitlessFokScope,
+  readOtherPendingLimitlessFok,
+  type LimitlessFokScope,
+} from "../repos/limitless-fok-submit-fence.js";
 
 type Db = Pick<Pool, "query">;
 type Instrument = VerifiedBuyFacts["instrument"];
@@ -25,6 +31,7 @@ export type RetainedCopyAttempt = {
   created: boolean;
   attemptToken: string;
   priorSubmissionUncertain: boolean;
+  limitlessFokScope?: LimitlessFokScope;
 };
 
 /** Adapts an already-validated venue request to the same Copy contract. */
@@ -50,6 +57,8 @@ export async function retainClientCopyBeforeSubmission(
     limitlessPositionContract?: string;
     limitlessClobOrder?: Record<string, unknown>;
     limitlessClobSubmissionContext?: LimitlessClobSubmissionContext;
+    limitlessProviderOwnerId?: number;
+    limitlessProviderMarketSlug?: string;
     onRetained?: (attempt: RetainedCopyAttempt) => void;
   },
 ): Promise<string> {
@@ -68,6 +77,8 @@ export async function retainClientCopyBeforeSubmission(
       positionWalletAddress: input.positionOwner,
       orderPayload: input.limitlessClobOrder,
       submissionContext: input.limitlessClobSubmissionContext,
+      ownerId: input.limitlessProviderOwnerId,
+      marketSlug: input.limitlessProviderMarketSlug,
     },
     intent: {
       actor: { kind: "web_app", userId: input.userId },
@@ -303,7 +314,20 @@ export async function authorizeCopySource(
             : prepared.intent.walletAddress,
         assetContext: payload.assetContext ?? null,
         marketAddress: payload.marketAddress ?? null,
-        ...(limitlessClob ? { limitlessClob } : {}),
+        ...(limitlessClob
+          ? {
+              limitlessClob,
+              orderType: prepared.intent.orderType,
+              ...(typeof payload.marketSlug === "string"
+                ? { limitlessProviderMarketSlug: payload.marketSlug }
+                : {}),
+              ...(typeof payload.ownerId === "number" &&
+              Number.isSafeInteger(payload.ownerId) &&
+              payload.ownerId > 0
+                ? { limitlessProviderOwnerId: payload.ownerId }
+                : {}),
+            }
+          : {}),
       },
     },
   };
@@ -324,6 +348,27 @@ export async function retainCopyBeforeSubmission(
   const userId = input.prepared.intent.actor.userId;
   const key = input.prepared.intent.idempotencyKey;
   const payloadHash = copyPayloadHash(input.prepared);
+  const payload = input.prepared.venuePayload;
+  const targetTokenId = input.prepared.intent.target.tokenId;
+  const clientOrderId = /^limitless:clob:8453:(.+)$/.exec(
+    input.providerReference,
+  )?.[1];
+  const limitlessFokScope =
+    clientOrderId &&
+    targetTokenId &&
+    input.prepared.intent.venue === "limitless" &&
+    input.prepared.intent.orderType === "FOK" &&
+    isRecord(payload) &&
+    isRecord(payload.submissionContext) &&
+    payload.submissionContext.collateralFeeModule
+      ? {
+          userId,
+          walletAddress: input.prepared.intent.walletAddress,
+          tokenId: targetTokenId,
+          side: "BUY" as const,
+          clientOrderId,
+        }
+      : undefined;
   return tx(pool, async (client) => {
     // Account deletion/merge acquires these same user rows. A new authorization
     // cannot pass an activity check before deletion and insert after its commit.
@@ -349,9 +394,12 @@ export async function retainCopyBeforeSubmission(
       prepared_fingerprint: string;
       state: string;
       submission_started_at: Date | null;
+      collateral_fee: boolean | null;
     }>(
       `
-      select id,payload_hash,provider_reference,prepared_fingerprint,state,submission_started_at from copy_attributions
+      select id,payload_hash,provider_reference,prepared_fingerprint,state,submission_started_at,
+        (source_snapshot #>> '{submission,orderType}'='FOK' and
+          (source_snapshot #> '{submission,limitlessClob,context}') ? 'collateralFeeModule') as collateral_fee from copy_attributions
       where copier_user_id=$1 and idempotency_key=$2 for update`,
       [userId, key],
     );
@@ -363,6 +411,12 @@ export async function retainCopyBeforeSubmission(
         saved.prepared_fingerprint !== input.preparedFingerprint
       )
         throw new SocialError("copy_idempotency_conflict", 409);
+      if (
+        saved.collateral_fee &&
+        saved.state !== "failed" &&
+        saved.submission_started_at
+      )
+        throw new SocialError("limitless_submit_reconciling", 409);
       const retried = await client.query<{ submission_attempt_token: string }>(
         `update copy_attributions
         set submission_attempt_token=gen_random_uuid(),state=case when state='failed' then 'pending' else state end,
@@ -379,6 +433,7 @@ export async function retainCopyBeforeSubmission(
         attemptToken: attempt.submission_attempt_token,
         priorSubmissionUncertain:
           saved.state !== "failed" && saved.submission_started_at !== null,
+        limitlessFokScope,
       };
     }
     // Only an already-retained attempt may recover a prior local submission.
@@ -417,23 +472,34 @@ export async function retainCopyBeforeSubmission(
       created: true,
       attemptToken: saved.submission_attempt_token,
       priorSubmissionUncertain: false,
+      limitlessFokScope,
     };
   });
 }
 
 /** No executor may cross its request boundary without retaining broadcast uncertainty. */
 export async function markCopySubmissionStarted(
-  db: Db,
+  pool: Pool,
   userId: string,
   attempt: RetainedCopyAttempt,
 ): Promise<void> {
-  const result = await db.query(
-    `update copy_attributions set submission_started_at=coalesce(submission_started_at,now()),updated_at=now()
+  const mark = async (db: Db) => {
+    const result = await db.query(
+      `update copy_attributions set submission_started_at=coalesce(submission_started_at,now()),updated_at=now()
     where id=$1 and copier_user_id=$2 and submission_attempt_token=$3 returning id`,
-    [attempt.id, userId, attempt.attemptToken],
-  );
-  if (!result.rows.length)
-    throw new SocialError("copy_attempt_superseded", 409);
+      [attempt.id, userId, attempt.attemptToken],
+    );
+    if (!result.rows.length)
+      throw new SocialError("copy_attempt_superseded", 409);
+  };
+  const scope = attempt.limitlessFokScope;
+  if (!scope) return mark(pool);
+  return tx(pool, async (db) => {
+    await lockLimitlessFokScope(db, scope);
+    if (await readOtherPendingLimitlessFok(db, scope))
+      throw new SocialError("limitless_submit_reconciling", 409);
+    await mark(db);
+  });
 }
 
 /** A failed preflight cannot erase a previous or concurrent request's uncertainty. */
@@ -461,6 +527,22 @@ export async function markCopyDefinitiveProviderRejection(
     `update copy_attributions set state='failed',updated_at=now()
     where id=$1 and copier_user_id=$2 and submission_attempt_token=$3 and state='pending'`,
     [attempt.id, userId, attempt.attemptToken],
+  );
+}
+
+export async function noteLimitlessCopyLocator(
+  db: Db,
+  userId: string,
+  attempt: RetainedCopyAttempt,
+  locator: { providerOrderId: string | null; txHash: string | null },
+): Promise<void> {
+  await db.query(
+    `update copy_attributions set source_snapshot=jsonb_set(
+    source_snapshot,'{submission,limitlessLocator}', ${appendLimitlessObservedLocatorSql("source_snapshot #> '{submission,limitlessLocator}'", "($4::jsonb->>'providerOrderId')", "($4::jsonb->>'txHash')")})
+    where id=$1 and copier_user_id=$2 and submission_attempt_token=$3
+      and state='pending' and ($4::jsonb->>'providerOrderId' is null or
+        coalesce(source_snapshot #>> '{submission,limitlessLocator,providerOrderId}',$4::jsonb->>'providerOrderId')=$4::jsonb->>'providerOrderId')`,
+    [attempt.id, userId, attempt.attemptToken, JSON.stringify(locator)],
   );
 }
 
@@ -604,6 +686,8 @@ export async function recoverCopyPurchaseLinks(
     `
     select id,copier_user_id,provider_reference,instrument from copy_attributions
     where copier_user_id is not null and state='pending' and order_id is null and execution_id is null
+      and not coalesce(source_snapshot #>> '{submission,orderType}'='FOK' and
+        (source_snapshot #> '{submission,limitlessClob,context}') ? 'collateralFeeModule',false)
     order by updated_at,id limit $1`,
     [limit],
   );

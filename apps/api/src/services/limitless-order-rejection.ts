@@ -276,6 +276,7 @@ export function classifyLimitlessOrderRejection(input: {
   evidence: LimitlessOrderRejectionEvidence;
   orderType: "FOK" | "GTC";
   explicitFokNoFill?: boolean;
+  frozenCollateralFok?: boolean;
 }): LimitlessOrderRejectionDecision {
   const { status } = input.evidence;
   const searchable = [input.evidence.providerCode, ...input.evidence.messages]
@@ -290,6 +291,8 @@ export function classifyLimitlessOrderRejection(input: {
     /insufficient (?:collateral )?allowance|(?:collateral )?allowance (?:is )?(?:insufficient|required|missing)/i.test(
       searchable,
     );
+  const feeModuleAllowanceRejection =
+    /insufficient collateral allowance for the order fee\b/i.test(searchable);
   const transientBalanceOrIndexing =
     /insufficient (?:available )?(?:cash|collateral|funds|balance)|balance (?:is )?(?:pending|unavailable|not (?:yet )?(?:available|indexed|updated))|(?:index|indexer|indexing).*(?:delay|lag|pending|sync)|(?:account|balance).*(?:still )?syncing/i.test(
       searchable,
@@ -304,10 +307,17 @@ export function classifyLimitlessOrderRejection(input: {
     });
   }
 
-  if (insufficientAllowance) {
+  if (
+    insufficientAllowance &&
+    ((!input.frozenCollateralFok && !feeModuleAllowanceRejection) ||
+      status === 400 ||
+      status === 422)
+  ) {
     return decision({
       disposition: "definitive_failure",
-      errorCode: "limitless_trade_allowance_rejected",
+      errorCode: feeModuleAllowanceRejection
+        ? "limitless_fee_module_allowance_insufficient"
+        : "limitless_trade_allowance_rejected",
       kind: "allowance",
       retryableAfterReconciliation: false,
     });

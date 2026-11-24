@@ -1,6 +1,18 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
+import { isRecord } from "../../lib/type-guards.js";
+import { fetchLimitlessHistoryReceiptLocators } from "../../repos/limitless-history-receipt-locators.js";
+import {
+  appendLimitlessObservedLocatorSql,
+  readLimitlessObservedLocator,
+  type LimitlessHistoryObservation,
+} from "../../repos/limitless-observed-locator.js";
+import {
+  lockLimitlessFokScope,
+  readOtherPendingLimitlessFok,
+} from "../../repos/limitless-fok-submit-fence.js";
+import type { RetainedLimitlessClobSubmission } from "../../services/limitless-clob-evidence-identity.js";
 import { legacyEvidencePollingPausedSql } from "../legacy/evidence-polling-control.js";
 import {
   deriveFundingLifecycle,
@@ -138,6 +150,7 @@ export class FundingTradeAttemptError extends Error {
       | "attempt_conflict"
       | "attempt_not_found"
       | "invalid_state"
+      | "limitless_history_conflict"
       | "sealed_handoff_required"
       | "reservation_unavailable",
     message: string,
@@ -425,6 +438,122 @@ async function appendFundingOperationEvidenceInTransaction(
   }
 }
 
+function limitlessSubmissionKey(attemptId: string): string {
+  return `limitlessClobSubmissionV1:${attemptId}`;
+}
+
+/** Load the frozen pre-dispatch proof for this exact attempt, never current
+ * market configuration or signed fields echoed by the provider. */
+export async function fetchFundingLimitlessClobSubmission(
+  db: Pick<Pool, "query">,
+  attempt: Pick<
+    FundingTradeAttempt,
+    "id" | "operationId" | "userId" | "externalReference"
+  >,
+): Promise<unknown> {
+  const { rows } = await db.query<{ evidence: unknown }>(
+    `select support_metadata -> $3::text as evidence
+       from funding_operations where id = $1 and user_id = $2`,
+    [attempt.operationId, attempt.userId, limitlessSubmissionKey(attempt.id)],
+  );
+  const evidence = rows[0]?.evidence;
+  if (evidence == null) return undefined;
+  return isRecord(evidence) &&
+    evidence.clientOrderId === attempt.externalReference
+    ? isRecord(evidence.submission) && isRecord(evidence.locator)
+      ? { ...evidence.submission, locator: evidence.locator }
+      : (evidence.submission ?? null)
+    : null;
+}
+
+/** Record an observed locator once under the original immutable dispatch ID. */
+export async function noteFundingLimitlessClobLocator(
+  db: Pick<Pool, "query">,
+  input: {
+    operationId: string;
+    userId: string;
+    attemptId: string;
+    clientOrderId: string;
+    providerOrderId: string | null;
+    txHash: string | null;
+    history?: LimitlessHistoryObservation;
+  },
+): Promise<void> {
+  const savedLocator = "support_metadata #> array[$3::text,'locator']";
+  const updatedLocator = appendLimitlessObservedLocatorSql(
+    savedLocator,
+    "$5::text",
+    "$6::text",
+    "$7::jsonb",
+  );
+  await db.query(
+    `update funding_operations set support_metadata=jsonb_set(
+    support_metadata,array[$3::text,'locator'],${updatedLocator}),
+    version=version+1, updated_at=clock_timestamp()
+    where id=$1 and user_id=$2 and support_metadata #>> array[$3::text,'clientOrderId']=$4
+      and (${savedLocator}) is distinct from ${updatedLocator}
+      and ($5::text is null or coalesce(support_metadata #>> array[$3::text,'locator','providerOrderId'],$5)=$5)`,
+    [
+      input.operationId,
+      input.userId,
+      limitlessSubmissionKey(input.attemptId),
+      input.clientOrderId,
+      input.providerOrderId,
+      input.txHash,
+      input.history ? JSON.stringify(input.history) : null,
+    ],
+  );
+}
+
+async function assertNoLimitlessCollateralHistory(
+  client: Pick<PoolClient, "query">,
+  attempt: FundingTradeAttempt,
+  exactProviderOrderId?: string | null,
+  checkedHashes: readonly string[] = [],
+): Promise<void> {
+  const retained = await fetchFundingLimitlessClobSubmission(client, attempt);
+  if (
+    !isRecord(retained) ||
+    !isRecord(retained.context) ||
+    !Object.hasOwn(retained.context, "collateralFeeModule") ||
+    !isRecord(retained.order)
+  )
+    return;
+  const observed = readLimitlessObservedLocator(retained.locator);
+  const knownProviderOrderId = observed.providerOrderId;
+  if (
+    observed.overflow ||
+    observed.hashes.some((hash) => !checkedHashes.includes(hash))
+  )
+    throw new FundingTradeAttemptError(
+      "limitless_history_conflict",
+      "Limitless receipt candidates changed before release",
+    );
+  if (
+    knownProviderOrderId &&
+    exactProviderOrderId &&
+    knownProviderOrderId !== exactProviderOrderId
+  )
+    throw new FundingTradeAttemptError(
+      "limitless_history_conflict",
+      "Limitless provider order identity changed",
+    );
+  const locators = await fetchLimitlessHistoryReceiptLocators(client, {
+    userId: attempt.userId,
+    walletAddress:
+      typeof retained.order.maker === "string" ? retained.order.maker : null,
+    tokenId: attempt.consumerIntent.marketContextId,
+    side: "BUY",
+    clientOrderId: attempt.externalReference,
+    providerOrderId: knownProviderOrderId ?? exactProviderOrderId,
+  });
+  if (locators.length)
+    throw new FundingTradeAttemptError(
+      "limitless_history_conflict",
+      "Limitless status conflicts with exact local settlement history",
+    );
+}
+
 export async function claimFundingTradeAttemptInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -440,6 +569,8 @@ export async function claimFundingTradeAttemptInTransaction(
     externalReference?: string | null;
     /** Only the exact v2 handoff claimer may consume a bound reservation. */
     allowTelegramAppHandoffV2?: boolean;
+    /** A failed fresh-order preflight may only observe an existing submission. */
+    freshSubmissionError?: Error;
     now?: Date;
   }>,
 ): Promise<
@@ -488,6 +619,9 @@ export async function claimFundingTradeAttemptInTransaction(
         input.consumerIntent,
       )
     ) {
+      if (input.freshSubmissionError && active.state === "claimed") {
+        throw input.freshSubmissionError;
+      }
       if (
         active.state === "claimed" &&
         active.claimLeaseUntil.getTime() <= now.getTime()
@@ -527,6 +661,8 @@ export async function claimFundingTradeAttemptInTransaction(
       "funding reservation already has an unresolved trade attempt",
     );
   }
+
+  if (input.freshSubmissionError) throw input.freshSubmissionError;
 
   assertReservationScope(
     scope,
@@ -646,6 +782,7 @@ export async function markFundingTradeAttemptSubmissionStartedInTransaction(
     reservationId: string;
     attemptId: string;
     claimToken: string;
+    limitlessClobSubmission?: RetainedLimitlessClobSubmission;
     now?: Date;
   }>,
 ): Promise<FundingTradeAttempt> {
@@ -716,6 +853,41 @@ export async function markFundingTradeAttemptSubmissionStartedInTransaction(
       "invalid_state",
       "trade submission claim was cancelled, superseded, or is no longer ready",
     );
+  }
+  if (input.limitlessClobSubmission) {
+    if (row.execution_path !== "limitless_clob" || !row.external_reference)
+      throw new FundingTradeAttemptError(
+        "invalid_state",
+        "Limitless submission identity is unavailable",
+      );
+    if (
+      input.limitlessClobSubmission.context.collateralFeeModule &&
+      input.limitlessClobSubmission.order.takerAmount === "1"
+    ) {
+      const scope = {
+        userId: input.userId,
+        walletAddress: input.limitlessClobSubmission.order.maker,
+        tokenId: input.limitlessClobSubmission.order.tokenId,
+        side: "BUY" as const,
+        clientOrderId: row.external_reference,
+      };
+      await lockLimitlessFokScope(client, scope);
+      if (await readOtherPendingLimitlessFok(client, scope))
+        throw new FundingTradeAttemptError(
+          "attempt_conflict",
+          "A prior Limitless FOK is still being reconciled",
+        );
+    }
+    await appendFundingOperationEvidenceInTransaction(client, {
+      operationId: input.operationId,
+      userId: input.userId,
+      supportMetadataPatch: {
+        [limitlessSubmissionKey(row.id)]: {
+          clientOrderId: row.external_reference,
+          submission: input.limitlessClobSubmission,
+        },
+      },
+    });
   }
   return mapAttempt(row);
 }
@@ -807,7 +979,11 @@ export async function recordFundingTradeAttemptOutcomeInTransaction(
       update funding_trade_attempts
       set state = $3,
           broadcast_may_have_occurred = $4,
-          external_reference = coalesce($5, external_reference),
+          external_reference = case
+            when execution_path = 'limitless_clob' and $3 = 'ambiguous'
+              then coalesce(external_reference, $5)
+            else coalesce($5, external_reference)
+          end,
           error_code = $6,
           resolved_at = $7,
           updated_at = $7
@@ -877,7 +1053,7 @@ export async function claimAmbiguousLimitlessTradeAttemptsForReconciliation(
         and external_reference is not null
         and (state = 'submission_started' or resolved_at is not null)
         and claim_lease_until <= $1
-      order by resolved_at, id
+      order by claim_lease_until, resolved_at, id
       limit $2`,
     [now, batchSize],
   );
@@ -892,6 +1068,20 @@ export async function claimAmbiguousLimitlessTradeAttemptsForReconciliation(
     if (attempt) claimed.push(attempt);
   }
   return claimed;
+}
+
+/** A status batch can lease more rows than it can inspect in wallet history.
+ * Yield only the unused observation lease, never the funding reservation. */
+export async function yieldLimitlessHistoryObservationLease(
+  db: Pick<Pool, "query">,
+  attempt: FundingTradeAttempt,
+  now: Date,
+): Promise<void> {
+  await db.query(
+    `update funding_trade_attempts set claim_lease_until=$4
+    where id=$1 and user_id=$2 and claim_token=$3::uuid and state='ambiguous' and claim_lease_until>$4`,
+    [attempt.id, attempt.userId, attempt.claimToken, now],
+  );
 }
 
 /** Evidence-only leases. Empty CLOB lookups must never close these attempts. */
@@ -1079,6 +1269,7 @@ export async function proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
     clientOrderId: string;
     expectedClaimToken: string;
     minimumAgeMs: number;
+    negativeCheckedHashes?: readonly string[];
     now?: Date;
     operationSupportMetadataPatch?: Readonly<Record<string, JsonValue>>;
     userId: string;
@@ -1104,6 +1295,12 @@ export async function proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
       "Limitless absence proof does not match an aged ambiguous trade attempt",
     );
   }
+  await assertNoLimitlessCollateralHistory(
+    client,
+    attempt,
+    null,
+    input.negativeCheckedHashes,
+  );
   const resolved = await client.query<FundingTradeAttemptRow>(
     `update funding_trade_attempts
         set state = 'definitive_failure',
@@ -1142,6 +1339,8 @@ export async function proveAmbiguousLimitlessFokNoFillInTransaction(
     clientOrderId: string;
     expectedClaimToken: string;
     now?: Date;
+    providerOrderId?: string | null;
+    negativeCheckedHashes?: readonly string[];
     userId: string;
   }>,
 ): Promise<FundingTradeAttempt> {
@@ -1161,6 +1360,12 @@ export async function proveAmbiguousLimitlessFokNoFillInTransaction(
       "Limitless no-fill proof does not match an ambiguous trade attempt",
     );
   }
+  await assertNoLimitlessCollateralHistory(
+    client,
+    attempt,
+    input.providerOrderId,
+    input.negativeCheckedHashes,
+  );
   const resolved = await client.query<FundingTradeAttemptRow>(
     `update funding_trade_attempts
         set state = 'definitive_failure',
@@ -1193,6 +1398,8 @@ export async function proveAmbiguousLimitlessTerminalRejectionInTransaction(
     errorCode: string;
     expectedClaimToken: string;
     now?: Date;
+    providerOrderId?: string | null;
+    negativeCheckedHashes?: readonly string[];
     userId: string;
   }>,
 ): Promise<FundingTradeAttempt> {
@@ -1223,6 +1430,12 @@ export async function proveAmbiguousLimitlessTerminalRejectionInTransaction(
       "Limitless terminal rejection does not match a leased ambiguous trade attempt",
     );
   }
+  await assertNoLimitlessCollateralHistory(
+    client,
+    attempt,
+    input.providerOrderId,
+    input.negativeCheckedHashes,
+  );
   const resolved = await client.query<FundingTradeAttemptRow>(
     `update funding_trade_attempts
         set state = 'definitive_failure',
@@ -1471,6 +1684,24 @@ export async function recoverFundingTradeAttemptForOrderInTransaction(
     [candidate.operation_id, input.userId],
   );
   if (!operation.rows[0]) return null;
+  if (
+    input.venueId === "limitless" &&
+    (
+      await client.query<{ frozen: boolean }>(
+        `select support_metadata ? $3::text as frozen
+         from funding_operations where id = $1 and user_id = $2`,
+        [
+          candidate.operation_id,
+          input.userId,
+          limitlessSubmissionKey(candidate.id),
+        ],
+      )
+    ).rows[0]?.frozen
+  ) {
+    // History can appear before exact status. It may keep its own row, but
+    // cannot consume this attempt before the status worker attaches proof.
+    return null;
+  }
   const reservation = await client.query<{ id: string }>(
     `select id
        from balance_reservations

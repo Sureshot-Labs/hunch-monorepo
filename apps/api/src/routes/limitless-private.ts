@@ -6,6 +6,7 @@ import { pool } from "../db.js";
 import { getRedis } from "../redis.js";
 import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
+import { readLimitlessDirectOrderJournal } from "../repos/orders-repo.js";
 import {
   isLimitlessPartnerHmacConfigured,
   type LimitlessRequestAuthInputs,
@@ -40,6 +41,7 @@ import {
   syncLimitlessOpenOrdersRoute,
   syncLimitlessOrderHistoryRoute,
 } from "../services/limitless-trading-execution-service.js";
+import { assertLimitlessSigningFee } from "../services/limitless-clob-fees.js";
 import {
   buildEmbeddedLimitlessOrderTypedData,
   type LimitlessEmbeddedOrderPayload,
@@ -75,7 +77,9 @@ import {
   limitlessEmbeddedSignOrderExecuteBodySchema,
   limitlessEmbeddedSignOrderPrepareBodySchema,
   limitlessHistoryQuerySchema,
+  limitlessMarketExchangeErrorSchema,
   limitlessMarketExchangeQuerySchema,
+  limitlessMarketExchangeResponseSchema,
   limitlessOpenOrdersQuerySchema,
   limitlessOrderBodySchema,
   limitlessOrderIdParamsSchema,
@@ -137,8 +141,6 @@ async function prepareEmbeddedLimitlessOrderSigningRequest(inputs: {
   marketSlug: string;
   requestAuth: LimitlessRequestAuthInputs;
   payload: LimitlessEmbeddedOrderPayload;
-  signer: string;
-  ownerId: number;
   exchangeAddress?: string | null;
 }): Promise<{
   exchangeAddress: string;
@@ -151,18 +153,27 @@ async function prepareEmbeddedLimitlessOrderSigningRequest(inputs: {
   if (providedExchangeAddress && !resolvedExchangeAddress) {
     throw new Error("Embedded Limitless exchange address is invalid.");
   }
-  const exchangeAddress =
-    resolvedExchangeAddress ??
-    (
-      await resolveLimitlessEmbeddedOrderSigningContext({
-        marketSlug: inputs.marketSlug,
-        pool,
-        requestAuth: inputs.requestAuth,
-        payload: inputs.payload,
-        signer: inputs.signer,
-        ownerId: inputs.ownerId,
-      })
-    ).exchangeAddress;
+  const market = await resolveLimitlessEmbeddedOrderSigningContext({
+    marketSlug: inputs.marketSlug,
+    pool,
+    requestAuth: inputs.requestAuth,
+    payload: inputs.payload,
+  });
+  if (market.feePolicy.mode === "collateral") {
+    assertLimitlessSigningFee(
+      market.feePolicy,
+      Number(inputs.payload.feeRateBps ?? 0),
+    );
+    if (
+      resolvedExchangeAddress &&
+      resolvedExchangeAddress !== market.exchangeAddress
+    ) {
+      throw new Error(
+        "Embedded Limitless exchange address changed; refresh the order.",
+      );
+    }
+  }
+  const exchangeAddress = resolvedExchangeAddress ?? market.exchangeAddress;
 
   return {
     exchangeAddress,
@@ -708,8 +719,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           marketSlug: request.body.marketSlug,
           requestAuth: partnerAuth.requestAuth,
           payload: request.body.order as LimitlessEmbeddedOrderPayload,
-          signer,
-          ownerId,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -780,8 +789,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           marketSlug: request.body.marketSlug,
           requestAuth: partnerAuth.requestAuth,
           payload: request.body.order as LimitlessEmbeddedOrderPayload,
-          signer,
-          ownerId,
           exchangeAddress: request.body.exchangeAddress,
         });
         const signature = await executePreparedPrivySignatureRequest({
@@ -1328,7 +1335,16 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     "/market/exchange",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: limitlessMarketExchangeQuerySchema },
+      schema: {
+        querystring: limitlessMarketExchangeQuerySchema,
+        response: {
+          200: limitlessMarketExchangeResponseSchema,
+          401: limitlessMarketExchangeErrorSchema,
+          409: limitlessMarketExchangeErrorSchema,
+          502: limitlessMarketExchangeErrorSchema,
+          503: limitlessMarketExchangeErrorSchema,
+        },
+      },
     },
     async (request, reply) => {
       const user = request.user;
@@ -1344,6 +1360,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         signer,
         userId: user.id,
       });
+      reply.header("Cache-Control", "private, no-store");
       if (!result.ok) {
         reply.code(result.statusCode);
         return reply.send(result.payload);
@@ -1371,6 +1388,33 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
+      const { orderId } = request.params;
+      if (/^hunch-direct-[0-9a-f]{32}$/.test(orderId)) {
+        const journal = await readLimitlessDirectOrderJournal(
+          pool,
+          user.id,
+          orderId,
+          signer,
+        );
+        const recoveryState = !journal
+          ? "missing"
+          : journal.status === "no_fill"
+            ? "no_fill"
+            : journal.status === "failed"
+              ? "failed"
+              : journal.venue_order_id.startsWith("client:") ||
+                  journal.status !== "filled"
+                ? "pending"
+                : "filled";
+        reply.header("Cache-Control", "private, no-store");
+        return reply.send({
+          ok: true,
+          recoveryState,
+          ...(recoveryState === "filled" && journal
+            ? { orderId: journal.venue_order_id }
+            : {}),
+        });
+      }
       const result = await fetchLimitlessOrderRoute({
         orderId: request.params.orderId,
         signer,

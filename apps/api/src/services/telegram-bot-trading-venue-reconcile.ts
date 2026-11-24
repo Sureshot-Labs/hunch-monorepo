@@ -1,10 +1,29 @@
 import type { DbQuery } from "../db.js";
+import { env } from "../env.js";
+import {
+  inspectLimitlessFreshCollateralHistory,
+  readDirectLimitlessHistory,
+} from "../funding/reconciliation/limitless-trade-attempt-reconciler.js";
 import {
   polymarketOrderBindingJoinSql,
   polymarketOrderMarketIdSql,
 } from "../lib/polymarket-order-ledger-sql.js";
 import { sumErc20TransfersTo } from "../funding/execution/evm-erc20-receipt.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  fetchLimitlessHistoryReceiptLocators,
+  limitlessHistoryClientIdSql,
+  limitlessHistoryProviderIdSql,
+} from "../repos/limitless-history-receipt-locators.js";
+import {
+  readLimitlessObservedLocator,
+  appendLimitlessObservedLocatorSql,
+  type LimitlessHistoryObservation,
+} from "../repos/limitless-observed-locator.js";
+import {
+  createLimitlessHistoryReceiptReader,
+  observeLimitlessCollateralHistoryFill,
+} from "./limitless-collateral-history-proof.js";
 import { persistedTradeTerminalOutcome } from "../funding/persistence/funding-trade-consumer-status.js";
 import {
   fetchEmbeddedEthereumPrivyTransaction,
@@ -13,11 +32,14 @@ import {
 } from "./embedded-ethereum.js";
 import { resolveKalshiExecutionSettlementStatus } from "./kalshi-executions.js";
 import { fetchLimitlessExactClientOrderStatus } from "./limitless-order-status.js";
+import { withoutLimitlessRecoverySignatures } from "./limitless-clob-evidence-identity.js";
 import {
   deterministicLimitlessClientOrderId,
   deterministicLimitlessDirectHandoffClientOrderId,
 } from "./limitless-order-identity.js";
 import {
+  canonicalLimitlessTransactionHash,
+  classifyFrozenLimitlessFokResult,
   isLimitlessTerminalRejectedStatus,
   parseLimitlessOrderResult,
 } from "./limitless-order-result.js";
@@ -178,6 +200,57 @@ function recoveryPayload(
   return snapshot && isRecord(snapshot.recoveryPayload)
     ? snapshot.recoveryPayload
     : null;
+}
+
+async function hasExactCollateralHistory(
+  db: DbQuery,
+  row: VenueReconcileIntentRow,
+  providerOrderId?: string | null,
+): Promise<boolean> {
+  const payload = recoveryPayload(row.prepared_snapshot);
+  const context = payload?.submissionContext;
+  const order = payload?.orderPayload;
+  if (
+    row.venue !== "limitless" ||
+    !row.user_id ||
+    row.action === "redeem" ||
+    !isRecord(context) ||
+    !Object.hasOwn(context, "collateralFeeModule") ||
+    !isRecord(order)
+  )
+    return false;
+  return (
+    (
+      await fetchLimitlessHistoryReceiptLocators(db, {
+        userId: row.user_id,
+        walletAddress: readString(order.maker),
+        tokenId: readString(payload?.tokenId) ?? readString(order.tokenId),
+        side: row.action === "buy" ? "BUY" : "SELL",
+        clientOrderId: readString(
+          preparedKeys(row.prepared_snapshot)?.clientOrderId,
+        ),
+        providerOrderId,
+      })
+    ).length > 0
+  );
+}
+
+/** Close only if the write's own snapshot still has no exact local locator. */
+function safeTelegramLimitlessNegativeSql(
+  providerIdSql = "null::text",
+): string {
+  const intent = "telegram_trade_intents";
+  const context = `${intent}.prepared_snapshot #> '{recoveryPayload,submissionContext}'`;
+  const orderedToken = `${intent}.prepared_snapshot #>> '{recoveryPayload,tokenId}'`;
+  return `not exists(select 1 from orders history_order
+    where ${intent}.venue='limitless' and (${context}) ? 'collateralFeeModule'
+      and history_order.user_id=${intent}.user_id and history_order.venue='limitless'
+      and lower(history_order.wallet_address)=lower(${intent}.prepared_snapshot #>> '{recoveryPayload,orderPayload,maker}')
+      and history_order.token_id=case when (${orderedToken}) like 'limitless:%' then (${orderedToken}) else concat('limitless:',(${orderedToken})) end
+      and history_order.side=upper(${intent}.action) and history_order.venue_order_id like 'history:%'
+      and history_order.order_hash ~* '^0x[0-9a-f]{64}$'
+      and (${limitlessHistoryClientIdSql("history_order.order_payload")}=${intent}.prepared_snapshot #>> '{reconcileKeys,clientOrderId}'
+        or ${limitlessHistoryProviderIdSql("history_order.order_payload")}=coalesce(${providerIdSql},${intent}.result #>> '{limitlessLocator,providerOrderId}')))`;
 }
 
 function reconstructTradeIntent(
@@ -500,33 +573,53 @@ async function inspectVenueSubmit(
       }
       const matched = exactStatus.item;
       const parsed = parseLimitlessOrderResult(matched.payload);
-      const venueOrderId = parsed.venueOrderId ?? matched.providerOrderId;
+      const venueOrderId = matched.providerOrderId;
+      const context = recoveryPayload(row.prepared_snapshot)?.submissionContext;
+      const collateral =
+        isRecord(context) && Object.hasOwn(context, "collateralFeeModule");
       const explicitTerminalFailure = isLimitlessTerminalRejectedStatus(
         parsed.status,
       );
+      const collateralPending =
+        collateral &&
+        recoveryPayload(row.prepared_snapshot)?.orderType === "FOK" &&
+        classifyFrozenLimitlessFokResult(parsed) === "pending";
       return {
-        state: parsed.terminalFill
-          ? "limitless_clob_filled"
-          : parsed.explicitNoFill
-            ? "limitless_clob_no_fill"
-            : explicitTerminalFailure
-              ? "limitless_clob_rejected"
-              : "limitless_clob_open",
+        state: collateralPending
+          ? "limitless_clob_status_pending"
+          : parsed.terminalFill
+            ? "limitless_clob_filled"
+            : parsed.explicitNoFill
+              ? "limitless_clob_no_fill"
+              : explicitTerminalFailure
+                ? "limitless_clob_rejected"
+                : "limitless_clob_open",
         submitResult: {
           venue: "limitless",
-          status: parsed.terminalFill
-            ? "filled"
-            : parsed.explicitNoFill
-              ? "no_fill"
-              : explicitTerminalFailure
-                ? "failed"
-                : "submitted",
+          status: collateralPending
+            ? "submitted"
+            : parsed.terminalFill
+              ? "filled"
+              : parsed.explicitNoFill
+                ? "no_fill"
+                : explicitTerminalFailure
+                  ? "failed"
+                  : "submitted",
           venueOrderId,
-          orderHash: null,
+          orderHash: parsed.txHash,
           txSignature: parsed.txHash,
+          limitlessReceiptLocatorHashes: collateral
+            ? readLimitlessObservedLocator(row.result?.limitlessLocator).hashes
+            : undefined,
           price: null,
           size: null,
-          raw: { clientOrderId, recovered: true, status: matched.payload },
+          raw: {
+            clientOrderId,
+            recovered: true,
+            payload: collateral
+              ? withoutLimitlessRecoverySignatures(matched.payload)
+              : matched.payload,
+          },
         },
       };
     }
@@ -701,6 +794,9 @@ async function inspectLinkedLocalOrder(
 
 type TelegramVenueReconcileDependencies = {
   inspectVenueSubmit: typeof inspectVenueSubmit;
+  readHistoryReceipt?: Parameters<
+    typeof observeLimitlessCollateralHistoryFill
+  >[0]["readReceipt"];
 };
 
 const telegramVenueReconcileDependencies: TelegramVenueReconcileDependencies = {
@@ -712,10 +808,16 @@ async function recordAuditOnly(input: {
   intentId: string;
   state: string;
   submitResult?: SubmitResult | null;
+  limitlessLocator?: { txHash: string | null; providerOrderId: string | null };
+  limitlessHistory?: LimitlessHistoryObservation;
 }): Promise<void> {
   await input.db.query(
     `UPDATE telegram_trade_intents
-        SET result = coalesce(result, '{}'::jsonb) || $2::jsonb,
+        SET result = coalesce(result, '{}'::jsonb) || $2::jsonb || case
+              when ($5::text is not null or $6::text is not null or $7::jsonb is not null) and
+                ($5::text is null or coalesce(result #>> '{limitlessLocator,providerOrderId}',$5)=$5)
+              then jsonb_build_object('limitlessLocator',${appendLimitlessObservedLocatorSql("result -> 'limitlessLocator'", "$5::text", "$6::text", "$7::jsonb")})
+              else '{}'::jsonb end,
             venue_order_id = coalesce(venue_order_id, $3),
             tx_signature = coalesce(tx_signature, $4),
             updated_at = now()
@@ -730,6 +832,9 @@ async function recordAuditOnly(input: {
       }),
       input.submitResult?.venueOrderId ?? null,
       input.submitResult?.txSignature ?? null,
+      input.limitlessLocator?.providerOrderId ?? null,
+      input.limitlessLocator?.txHash ?? null,
+      input.limitlessHistory ? JSON.stringify(input.limitlessHistory) : null,
     ],
   );
 }
@@ -819,6 +924,7 @@ async function finalizeLimitlessDirectNotFound(input: {
   idempotencyKey: string;
   intentId: string;
   now: Date;
+  expectedLocator: unknown;
 }): Promise<boolean> {
   const result = await input.db.query(
     `update telegram_trade_intents
@@ -864,7 +970,9 @@ async function finalizeLimitlessDirectNotFound(input: {
         and order_id is null
         and execution_id is null
         and venue_order_id is null
-        and tx_signature is null`,
+        and tx_signature is null
+        and (result->'limitlessLocator') is not distinct from $6::jsonb
+        and ${safeTelegramLimitlessNegativeSql()}`,
     [
       input.intentId,
       input.idempotencyKey,
@@ -877,6 +985,9 @@ async function finalizeLimitlessDirectNotFound(input: {
           terminal: true,
         },
       }),
+      input.expectedLocator == null
+        ? null
+        : JSON.stringify(input.expectedLocator),
     ],
   );
   return (result.rowCount ?? 0) === 1;
@@ -1130,6 +1241,9 @@ export async function reconcileTelegramVenueIntents(
       return summary;
     }
     const limit = Math.min(Math.max(Math.trunc(input.limit ?? 5), 1), 25);
+    const readHistoryReceipt =
+      dependencies.readHistoryReceipt ?? createLimitlessHistoryReceiptReader();
+    let historyRequestsLeft = 2;
     const rows = await loadCandidates(client, {
       intentId: input.intentId ?? null,
       limit,
@@ -1139,6 +1253,11 @@ export async function reconcileTelegramVenueIntents(
     for (const row of rows) {
       summary.inspected += 1;
       let inspection: Awaited<ReturnType<typeof inspectVenueSubmit>>;
+      let postponedHistoryForCapacity = false;
+      let newLimitlessLocator:
+        | { txHash: string | null; providerOrderId: string | null }
+        | undefined;
+      let newLimitlessHistory: LimitlessHistoryObservation | undefined;
       let linkedLocalOrder: LinkedLocalOrderInspection | null = null;
       try {
         linkedLocalOrder = await inspectLinkedLocalOrder(client, row);
@@ -1149,6 +1268,196 @@ export async function reconcileTelegramVenueIntents(
           state: error instanceof Error ? error.message : "inspection_failed",
           submitResult: null,
         };
+      }
+      if (
+        row.venue === "limitless" &&
+        (inspection.state === "limitless_clob_not_found" ||
+          inspection.state === "limitless_clob_no_fill" ||
+          inspection.state === "limitless_clob_rejected" ||
+          inspection.state === "limitless_clob_status_pending")
+      ) {
+        try {
+          const saved = recoveryPayload(row.prepared_snapshot);
+          const context = saved?.submissionContext;
+          const negative = inspection.state !== "limitless_clob_status_pending";
+          if (
+            isRecord(context) &&
+            Object.hasOwn(context, "collateralFeeModule")
+          ) {
+            const retainedLocator = readLimitlessObservedLocator(
+              row.result?.limitlessLocator,
+            );
+            const savedHash = canonicalLimitlessTransactionHash(
+              row.tx_signature,
+            );
+            const exactHash = canonicalLimitlessTransactionHash(
+              inspection.submitResult?.txSignature,
+            );
+            const exactProviderId =
+              inspection.submitResult?.venueOrderId ?? row.venue_order_id;
+            const providerOrderId =
+              retainedLocator.providerOrderId ?? exactProviderId;
+            const locatorConflict =
+              retainedLocator.providerOrderId !== null &&
+              exactProviderId !== null &&
+              retainedLocator.providerOrderId !== exactProviderId;
+            const hasLocalHistory = await hasExactCollateralHistory(
+              client,
+              row,
+              providerOrderId,
+            );
+            if (
+              !locatorConflict &&
+              ((exactHash && !retainedLocator.hashes.includes(exactHash)) ||
+                (!retainedLocator.providerOrderId &&
+                  !negative &&
+                  exactProviderId))
+            )
+              newLimitlessLocator = {
+                txHash: exactHash,
+                providerOrderId: exactProviderId,
+              };
+            const knownHashes = [
+              ...new Set(
+                [
+                  ...retainedLocator.hashes,
+                  savedHash,
+                  locatorConflict ? null : exactHash,
+                ].filter((hash): hash is string => Boolean(hash)),
+              ),
+            ];
+            const assessments = new Map<string, "matched" | "unmatched">();
+            const clientOrderId = readString(
+              preparedKeys(row.prepared_snapshot)?.clientOrderId,
+            );
+            const tokenId = readString(saved?.tokenId);
+            const handoffId = sealedDirectHandoffId(row);
+            const proofInput =
+              row.user_id &&
+              row.action !== "redeem" &&
+              !row.funding_operation_id &&
+              tokenId &&
+              handoffId &&
+              clientOrderId ===
+                deterministicLimitlessDirectHandoffClientOrderId(handoffId)
+                ? {
+                    db: client,
+                    readReceipt: readHistoryReceipt,
+                    userId: row.user_id,
+                    tokenId,
+                    clientOrderId,
+                    side:
+                      row.action === "buy"
+                        ? ("BUY" as const)
+                        : ("SELL" as const),
+                    submission: {
+                      context,
+                      order: saved?.orderPayload,
+                    },
+                    providerOrderId,
+                    observeUnboundLocators:
+                      knownHashes.length > 0 && !providerOrderId,
+                    extraLocators: knownHashes.map((tx_hash) => ({
+                      tx_hash,
+                      provider_order_id: providerOrderId,
+                    })),
+                    onLocatorResult: (
+                      hash: string,
+                      result: "matched" | "unmatched",
+                    ) => assessments.set(hash, result),
+                  }
+                : null;
+            let proof =
+              proofInput && (hasLocalHistory || knownHashes.length)
+                ? await observeLimitlessCollateralHistoryFill(proofInput)
+                : null;
+            let absenceClear = false;
+            const ownerId = saved?.ownerId;
+            const postedAt = row.submit_started_at;
+            const canReadFresh =
+              !proof &&
+              proofInput &&
+              typeof ownerId === "number" &&
+              Number.isSafeInteger(ownerId) &&
+              ownerId > 0 &&
+              postedAt instanceof Date &&
+              Date.now() - postedAt.getTime() >=
+                LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS &&
+              env.limitlessHmacSecret &&
+              env.limitlessHmacTokenId;
+            postponedHistoryForCapacity =
+              Boolean(canReadFresh) && historyRequestsLeft <= 0;
+            if (canReadFresh && !postponedHistoryForCapacity) {
+              historyRequestsLeft--;
+              const investigation =
+                await inspectLimitlessFreshCollateralHistory({
+                  proofInput,
+                  scope: {
+                    ownerId,
+                    clientOrderId: proofInput.clientOrderId,
+                    postedAt,
+                    providerOrderId,
+                    historyScan: retainedLocator.historyScan,
+                    tokenId: proofInput.tokenId,
+                    side: proofInput.side,
+                    marketSlug: readString(saved?.marketSlug) ?? undefined,
+                  },
+                  readHistoryPage: (scope) =>
+                    readDirectLimitlessHistory(
+                      {
+                        apiBase: env.limitlessApiBase,
+                        apiVersion: env.limitlessApiVersion,
+                        timeoutMs: env.limitlessApiTimeoutMs,
+                        hmacSecret: env.limitlessHmacSecret,
+                        hmacTokenId: env.limitlessHmacTokenId,
+                      },
+                      scope,
+                    ),
+                  retain: async (history) => {
+                    newLimitlessHistory = history;
+                  },
+                });
+              proof = investigation.proof;
+              absenceClear =
+                investigation.absenceClear &&
+                !locatorConflict &&
+                !retainedLocator.overflow &&
+                !(
+                  inspection.state === "limitless_clob_not_found" &&
+                  retainedLocator.providerOrderId &&
+                  knownHashes.length === 0
+                ) &&
+                knownHashes.every(
+                  (hash) => assessments.get(hash) === "unmatched",
+                );
+            }
+            if (proof) {
+              inspection = {
+                state: "limitless_clob_finalized_history",
+                submitResult: {
+                  venue: "limitless",
+                  status: "filled",
+                  venueOrderId: proof.providerOrderId,
+                  orderHash: proof.txHash,
+                  txSignature: proof.txHash,
+                  price: proof.price,
+                  size: proof.size,
+                  raw: { recoveredFromFinalizedHistory: true },
+                },
+              };
+            } else if (!negative || hasLocalHistory || !absenceClear) {
+              inspection = {
+                state: "limitless_clob_history_conflict",
+                submitResult: null,
+              };
+            }
+          }
+        } catch {
+          inspection = {
+            state: "limitless_clob_history_lookup_failed",
+            submitResult: null,
+          };
+        }
       }
       const item: TelegramVenueReconcileAuditItem = {
         ageMs:
@@ -1194,6 +1503,7 @@ export async function reconcileTelegramVenueIntents(
               idempotencyKey: row.idempotency_key,
               intentId: row.id,
               now: reconcileNow,
+              expectedLocator: row.result?.limitlessLocator,
             });
             item.result = finalized ? "failed" : "pending";
             if (finalized) summary.failedVerified += 1;
@@ -1238,11 +1548,18 @@ export async function reconcileTelegramVenueIntents(
         if (item.result === "skipped") summary.skipped += 1;
         else summary.pending += 1;
         summary.items.push(item);
-        if (!summary.dryRun) {
+        if (
+          !summary.dryRun &&
+          (!postponedHistoryForCapacity ||
+            newLimitlessLocator ||
+            newLimitlessHistory)
+        ) {
           await recordAuditOnly({
             db: client,
             intentId: row.id,
             state: inspection.state,
+            limitlessLocator: newLimitlessLocator,
+            limitlessHistory: newLimitlessHistory,
           });
         }
         continue;
@@ -1326,18 +1643,29 @@ export async function reconcileTelegramVenueIntents(
         summary.items.push(item);
         continue;
       }
-      if (submitResult.status === "failed") {
-        await client.query(
+      const collateralSubmission = recoveryPayload(
+        row.prepared_snapshot,
+      )?.submissionContext;
+      const collateralNoFill =
+        row.venue === "limitless" &&
+        submitResult.status === "no_fill" &&
+        isRecord(collateralSubmission) &&
+        Object.hasOwn(collateralSubmission, "collateralFeeModule");
+      if (submitResult.status === "failed" || collateralNoFill) {
+        const closed = await client.query(
           `UPDATE telegram_trade_intents
               SET status = 'failed',
-                  error_code = 'venue_submit_failed',
-                  error_message = 'Venue reconciliation confirmed a failed submit.',
+                  error_code = case when $6::boolean then 'limitless_trade_no_fill' else 'venue_submit_failed' end,
+                  error_message = case when $6::boolean then 'Limitless could not fill the order.'
+                    else 'Venue reconciliation confirmed a failed submit.' end,
                   tx_signature = coalesce(tx_signature, $2),
                   venue_order_id = coalesce(venue_order_id, $3),
                   result = coalesce(result, '{}'::jsonb) || $4::jsonb,
                   updated_at = now()
             WHERE id = $1
-              AND status = ANY($5::text[])`,
+              AND status = ANY($5::text[])
+              AND (result->'limitlessLocator') is not distinct from $7::jsonb
+              AND ${safeTelegramLimitlessNegativeSql("$3::text")}`,
           [
             row.id,
             submitResult.txSignature,
@@ -1350,10 +1678,15 @@ export async function reconcileTelegramVenueIntents(
               },
             }),
             ["executing", "reconcile_required", "submitted"],
+            collateralNoFill,
+            row.result?.limitlessLocator == null
+              ? null
+              : JSON.stringify(row.result.limitlessLocator),
           ],
         );
-        summary.failedVerified += 1;
-        item.result = "failed";
+        if (closed.rowCount) summary.failedVerified += 1;
+        else summary.pending += 1;
+        item.result = closed.rowCount ? "failed" : "pending";
         summary.items.push(item);
         continue;
       }

@@ -11,6 +11,36 @@ import {
 
 const zNumberish = z.union([z.string(), z.number()]);
 
+export const limitlessClobFeePolicySchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("legacy"),
+    signingFeeRateBps: z.number().int().nonnegative().nullable(),
+  }),
+  z.object({
+    mode: z.literal("collateral"),
+    signingFeeRateBps: z.literal(0),
+    feeModule: z.string(),
+    collateralToken: z.string(),
+  }),
+]);
+
+export const limitlessMarketExchangeResponseSchema = z.object({
+  ok: z.literal(true),
+  marketSlug: z.string(),
+  exchangeAddress: z.string().nullable(),
+  adapterAddress: z.string().nullable(),
+  feePolicy: limitlessClobFeePolicySchema.nullable(),
+  feeModuleAllowanceRaw: z.string().nullable().optional(),
+});
+
+export const limitlessMarketExchangeErrorSchema = z.object({
+  error: z.string(),
+  code: z.string().optional(),
+  feePolicy: limitlessClobFeePolicySchema.optional(),
+  status: z.number().optional(),
+  payload: z.unknown().optional(),
+});
+
 const zClientType = z.preprocess(
   (v) => (typeof v === "string" ? v.toLowerCase() : v),
   z.enum(["eoa", "base", "etherspot"]),
@@ -143,6 +173,7 @@ export const limitlessOpenOrdersQuerySchema = z.object({
 });
 
 export const limitlessMarketExchangeQuerySchema = z.object({
+  checkFeeAllowance: zOptionalBool.optional(),
   slug: zLimitlessSlug,
   side: z
     .preprocess(

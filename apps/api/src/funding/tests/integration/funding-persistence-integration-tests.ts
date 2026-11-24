@@ -90,12 +90,26 @@ import {
   claimAmbiguousPolymarketTradeAttemptsForReconciliation,
   attachRecoveredPolymarketAttemptOrderInTransaction,
   claimLimitlessTradeAttemptForReconciliation,
+  fetchFundingLimitlessClobSubmission,
   FundingTradeAttemptError,
   markFundingTradeAttemptSubmissionStartedInTransaction,
+  noteFundingLimitlessClobLocator,
   proveAmbiguousLimitlessTradeAttemptAbsentInTransaction,
   proveAmbiguousLimitlessTerminalRejectionInTransaction,
+  recoverFundingTradeAttemptForOrderInTransaction,
   recordFundingTradeAttemptOutcomeInTransaction,
+  yieldLimitlessHistoryObservationLease,
 } from "../../persistence/funding-trade-attempt-repository.js";
+import {
+  buildLimitlessClobSubmissionContext,
+  limitlessClobFrozenContext,
+  readLimitlessHistoryTxHashes,
+  type RetainedLimitlessClobSubmission,
+} from "../../../services/limitless-clob-evidence-identity.js";
+import {
+  buildLimitlessReconciledOrderStoreInput,
+  persistLimitlessReconciledOrderInTransaction,
+} from "../../reconciliation/limitless-trade-attempt-reconciler.js";
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
 import { fundingReservationHoldSql } from "../../persistence/source-reservation-hold.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
@@ -8263,6 +8277,7 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
   let marketId = "";
   let tokenId = "";
   const clientOrderId = opaque("limitless-client-order");
+  let retainedSubmission: RetainedLimitlessClobSubmission | undefined;
   try {
     try {
       await setup.query("begin");
@@ -8380,7 +8395,7 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
         marketContextId: rawTokenId,
         spend: { asset: ASSET, raw: "1000000" },
       });
-      const claim = await claimFundingTradeAttemptInTransaction(setup, {
+      const claimInput = {
         userId,
         operationId,
         reservationId,
@@ -8391,17 +8406,116 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
         canonicalFingerprint: hash("f"),
         consumerIntent,
         externalReference: clientOrderId,
+      } as const;
+      const missingFeeAllowance = new Error("fee allowance is missing");
+      await assert.rejects(
+        claimFundingTradeAttemptInTransaction(setup, {
+          ...claimInput,
+          freshSubmissionError: missingFeeAllowance,
+        }),
+        (error) => error === missingFeeAllowance,
+      );
+      const claim = await claimFundingTradeAttemptInTransaction(
+        setup,
+        claimInput,
+      );
+      assert.equal(claim.attempt.attemptNumber, 1);
+      await assert.rejects(
+        claimFundingTradeAttemptInTransaction(setup, {
+          ...claimInput,
+          freshSubmissionError: missingFeeAllowance,
+          now: new Date(claim.attempt.claimLeaseUntil.getTime() + 1),
+        }),
+        (error) => error === missingFeeAllowance,
+      );
+      await setup.query("savepoint limitless_reclaimed_reference");
+      const reclaimed = await claimFundingTradeAttemptInTransaction(setup, {
+        ...claimInput,
+        externalReference: opaque("fresh-http-request-id"),
+        now: new Date(claim.attempt.claimLeaseUntil.getTime() + 1),
       });
+      assert.equal(reclaimed.claimed, true);
+      assert.equal(reclaimed.attempt.id, claim.attempt.id);
+      assert.equal(
+        reclaimed.attempt.externalReference,
+        clientOrderId,
+        "dispatch must reuse durable client ID after a pre-submit lease expires",
+      );
+      await setup.query("rollback to savepoint limitless_reclaimed_reference");
+      await setup.query("release savepoint limitless_reclaimed_reference");
       attemptId = claim.attempt.id;
       attemptClaimToken = claim.attempt.claimToken;
       attemptClaimLeaseUntil = claim.attempt.claimLeaseUntil;
+      const signedFields = {
+        maker: "0x00000000000000000000000000000000000000b1",
+        signer: "0x00000000000000000000000000000000000000b1",
+        taker: "0x0000000000000000000000000000000000000000",
+        salt: "71",
+        tokenId: rawTokenId,
+        makerAmount: "1000000",
+        takerAmount: "1",
+        expiration: "0",
+        nonce: "0",
+        feeRateBps: "0",
+        side: "0",
+        signatureType: "0",
+      };
+      retainedSubmission = {
+        order: signedFields,
+        context: buildLimitlessClobSubmissionContext(
+          `0x${"2".repeat(40)}`,
+          signedFields,
+          `0x${"3".repeat(40)}`,
+        ),
+      };
+      assert.equal(
+        await fetchFundingLimitlessClobSubmission(setup, claim.attempt),
+        undefined,
+      );
       await markFundingTradeAttemptSubmissionStartedInTransaction(setup, {
         userId,
         operationId,
         reservationId,
         attemptId,
         claimToken: claim.attempt.claimToken,
+        limitlessClobSubmission: retainedSubmission,
       });
+      const replay = await claimFundingTradeAttemptInTransaction(setup, {
+        ...claimInput,
+        freshSubmissionError: missingFeeAllowance,
+      });
+      assert.equal(replay.claimed, false);
+      assert.equal(replay.attempt.id, claim.attempt.id);
+      assert.equal(replay.attempt.state, "submission_started");
+      assert.equal(replay.attempt.externalReference, clientOrderId);
+      assert.equal(
+        await recoverFundingTradeAttemptForOrderInTransaction(setup, {
+          userId,
+          tokenId,
+          venueId: "limitless",
+          externalReferences: [clientOrderId],
+        }),
+        null,
+        "provider history must leave a collateral attempt available for exact recovery",
+      );
+      await setup.query("savepoint limitless_no_order_id");
+      const ambiguous = await recordFundingTradeAttemptOutcomeInTransaction(
+        setup,
+        {
+          userId,
+          attemptId,
+          outcome: "ambiguous",
+          broadcastMayHaveOccurred: true,
+          externalReference: `0x${"5".repeat(64)}`,
+          errorCode: "limitless_order_id_missing",
+        },
+      );
+      assert.equal(ambiguous.externalReference, clientOrderId);
+      assert.deepEqual(
+        await fetchFundingLimitlessClobSubmission(setup, ambiguous),
+        retainedSubmission,
+      );
+      await setup.query("rollback to savepoint limitless_no_order_id");
       const order = await setup.query<{ id: string }>(
         `insert into orders (
          user_id, wallet_address, venue, venue_order_id, token_id, side,
@@ -8441,6 +8555,180 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
     assert.notEqual(crashTakeover.claimToken, attemptClaimToken);
     assert.equal(crashTakeover.state, "ambiguous");
     assert.equal(crashTakeover.resolvedAt?.getTime(), takeoverNow.getTime());
+    assert.deepEqual(
+      await fetchFundingLimitlessClobSubmission(pool, crashTakeover),
+      retainedSubmission,
+    );
+    assert.equal(
+      await fetchFundingLimitlessClobSubmission(pool, {
+        ...crashTakeover,
+        externalReference: "different-order",
+      }),
+      null,
+    );
+
+    const mergeClient = await pool.connect();
+    try {
+      await mergeClient.query("begin");
+      await mergeClient.query("savepoint exact_history_conflict");
+      const historyTx = `0x${"b".repeat(64)}`;
+      await mergeClient.query(
+        `insert into orders (
+          user_id,wallet_address,venue,venue_order_id,token_id,side,order_type,status,order_hash,order_payload
+        ) values ($1,$2,'limitless',$3,$4,'BUY','FOK','filled',$5,$6::jsonb)`,
+        [
+          userId,
+          retainedSubmission?.order.maker,
+          `history:${historyTx}:0:buy-market`,
+          tokenId,
+          historyTx,
+          { clientOrderId },
+        ],
+      );
+      await mergeClient.query(
+        "update funding_trade_attempts set resolved_at=$2 where id=$1",
+        [attemptId, new Date(takeoverNow.getTime() - 6 * 60_000)],
+      );
+      await assert.rejects(
+        proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(mergeClient, {
+          attemptId,
+          clientOrderId,
+          expectedClaimToken: crashTakeover.claimToken,
+          minimumAgeMs: 5 * 60_000,
+          now: takeoverNow,
+          userId,
+        }),
+        (error) =>
+          error instanceof FundingTradeAttemptError &&
+          error.code === "limitless_history_conflict",
+      );
+      assert.equal(
+        (
+          await mergeClient.query(
+            "select state from funding_trade_attempts where id=$1",
+            [attemptId],
+          )
+        ).rows[0]?.state,
+        "ambiguous",
+      );
+      const historyProviderId = crypto.randomUUID();
+      await mergeClient.query(
+        "update orders set order_payload=$2::jsonb where venue_order_id=$1 and user_id=$3",
+        [
+          `history:${historyTx}:0:buy-market`,
+          JSON.stringify({ orderId: historyProviderId }),
+          userId,
+        ],
+      );
+      await noteFundingLimitlessClobLocator(mergeClient, {
+        operationId,
+        userId,
+        attemptId,
+        clientOrderId,
+        providerOrderId: historyProviderId,
+        txHash: null,
+      });
+      await assert.rejects(
+        proveAmbiguousLimitlessTerminalRejectionInTransaction(mergeClient, {
+          attemptId,
+          clientOrderId,
+          providerOrderId: historyProviderId,
+          expectedClaimToken: crashTakeover.claimToken,
+          now: takeoverNow,
+          userId,
+          errorCode: "limitless_exact_status_failed",
+        }),
+        (error) =>
+          error instanceof FundingTradeAttemptError &&
+          error.code === "limitless_history_conflict",
+      );
+      await yieldLimitlessHistoryObservationLease(
+        mergeClient,
+        crashTakeover,
+        takeoverNow,
+      );
+      const leaseAfterYield = (
+        await mergeClient.query(
+          "select claim_lease_until,state from funding_trade_attempts where id=$1",
+          [attemptId],
+        )
+      ).rows[0];
+      assert.equal(
+        leaseAfterYield.claim_lease_until.getTime(),
+        takeoverNow.getTime(),
+      );
+      assert.equal(leaseAfterYield.state, "ambiguous");
+      await mergeClient.query("rollback to savepoint exact_history_conflict");
+      await mergeClient.query("update orders set status='open' where id=$1", [
+        orderId,
+      ]);
+      const filledTx = `0x${"6".repeat(64)}`;
+      const retainedLocatorTx = `0x${"7".repeat(64)}`;
+      assert.ok(retainedSubmission);
+      const exactFill = buildLimitlessReconciledOrderStoreInput(
+        crashTakeover,
+        {
+          kind: "found",
+          item: {
+            clientOrderId,
+            orderId: clientOrderId,
+            providerOrderId: clientOrderId,
+            payload: {
+              status: "found",
+              orderId: clientOrderId,
+              data: {
+                order: {
+                  order: { status: "filled", signature: "0xnot-retained" },
+                  execution: { transactionHash: filledTx },
+                },
+              },
+            },
+          },
+        },
+        new Date(),
+        { ...retainedSubmission, locator: { txHash: retainedLocatorTx } },
+      );
+      assert.ok(exactFill);
+      assert.equal(
+        (
+          await persistLimitlessReconciledOrderInTransaction(
+            mergeClient,
+            exactFill,
+          )
+        ).order.id,
+        orderId,
+      );
+      const merged = (
+        await mergeClient.query<{
+          status: string;
+          order_hash: string;
+          filled_at: Date;
+          order_payload: Record<string, unknown>;
+        }>(
+          `select status, order_hash, filled_at, order_payload from orders where id=$1`,
+          [orderId],
+        )
+      ).rows[0];
+      assert.equal(merged?.status, "filled");
+      assert.equal(merged?.order_hash, filledTx);
+      assert.ok(merged?.filled_at);
+      assert.deepEqual(
+        limitlessClobFrozenContext(merged.order_payload),
+        retainedSubmission?.context,
+      );
+      assert.ok(
+        readLimitlessHistoryTxHashes(merged.order_payload).includes(
+          retainedLocatorTx,
+        ),
+      );
+      assert.equal(
+        JSON.stringify(merged.order_payload).includes("0xnot-retained"),
+        false,
+      );
+    } finally {
+      await mergeClient.query("rollback");
+      mergeClient.release();
+    }
 
     const immediateAbsenceClient = await pool.connect();
     try {
@@ -8931,6 +9219,30 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
       claimedSnapshot.rows[0]?.recovery_payload?.orderHash,
       reconcileKeys.orderHash,
       "direct handoff records its recovery payload before provider submission",
+    );
+    assert.equal(
+      await claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction(
+        client,
+        {
+          assertCurrentScope,
+          binding,
+          reconcileKeys,
+          recoveryPayload: { ...recoveryPayload, price: 0.99 },
+          submission,
+          userId,
+        },
+      ),
+      false,
+      "exact retries must be distinguishable from the dispatch claim",
+    );
+    assert.deepEqual(
+      (
+        await client.query(
+          `select prepared_snapshot -> 'recoveryPayload' as recovery_payload from telegram_trade_intents where id=$1`,
+          [intentId],
+        )
+      ).rows[0]?.recovery_payload,
+      claimedSnapshot.rows[0]?.recovery_payload,
     );
     await failTelegramAppHandoffV2DirectTradeSubmissionInTransaction(client, {
       binding,

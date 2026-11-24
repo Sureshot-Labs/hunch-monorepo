@@ -3,7 +3,11 @@ import { isRecord } from "../lib/type-guards.js";
 export type LimitlessOrderResult = {
   explicitNoFill: boolean;
   matched: boolean | null;
+  hasConflictingMatch: boolean;
   order: Record<string, unknown> | null;
+  reportedStatus: string | null;
+  executionStatus: string | null;
+  hasPositiveFillTotals: boolean;
   settlementStatus: string | null;
   status: string | null;
   terminalFill: boolean;
@@ -18,6 +22,43 @@ export type LimitlessExecutionFill = {
 };
 
 const LIMITLESS_TERMINAL_SETTLEMENT_STATUSES = new Set(["mined", "confirmed"]);
+const LIMITLESS_OPEN_ORDER_STATUSES = new Set([
+  "submitted",
+  "open",
+  "pending",
+  "live",
+  "active",
+  "delayed",
+  "unconfirmed",
+  "processing",
+  "queued",
+  "settling",
+  "broadcasted",
+  "accepted",
+]);
+
+function hasPendingLimitlessExecutionSignal(
+  parsed: LimitlessOrderResult,
+): boolean {
+  return [
+    parsed.reportedStatus,
+    parsed.executionStatus,
+    parsed.settlementStatus,
+  ].some(
+    (status) => status !== null && LIMITLESS_OPEN_ORDER_STATUSES.has(status),
+  );
+}
+
+export function isLimitlessDirectFokSettled(
+  parsed: LimitlessOrderResult,
+): boolean {
+  return (
+    parsed.terminalFill &&
+    parsed.matched !== false &&
+    (parsed.settlementStatus === null ||
+      LIMITLESS_TERMINAL_SETTLEMENT_STATUSES.has(parsed.settlementStatus))
+  );
+}
 
 function readNonEmptyString(value: unknown): string | null {
   if (typeof value === "string") {
@@ -149,6 +190,65 @@ export function isLimitlessTerminalRejectedStatus(value: unknown): boolean {
   );
 }
 
+export function canonicalLimitlessTransactionHash(
+  value: unknown,
+): string | null {
+  return typeof value === "string" && /^0x[0-9a-f]{64}$/i.test(value)
+    ? value.toLowerCase()
+    : null;
+}
+
+function hasLimitlessFokNegativeStatus(parsed: LimitlessOrderResult): boolean {
+  return (
+    parsed.explicitNoFill ||
+    isLimitlessUnmatchedStatus(parsed.reportedStatus) ||
+    isLimitlessTerminalRejectedStatus(parsed.reportedStatus) ||
+    isLimitlessUnmatchedStatus(parsed.executionStatus) ||
+    isLimitlessTerminalRejectedStatus(parsed.executionStatus)
+  );
+}
+
+export function hasLimitlessSettlementSignals(
+  parsed: LimitlessOrderResult,
+): boolean {
+  return (
+    parsed.terminalFill ||
+    parsed.matched === true ||
+    parsed.hasConflictingMatch ||
+    parsed.hasPositiveFillTotals ||
+    parsed.executionStatus === "matched" ||
+    parsed.executionStatus === "filled" ||
+    hasPendingLimitlessExecutionSignal(parsed) ||
+    (parsed.settlementStatus !== null &&
+      LIMITLESS_TERMINAL_SETTLEMENT_STATUSES.has(parsed.settlementStatus))
+  );
+}
+
+/** Eligible for adjudication after checking any transaction locators. */
+export function isLimitlessFokNegativeCandidate(
+  parsed: LimitlessOrderResult,
+): boolean {
+  return (
+    (parsed.explicitNoFill ||
+      isLimitlessTerminalRejectedStatus(parsed.status)) &&
+    !hasLimitlessSettlementSignals(parsed)
+  );
+}
+
+/** A provider-assigned ID alone is not a terminal FOK outcome. */
+export function classifyFrozenLimitlessFokResult(
+  parsed: LimitlessOrderResult,
+): "settled" | "rejected" | "pending" {
+  if (parsed.hasConflictingMatch || hasPendingLimitlessExecutionSignal(parsed))
+    return "pending";
+  if (hasLimitlessFokNegativeStatus(parsed))
+    return !isLimitlessFokNegativeCandidate(parsed) ||
+      canonicalLimitlessTransactionHash(parsed.txHash)
+      ? "pending"
+      : "rejected";
+  return isLimitlessDirectFokSettled(parsed) ? "settled" : "pending";
+}
+
 export function isLimitlessFokUnmatchedMessage(
   message: string | null | undefined,
 ): boolean {
@@ -163,8 +263,29 @@ export function isLimitlessFokUnmatchedMessage(
 export function parseLimitlessOrderResult(
   payload: unknown,
 ): LimitlessOrderResult {
+  const root = statusOrderRoot(payload);
   const order = orderRecord(payload);
   const execution = executionRecord(payload);
+  const executionHash = readNonEmptyString(
+    execution?.txHash ?? execution?.transactionHash ?? execution?.tx_hash,
+  );
+  // Error and status envelopes can keep the transaction reference beside
+  // the order instead of in execution. A reference is not proof of a fill,
+  // but it must keep a contradictory rejection on the reconciliation path.
+  const additionalHash = [
+    execution,
+    order,
+    root,
+    isRecord(root?.data) ? root.data : null,
+    isRecord(payload) ? payload : null,
+  ]
+    .flatMap((record) => [
+      record?.txHash,
+      record?.transactionHash,
+      record?.tx_hash,
+    ])
+    .map(canonicalLimitlessTransactionHash)
+    .find((hash) => hash !== null);
   const matched =
     execution?.matched === true
       ? true
@@ -175,9 +296,26 @@ export function parseLimitlessOrderResult(
           : order?.matched === false
             ? false
             : null;
+  const executionStatus = normalizeStatus(
+    execution?.status ?? execution?.executionStatus,
+  );
   const reportedStatus =
-    normalizeStatus(order?.status ?? order?.orderStatus) ??
-    normalizeStatus(execution?.status ?? execution?.executionStatus);
+    normalizeStatus(order?.status ?? order?.orderStatus) ?? executionStatus;
+  const fillTotals = isRecord(execution?.totalsRaw)
+    ? execution.totalsRaw
+    : null;
+  const hasPositiveFillTotals =
+    [
+      fillTotals?.contractsGross,
+      fillTotals?.contractsNet,
+      fillTotals?.usdGross,
+      fillTotals?.usdNet,
+    ].some((value) => (rawMicroAmount(value) ?? 0) > 0) ||
+    makerMatchRecords(payload).some(
+      (entry) =>
+        (rawMicroAmount(entry.matchedSize) ?? 0) > 0 ||
+        (rawMicroAmount(entry.fillCost) ?? 0) > 0,
+    );
   const settlementStatus = normalizeStatus(execution?.settlementStatus);
   const terminalFill =
     reportedStatus === "filled" ||
@@ -202,13 +340,21 @@ export function parseLimitlessOrderResult(
       isLimitlessUnmatchedStatus(status) ||
       isLimitlessUnmatchedStatus(settlementStatus),
     matched,
+    hasConflictingMatch:
+      typeof order?.matched === "boolean" &&
+      typeof execution?.matched === "boolean" &&
+      order.matched !== execution.matched,
     order,
+    reportedStatus,
+    executionStatus,
+    hasPositiveFillTotals,
     settlementStatus,
     status,
     terminalFill,
-    txHash: readNonEmptyString(
-      execution?.txHash ?? execution?.transactionHash ?? execution?.tx_hash,
-    ),
+    txHash:
+      (canonicalLimitlessTransactionHash(executionHash) && executionHash) ||
+      additionalHash ||
+      executionHash,
     venueOrderId,
   };
 }

@@ -981,6 +981,7 @@ export const fundingCapabilitiesResponseSchema = z
     ok: z.literal(true),
     fundingApiVersion: z.literal(1),
     preparationAdmissionVersion: z.literal(1).optional(),
+    limitlessGtcFundingOrderBinding: z.literal(true).optional(),
     receiveSessionsVersion: z.literal(1),
     creationMode: z.enum(["off", "on"]),
     destinationVenues: z.array(canonicalIdSchema).max(64),

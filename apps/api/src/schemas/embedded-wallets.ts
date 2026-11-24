@@ -17,6 +17,10 @@ export const embeddedEvmTransactionSchema = z.object({
   value: z.string().trim().min(1).max(120).optional(),
   gas: z.string().trim().min(1).max(120).optional(),
   sponsor: z.boolean().optional(),
+  limitlessFeeMarketSlug: z
+    .string()
+    .regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/i)
+    .optional(),
 });
 
 export const embeddedPrivyAuthorizationSignatureSchema = z.object({

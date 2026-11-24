@@ -25,8 +25,11 @@ import {
 } from "./limitless-order-result.js";
 import {
   resolveLimitlessClobEvidenceIdentity,
+  limitlessClobFrozenContext,
   limitlessClobSubmittedPayloads,
+  readLimitlessHistoryTxHashes,
 } from "./limitless-clob-evidence-identity.js";
+import { fetchLimitlessHistoryReceiptCandidates } from "../repos/limitless-history-receipt-locators.js";
 import { resolveLimitlessReceiptFallback } from "./verified-buy-limitless-receipt.js";
 import { readLimitlessAmmMarketAddress } from "./limitless-amm-address.js";
 import type { AnchoredBuyReceiptObservation } from "./verified-buy-evm-receipt.js";
@@ -49,6 +52,15 @@ export type PolymarketFillObservation =
   | { state: "terminal_zero_fill" }
   | { state: "unavailable" | "not_found" | "malformed" | "identity_conflict" };
 export type VerifiedBuyObserverDependencies = {
+  readLimitlessHistoryPage?: (
+    scope: Parameters<
+      typeof import("../funding/reconciliation/limitless-trade-attempt-reconciler.js").parseLimitlessDirectHistoryPage
+    >[1],
+  ) => Promise<
+    ReturnType<
+      typeof import("../funding/reconciliation/limitless-trade-attempt-reconciler.js").parseLimitlessDirectHistoryPage
+    >
+  >;
   maxEvidenceItems: number;
   assertEvidenceBudget?: (minimumReads: number) => void;
   limitlessPositionContract: string;
@@ -89,6 +101,28 @@ export type VerifiedBuyObserverDependencies = {
     tokenId: string;
   }) => Promise<PolymarketFillObservation>;
 };
+
+type ObservedEvmReceipt = Awaited<
+  ReturnType<VerifiedBuyObserverDependencies["readEvmReceipt"]>
+>;
+// Used only for oversized COLLATERAL FOK locator sets. Finalized reads can
+// cover several worker passes; a missing read is still unknown after a pass.
+const collateralLocatorProgress = new Map<
+  string,
+  { observed: ObservedEvmReceipt; checkedAt: number }
+>();
+const MAX_LOCATOR_PROGRESS = 256;
+function saveCollateralLocatorProgress(
+  hash: string,
+  observed: ObservedEvmReceipt,
+) {
+  collateralLocatorProgress.delete(hash);
+  if (collateralLocatorProgress.size >= MAX_LOCATOR_PROGRESS) {
+    const oldest = collateralLocatorProgress.keys().next();
+    if (!oldest.done) collateralLocatorProgress.delete(oldest.value);
+  }
+  collateralLocatorProgress.set(hash, { observed, checkedAt: Date.now() });
+}
 
 const pending = (
   reason: string,
@@ -195,6 +229,7 @@ export async function observeVerifiedBuySource(
   db: Db,
   deps: VerifiedBuyObserverDependencies,
   row: VerifiedBuySourceRow | undefined,
+  options?: { verifyOnlyKnownLimitlessLocator?: boolean },
 ): Promise<PurchaseObservation> {
   if (!row || row.side?.toUpperCase() !== "BUY" || !row.wallet_address)
     return pending("purchase_identity_missing");
@@ -471,12 +506,196 @@ export async function observeVerifiedBuySource(
         ? { state: "verified", facts }
         : pending("amm_exact_fill_unavailable");
     }
-    const status = root(
-      await deps.readLimitlessOrder({
-        providerOrderId: row.venue_order_id,
-        clientOrderId: row.client_order_id,
-      }),
-    );
+    const frozen = limitlessClobFrozenContext(payload);
+    const frozenCollateralFok =
+      row.order_type === "FOK" &&
+      isRecord(frozen) &&
+      Object.hasOwn(frozen, "collateralFeeModule");
+    let status: Record<string, unknown> = {};
+    try {
+      status = root(
+        await deps.readLimitlessOrder({
+          providerOrderId: row.venue_order_id,
+          clientOrderId: row.client_order_id,
+        }),
+      );
+    } catch (error) {
+      if (!frozenCollateralFok || error instanceof EvidenceBudgetExhausted)
+        throw error;
+    }
+    if (frozenCollateralFok && (row.venue_order_id || row.client_order_id)) {
+      const exactLocatorOnly =
+        options?.verifyOnlyKnownLimitlessLocator === true &&
+        Boolean(
+          row.venue_order_id &&
+          row.order_hash &&
+          /^0x[0-9a-f]{64}$/i.test(row.order_hash),
+        );
+      // Lost-response Copy: a provider status/tx hash is merely one
+      // locator. Never revoke from a hash that does not prove this order.
+      const exactFound =
+        status.status === "found" &&
+        (!row.client_order_id ||
+          status.clientOrderId === row.client_order_id) &&
+        (!row.venue_order_id || status.orderId === row.venue_order_id);
+      const providerOrderId =
+        row.venue_order_id ?? (exactFound ? text(status.orderId) : null);
+      const identity = resolveLimitlessClobEvidenceIdentity({
+        orderPayload: payload,
+        marketMetadata: row.market_metadata,
+        legacyExchangeAddress: deps.limitlessExchangeAddress,
+        providerOrder: {},
+      });
+      if (!identity) return pending("signed_order_identity_missing");
+      const candidates = exactLocatorOnly
+        ? []
+        : await fetchLimitlessHistoryReceiptCandidates(db, {
+            userId: row.user_id,
+            walletAddress: row.wallet_address,
+            tokenId,
+            side: "BUY",
+            clientOrderId: row.client_order_id,
+            providerOrderId,
+          });
+      const hashes = new Map<string, string>();
+      const prior = verifiedBuyFactsSchema.safeParse(row.verified_buy_facts);
+      const priorIds = new Map<string, string[]>();
+      if (
+        !exactLocatorOnly &&
+        providerOrderId &&
+        prior.success &&
+        prior.data.owner.toLowerCase() === row.wallet_address.toLowerCase() &&
+        prior.data.canonicalPurchaseKey ===
+          `limitless:clob:8453:${providerOrderId}` &&
+        (
+          ["venue", "marketId", "tokenId", "outcome", "generation"] as const
+        ).every((field) => prior.data.instrument[field] === instrument[field])
+      )
+        for (const id of prior.data.evidenceIds) {
+          const hash = /^8453:(0x[0-9a-f]{64}):(0|[1-9]\d*)$/i
+            .exec(id)?.[1]
+            ?.toLowerCase();
+          if (!hash) return pending("previous_proof_identity_conflict");
+          priorIds.set(hash, [...(priorIds.get(hash) ?? []), id]);
+          hashes.set(hash, providerOrderId);
+        }
+      if (
+        row.venue_order_id &&
+        row.order_hash &&
+        /^0x[0-9a-f]{64}$/i.test(row.order_hash)
+      )
+        hashes.set(row.order_hash.toLowerCase(), row.venue_order_id);
+      if (row.venue_order_id && !exactLocatorOnly)
+        for (const hash of readLimitlessHistoryTxHashes(payload))
+          hashes.set(hash, row.venue_order_id);
+      const providerHash = exactFound
+        ? parseLimitlessOrderResult(status).txHash
+        : null;
+      if (!exactLocatorOnly && providerOrderId && providerHash)
+        hashes.set(providerHash.toLowerCase(), providerOrderId);
+      for (const candidate of candidates) {
+        if (
+          providerOrderId &&
+          candidate.provider_order_id &&
+          candidate.provider_order_id !== providerOrderId
+        )
+          continue;
+        const orderId = providerOrderId ?? candidate.provider_order_id;
+        if (!orderId) continue;
+        const prior = hashes.get(candidate.tx_hash);
+        if (prior && prior !== orderId)
+          return pending("provider_order_identity_conflict");
+        hashes.set(candidate.tx_hash, orderId);
+      }
+      if (hashes.size) {
+        const receiptCap = Math.min(4, deps.maxEvidenceItems);
+        const progressive = hashes.size > receiptCap;
+        if (!progressive) deps.assertEvidenceBudget?.(hashes.size * 3);
+        let receiptReads = 0;
+        let coverageIncomplete = false;
+        let priorProofUnavailable = false;
+        const parts: VerifiedPurchaseEvidence[] = [];
+        const invalidated: string[] = [];
+        let reason = "receipt_exact_fill_unavailable";
+        for (const [hash, orderId] of hashes) {
+          const cached = progressive
+            ? collateralLocatorProgress.get(hash)
+            : undefined;
+          const reuse =
+            cached &&
+            Date.now() - cached.checkedAt <
+              (cached.observed ? 15 * 60_000 : 60_000);
+          if (progressive && !reuse && receiptReads >= receiptCap) {
+            coverageIncomplete = true;
+            priorProofUnavailable ||= priorIds.has(hash);
+            continue;
+          }
+          if (progressive && !reuse) {
+            try {
+              deps.assertEvidenceBudget?.(3);
+            } catch (error) {
+              if (!(error instanceof EvidenceBudgetExhausted) || !parts.length)
+                throw error;
+              coverageIncomplete = true;
+              priorProofUnavailable ||= priorIds.has(hash);
+              continue;
+            }
+            receiptReads++;
+          }
+          const observed = reuse
+            ? cached.observed
+            : await deps.readEvmReceipt(8453, hash).catch((error: unknown) => {
+                if (error instanceof EvidenceBudgetExhausted) throw error;
+                reason = observationFailureReason(error);
+                return null;
+              });
+          if (progressive && !reuse)
+            saveCollateralLocatorProgress(hash, observed);
+          if (!observed) {
+            if (progressive) coverageIncomplete = true;
+            priorProofUnavailable ||= priorIds.has(hash);
+            continue;
+          }
+          if (failedReceipt(observed.receipt, hash)) {
+            invalidated.push(...(priorIds.get(hash) ?? []));
+            continue;
+          }
+          const proof = parseEvmClobBuyEvidence({
+            receipt: observed.receipt,
+            txHash: hash,
+            owner: row.wallet_address,
+            orderHash: identity.orderHash,
+            providerOrderId: orderId,
+            exchangeAddress: identity.exchangeAddress,
+            positionContract: deps.limitlessPositionContract,
+            tokenId: tokenId.replace(/^limitless:/, ""),
+            chainId: 8453,
+            instrument,
+            purchasedAt: observed.timestamp,
+          });
+          if (proof) parts.push(proof);
+          else invalidated.push(...(priorIds.get(hash) ?? []));
+        }
+        const facts =
+          parts.length === 1 ? combinePurchaseEvidence(parts) : null;
+        if (parts.length > 1)
+          return pending("receipt_locator_conflict", invalidated);
+        // One exact finalized single-settlement FOK is positive proof despite
+        // unrelated/unavailable hashes. Do not ignore a prior verified receipt
+        // that is itself now unavailable or infer a negative from a partial read.
+        if (coverageIncomplete && (!facts || priorProofUnavailable))
+          return pending("receipt_locator_coverage_pending", invalidated);
+        return facts
+          ? { state: "verified", facts }
+          : invalidated.length > 0
+            ? {
+                state: "revoked",
+                reason: "receipt_exact_fill_unavailable",
+                invalidatedEvidenceIds: invalidated,
+              }
+            : pending(parts.length > 1 ? "receipt_locator_conflict" : reason);
+      }
+    }
     if (
       status.status === "not_found" &&
       status.orderId === row.venue_order_id &&
@@ -762,6 +981,7 @@ export async function observeVerifiedBuySource(
       }
     }
     if (
+      frozenCollateralFok ||
       status.status !== "found" ||
       (row.client_order_id && status.clientOrderId !== row.client_order_id)
     )
@@ -801,7 +1021,7 @@ export async function observeVerifiedBuySource(
       )
     )
       return { state: "revoked", reason: "provider_settlement_failed" };
-    const hash = text(execution.txHash);
+    const hash = parsedOrder.txHash;
     const identity = resolveLimitlessClobEvidenceIdentity({
       orderPayload: payload,
       marketMetadata: row.market_metadata,

@@ -300,6 +300,9 @@ export class FundingOperationActionRuntime {
         userId: string,
         recipientId: string,
       ) => Promise<void>;
+      verifyTradeFundingFeeAllowance?: (
+        operation: FundingOperationRow,
+      ) => Promise<void>;
     }> = {},
   ) {
     this.withdrawalRuntime = new WithdrawalDestinationRuntime(db);
@@ -356,6 +359,14 @@ export class FundingOperationActionRuntime {
         "stored funding action differs from its immutable fingerprint",
       );
     }
+    // This is the boundary issuing a new client-executable funding action.
+    // Submitted actions and status/evidence reads must not depend on allowance.
+    if (
+      step.actionable &&
+      step.stepKind !== "approval" &&
+      (step.state === "action_required" || step.state === "planned")
+    )
+      await this.dependencies.verifyTradeFundingFeeAllowance?.(operation);
     let execution = assertClientExecutable(
       action,
       step.executorId,

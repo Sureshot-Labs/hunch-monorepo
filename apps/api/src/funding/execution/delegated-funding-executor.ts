@@ -1498,6 +1498,9 @@ export class DelegatedFundingExecutor {
       providerLookupDelayMs?: number;
       providerReplayMs?: number;
       unbroadcastRetryMs?: number;
+      verifyNewFundingTransfer?: (
+        claim: DelegatedFundingExecutionClaim,
+      ) => Promise<void>;
     }>,
   ) {
     const seen = new Set<string>();
@@ -1752,9 +1755,11 @@ export class DelegatedFundingExecutor {
         const providerReferenceLookupHmac =
           this.input.referenceCodec.fingerprint(claim.attemptId);
         let preBroadcastObservation: JsonRecord | undefined;
-        if (!claim.broadcastBoundaryCrossed && runtime.observePreBroadcast) {
+        if (!claim.broadcastBoundaryCrossed) {
           try {
-            preBroadcastObservation = await runtime.observePreBroadcast(claim);
+            await this.input.verifyNewFundingTransfer?.(claim);
+            preBroadcastObservation =
+              await runtime.observePreBroadcast?.(claim);
           } catch {
             // The attempt remains durably started and is recoverable. No
             // broadcast boundary has been crossed, so failing closed here can

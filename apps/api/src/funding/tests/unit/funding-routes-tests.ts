@@ -721,6 +721,7 @@ await test("funding capabilities publish the rollout contract", async () => {
     assert.deepEqual(response.json(), {
       ok: true,
       fundingApiVersion: 1,
+      limitlessGtcFundingOrderBinding: true,
       receiveSessionsVersion: 1,
       creationMode: "on",
       destinationVenues: ["limitless", "polymarket"],

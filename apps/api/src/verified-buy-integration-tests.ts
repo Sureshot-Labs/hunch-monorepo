@@ -22,6 +22,11 @@ import {
   type VerifiedBuyObserverDependencies,
 } from "./services/verified-buy-observer.js";
 import { repairUnrecordedCopies } from "./services/verified-copy-repair.js";
+import { claimLimitlessDirectOrderJournal } from "./repos/orders-repo.js";
+import {
+  buildLimitlessClobSubmissionContext,
+  limitlessClobFrozenContext,
+} from "./services/limitless-clob-evidence-identity.js";
 import {
   copyPayloadHash,
   getCopyAttributionStatus,
@@ -493,6 +498,457 @@ try {
   assert.equal(
     (await repairUnrecordedCopies(db, loseLease, repairPolicy)).leaseLost,
     1,
+  );
+
+  await client.query("savepoint limitless_collateral_copy_recovery");
+  const collateralClientId = randomUUID();
+  const collateralVenueOrder = randomUUID();
+  const collateralSigned = {
+    salt: "71",
+    maker: owner,
+    signer: owner,
+    taker: `0x${"0".repeat(40)}`,
+    tokenId: tokenId.replace(/^limitless:/, ""),
+    makerAmount: "10000000",
+    takerAmount: "1",
+    expiration: "0",
+    nonce: "0",
+    feeRateBps: "0",
+    side: "0",
+    signatureType: "0",
+    signature: "0xnot-retained",
+  };
+  const collateralContext = buildLimitlessClobSubmissionContext(
+    exchange,
+    collateralSigned,
+    `0x${"4".repeat(40)}`,
+  );
+  const collateralCopyInput = {
+    ...retained,
+    providerReference: `limitless:clob:8453:${collateralClientId}`,
+    preparedFingerprint: collateralContext.orderHash,
+    prepared: {
+      ...prepared,
+      intent: {
+        ...prepared.intent,
+        orderType: "FOK" as const,
+        idempotencyKey: collateralClientId,
+      },
+      venuePayload: {
+        orderPayload: collateralSigned,
+        submissionContext: collateralContext,
+        ownerId: 42,
+      },
+    },
+  };
+  const collateralCopy = await retainCopyBeforeSubmission(
+    db,
+    collateralCopyInput,
+  );
+  await markCopySubmissionStarted(db, copier, collateralCopy);
+  const replacementClientId = randomUUID();
+  const replacementCopy = await retainCopyBeforeSubmission(db, {
+    ...collateralCopyInput,
+    providerReference: `limitless:clob:8453:${replacementClientId}`,
+    prepared: {
+      ...collateralCopyInput.prepared,
+      intent: {
+        ...collateralCopyInput.prepared.intent,
+        idempotencyKey: replacementClientId,
+      },
+    },
+  });
+  await assert.rejects(
+    () => markCopySubmissionStarted(db, copier, replacementCopy),
+    /limitless_submit_reconciling/,
+  );
+  await markCopyDefinitelyNotBroadcast(db, copier, replacementCopy);
+  assert.equal(
+    await claimLimitlessDirectOrderJournal(
+      db,
+      `hunch-direct-${replacementClientId.replaceAll("-", "")}`,
+      {
+        userId: copier,
+        walletAddress: owner,
+        signerAddress: owner,
+        venue: "limitless",
+        tokenId,
+        side: "BUY",
+        price: null,
+        size: null,
+        orderType: "FOK",
+        venueOrderId: replacementClientId,
+        status: "submitted",
+        errorMessage: null,
+        rawError: null,
+        orderPayload: collateralSigned,
+        limitlessClobSubmissionContext: collateralContext,
+      },
+    ),
+    null,
+    "an unresolved Copy blocks a cross-lane direct submission",
+  );
+  await assert.rejects(
+    () => retainCopyBeforeSubmission(db, collateralCopyInput),
+    /limitless_submit_reconciling/,
+  );
+  await client.query(
+    "update copy_attributions set repair_due_at=now()+interval '1 day' where copier_user_id=$1 and id<>$2",
+    [copier, collateralCopy.id],
+  );
+  await client.query(
+    "update copy_attributions set submission_started_at=now()-interval '6 minutes' where id=$1",
+    [collateralCopy.id],
+  );
+  const delayedCopy = await repairUnrecordedCopies(
+    db,
+    {
+      ...deps,
+      readLimitlessOrder: async (scope) => {
+        assert.equal(scope.clientOrderId, collateralClientId);
+        return {
+          status: "found",
+          orderId: collateralVenueOrder,
+          clientOrderId: collateralClientId,
+          data: {
+            order: {
+              order: { status: "UNMATCHED" },
+              execution: { matched: true, settlementStatus: "DELAYED" },
+            },
+          },
+        };
+      },
+      readLimitlessHistoryPage: async (scope) => {
+        assert.equal(scope.ownerId, 42);
+        return {
+          coversSubmission: true,
+          exactClientFound: false,
+          locators: [],
+        };
+      },
+    },
+    { ...repairPolicy, batchSize: 1 },
+  );
+  assert.equal(delayedCopy.pending, 1);
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, collateralClientId))?.state,
+    "pending",
+  );
+  await client.query(
+    "update copy_attributions set repair_due_at=now() where id=$1",
+    [collateralCopy.id],
+  );
+  let observedCopyProviderId: string | null | undefined;
+  const missingAfterDelay = await repairUnrecordedCopies(
+    db,
+    {
+      ...deps,
+      readLimitlessOrder: async (scope) => {
+        observedCopyProviderId = scope.providerOrderId;
+        return {
+          status: "not_found",
+          clientOrderId: collateralClientId,
+          orderId: collateralVenueOrder,
+        };
+      },
+      readLimitlessHistoryPage: async () => ({
+        coversSubmission: true,
+        exactClientFound: false,
+        locators: [],
+      }),
+    },
+    { ...repairPolicy, batchSize: 1 },
+  );
+  assert.equal(
+    observedCopyProviderId,
+    collateralVenueOrder,
+    "first observation must retain the exact provider ID",
+  );
+  assert.equal(missingAfterDelay.pending, 1);
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, collateralClientId))?.state,
+    "pending",
+  );
+  await client.query(
+    "update copy_attributions set repair_due_at=now() where id=$1",
+    [collateralCopy.id],
+  );
+  const exhaustedAfterStatus = await repairUnrecordedCopies(
+    db,
+    {
+      ...deps,
+      readLimitlessOrder: async () => ({
+        status: "found",
+        orderId: collateralVenueOrder,
+        clientOrderId: collateralClientId,
+        data: {
+          order: {
+            order: { status: "filled" },
+            execution: {
+              matched: true,
+              settlementStatus: "MINED",
+              transactionHash: txHash,
+            },
+          },
+        },
+      }),
+      assertEvidenceBudget: (required) => {
+        if (required > 1) throw new EvidenceBudgetExhausted(required, 1);
+      },
+    },
+    { ...repairPolicy, batchSize: 1 },
+  );
+  assert.equal(exhaustedAfterStatus.budgetExhausted, 1);
+  const copyLocatorAfterBudget = await client.query<{ found_hash: string }>(
+    `select source_snapshot #>> '{submission,limitlessLocator,txHash}' as found_hash from copy_attributions where id=$1`,
+    [collateralCopy.id],
+  );
+  assert.equal(
+    copyLocatorAfterBudget.rows[0]?.found_hash,
+    txHash,
+    "exact status candidate survives receipt budget interruption",
+  );
+  await client.query(
+    "update copy_attributions set repair_due_at=now() where id=$1",
+    [collateralCopy.id],
+  );
+  await client.query(
+    "update copy_attributions set created_at=$2::timestamptz-interval '1 second' where id=$1",
+    [collateralCopy.id, facts.purchasedAt],
+  );
+  await client.query(
+    `insert into orders (
+     user_id, wallet_address, venue, venue_order_id, token_id, side, order_type,
+     status, order_hash, order_payload, posted_at, filled_at
+  ) values ($1,$2,'limitless',$3,$4,'BUY','FOK','filled',$5,$6::jsonb,$7,$7)`,
+    [
+      copier,
+      owner,
+      `history:${txHash}:0:buy-market`,
+      tokenId,
+      txHash,
+      { orderId: collateralVenueOrder, clientOrderId: collateralClientId },
+      new Date(facts.purchasedAt),
+    ],
+  );
+  await recoverCopyPurchaseLinks(db, 20);
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, collateralClientId))
+      ?.purchaseRef,
+    null,
+  );
+  const collateralReceipt = {
+    ...receipt,
+    logs: [
+      {
+        ...receipt.logs[0],
+        topics: [
+          receipt.logs[0].topics[0],
+          collateralContext.orderHash,
+          ...receipt.logs[0].topics.slice(2),
+        ],
+      },
+      receipt.logs[1],
+    ],
+  };
+  const extraHashes = [1, 2, 3, 4].map((n) => `0x${String(n).repeat(64)}`);
+  const boundedSource = {
+    id: collateralCopy.id,
+    user_id: copier,
+    venue: "limitless",
+    wallet_address: owner,
+    order_hash: null,
+    venue_order_id: collateralVenueOrder,
+    token_id: tokenId,
+    side: "BUY",
+    order_payload: {
+      _hunchLimitlessClob: collateralContext,
+      order: collateralSigned,
+      _hunchLimitlessHistoryTxHashes: extraHashes,
+    },
+    client_order_id: collateralClientId,
+    tx_signature: null,
+    market_id: marketId,
+    outcome: facts.instrument.outcome,
+    expiration_time: null,
+    market_metadata: {},
+    input_mint: null,
+    output_mint: null,
+    order_type: "FOK",
+  };
+  let progressiveReads = 0;
+  const boundedDeps = {
+    ...deps,
+    readLimitlessOrder: async () => null,
+    readEvmReceipt: async (_chain: number, hash: string) => {
+      progressiveReads++;
+      return {
+        receipt:
+          hash === txHash
+            ? collateralReceipt
+            : { ...collateralReceipt, hash, status: 0 },
+        timestamp: facts.purchasedAt,
+      };
+    },
+  };
+  assert.equal(
+    (await observeVerifiedBuySource(db, boundedDeps, boundedSource)).state,
+    "pending",
+  );
+  assert.equal(
+    progressiveReads,
+    4,
+    "only four fresh receipt reads in one pass",
+  );
+  assert.equal(
+    (await observeVerifiedBuySource(db, boundedDeps, boundedSource)).state,
+    "verified",
+  );
+  assert.equal(
+    progressiveReads,
+    5,
+    "already classified receipts do not block the final candidate on the next pass",
+  );
+  const unavailableHash = `0x${"5".repeat(64)}`;
+  const observedDespiteUnavailable = await observeVerifiedBuySource(
+    db,
+    {
+      ...boundedDeps,
+      readEvmReceipt: async (chain, hash) =>
+        hash === unavailableHash
+          ? null
+          : boundedDeps.readEvmReceipt(chain, hash),
+    },
+    {
+      ...boundedSource,
+      order_hash: txHash,
+      order_payload: {
+        ...boundedSource.order_payload,
+        _hunchLimitlessHistoryTxHashes: [unavailableHash, ...extraHashes],
+      },
+    },
+  );
+  assert.equal(
+    observedDespiteUnavailable.state,
+    "verified",
+    "a real finalized receipt must not be hidden by an unrelated unavailable locator",
+  );
+  await client.query("savepoint collateral_history_only_status");
+  assert.equal(
+    (
+      await repairUnrecordedCopies(
+        db,
+        {
+          ...deps,
+          readLimitlessOrder: async () => ({
+            status: "not_found",
+            clientOrderId: collateralClientId,
+          }),
+          readEvmReceipt: async () => ({
+            receipt: collateralReceipt,
+            timestamp: facts.purchasedAt,
+          }),
+        },
+        repairPolicy,
+      )
+    ).confirmed,
+    1,
+    "exact history plus canonical proof works when venue reports not_found",
+  );
+  await client.query("rollback to savepoint collateral_history_only_status");
+  const staleTxHash = `0x${"7".repeat(64)}`;
+  const collateralReceiptReads: string[] = [];
+  const copies = await repairUnrecordedCopies(
+    db,
+    {
+      ...deps,
+      readLimitlessOrder: async () => ({
+        status: "found",
+        clientOrderId: collateralClientId,
+        orderId: collateralVenueOrder,
+        data: {
+          order: {
+            order: { orderHash: collateralContext.orderHash },
+            execution: { settlementStatus: "CONFIRMED", txHash: staleTxHash },
+          },
+        },
+      }),
+      readEvmReceipt: async (_chain, hash) => {
+        collateralReceiptReads.push(hash);
+        return {
+          receipt:
+            hash === staleTxHash
+              ? { ...receipt, hash: staleTxHash, status: 0 }
+              : collateralReceipt,
+          timestamp: facts.purchasedAt,
+        };
+      },
+    },
+    repairPolicy,
+  );
+  assert.equal(copies.confirmed, 1);
+  assert.deepEqual(collateralReceiptReads, [txHash, staleTxHash]);
+  const recoveredCollateralCopy = (
+    await client.query<{
+      id: string;
+      order_payload: Record<string, unknown>;
+      order_hash: string;
+      venue_order_id: string;
+      status: string;
+    }>(
+      `select stored_order.id, stored_order.order_payload, stored_order.order_hash, stored_order.venue_order_id, stored_order.status
+       from copy_attributions copy_row join orders stored_order on stored_order.id=copy_row.order_id where copy_row.id=$1`,
+      [collateralCopy.id],
+    )
+  ).rows[0];
+  assert.ok(recoveredCollateralCopy);
+  assert.equal(recoveredCollateralCopy.order_hash, txHash);
+  assert.equal(recoveredCollateralCopy.venue_order_id, collateralVenueOrder);
+  assert.equal(recoveredCollateralCopy.status, "filled");
+  const linkedCollateralObserver = createVerifiedBuyObserver(db, {
+    ...deps,
+    readLimitlessOrder: async () => ({
+      status: "found",
+      clientOrderId: collateralClientId,
+      orderId: collateralVenueOrder,
+      data: {
+        order: {
+          execution: { settlementStatus: "FAILED", txHash: staleTxHash },
+        },
+      },
+    }),
+    readEvmReceipt: async (_chain, hash) => ({
+      receipt:
+        hash === staleTxHash
+          ? { ...receipt, hash, status: 0 }
+          : collateralReceipt,
+      timestamp: facts.purchasedAt,
+    }),
+  });
+  assert.equal(
+    (
+      await linkedCollateralObserver({
+        userId: copier,
+        purchaseRef: { kind: "order", id: recoveredCollateralCopy.id },
+        leaseToken: "fixture",
+        attempts: 1,
+      })
+    ).state,
+    "verified",
+    "a linked Copy must keep re-proving the same fill despite a stale provider locator",
+  );
+  assert.deepEqual(
+    limitlessClobFrozenContext(recoveredCollateralCopy.order_payload),
+    collateralContext,
+  );
+  assert.equal(
+    JSON.stringify(recoveredCollateralCopy.order_payload).includes(
+      "0xnot-retained",
+    ),
+    false,
+  );
+  await client.query(
+    "rollback to savepoint limitless_collateral_copy_recovery",
   );
 
   // Atomic invalidation and evidence-subset reinstatement preserve immutable snapshot.

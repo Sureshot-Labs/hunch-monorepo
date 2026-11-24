@@ -41,6 +41,7 @@ try {
     "/funding/preparation/runs/{runId}/actions/{actionId}/report",
     "/funding/preparation/runs/{runId}/actions/{actionId}/admit",
     "/funding/preparation/runs/{runId}/reconcile",
+    "/funding/quotes",
   ];
   for (const path of paths) {
     const operation = generated.paths?.[path];
@@ -65,7 +66,7 @@ try {
   )
     writeFileSync(file, `${JSON.stringify(committed, null, 2)}\n`);
   console.log(
-    "[funding-admission-openapi] six executable contracts verified without jobs/providers",
+    `[funding-admission-openapi] ${paths.length} executable contracts verified without jobs/providers`,
   );
 } finally {
   await app.close();

@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { withRewardsChainLocks } from "../lib/rewards-locks.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
+import { limitlessFrozenCollateralSql } from "../repos/limitless-history-receipt-locators.js";
 import { resolveFeeEventSnapshotAtWrite } from "./rewards-fee-snapshot.js";
 import { getRewardsTreasuryReport } from "./rewards-treasury.js";
 
@@ -67,6 +68,8 @@ export type VenueFeeBackfillAttemptInput = {
   status: VenueFeeBackfillAttemptStatus;
   reason: string;
   nextAttemptAt?: Date | null;
+  /** Scheduling deferral (no complete evidence attempt was made). */
+  consumeAttempt?: boolean;
 };
 
 type VenueFeeAccrualQueryable = Pick<PoolClient, "query">;
@@ -75,7 +78,24 @@ function microToDecimal(rawMicro: bigint): string {
   return usdcMicroToDecimalString(rawMicro);
 }
 
-function feeEventSourceIdForAccrual(row: VenueFeeAccrualRow): string {
+export function feeEventSourceIdForAccrual(
+  row: Pick<
+    VenueFeeAccrualRow,
+    | "venue"
+    | "fee_program"
+    | "chain_id"
+    | "tx_hash"
+    | "venue_fill_id"
+    | "order_hash"
+  >,
+): string {
+  if (
+    row.venue === "limitless" &&
+    row.fee_program === "venue_share" &&
+    row.chain_id === "8453" &&
+    row.venue_fill_id.startsWith("collateral:")
+  )
+    return `limitless:venue_share:8453:${row.venue_fill_id}`;
   if (
     row.venue === "limitless" &&
     row.fee_program === "venue_share_contract" &&
@@ -91,12 +111,48 @@ export async function upsertVenueFeeAccruals(
   pool: VenueFeeAccrualQueryable,
   inputs: Array<VenueFeeAccrualInput | null>,
 ): Promise<{ upserted: number }> {
+  const result = await writeVenueFeeAccruals(pool, inputs, false);
+  return { upserted: result.upserted };
+}
+
+/** A Base debit belongs to one accrual, even if the venue returns an alias
+ * for the order. The transaction lock serializes the indexed receipt lookup
+ * and insert across dedicated worker sessions without changing legacy keys. */
+export async function insertVerifiedLimitlessCollateralAccruals(
+  pool: Pool,
+  inputs: VenueFeeAccrualInput[],
+): Promise<{ upserted: number; orderIds: string[] }> {
+  const distinct = new Map<string, VenueFeeAccrualInput>();
+  for (const row of inputs) {
+    if (
+      row.venue !== "limitless" ||
+      row.feeProgram !== "venue_share" ||
+      row.chainId !== "8453" ||
+      !row.txHash ||
+      !/^collateral:0x[0-9a-f]{64}:[0-9]+$/.test(row.venueFillId) ||
+      !row.venueFillId.startsWith(`collateral:${row.txHash}:`)
+    )
+      throw new Error("Invalid canonical Limitless collateral accrual key");
+    if (!distinct.has(row.venueFillId)) distinct.set(row.venueFillId, row);
+  }
+  if (!distinct.size) return { upserted: 0, orderIds: [] };
+  return tx(pool, async (client) => {
+    await client.query("select pg_advisory_xact_lock(1258891461, 8453)");
+    return writeVenueFeeAccruals(client, [...distinct.values()], true);
+  });
+}
+
+async function writeVenueFeeAccruals(
+  pool: VenueFeeAccrualQueryable,
+  inputs: Array<VenueFeeAccrualInput | null>,
+  verifiedCollateral: boolean,
+): Promise<{ upserted: number; orderIds: string[] }> {
   const rows = inputs.filter(
     (input): input is VenueFeeAccrualInput => input != null,
   );
-  if (!rows.length) return { upserted: 0 };
+  if (!rows.length) return { upserted: 0, orderIds: [] };
 
-  const result = await pool.query(
+  const result = await pool.query<{ order_id: string }>(
     `
       with input as (
         select *
@@ -146,7 +202,7 @@ export async function upsertVenueFeeAccruals(
         fee_rate_bps, fee_basis, notional_amount, notional_amount_raw,
         fee_amount, fee_amount_raw, venue_fee_rate_bps,
         venue_effective_fee_bps, venue_fee_amount, venue_fee_amount_raw,
-        filled_at, status, created_at, updated_at
+        filled_at, status, chain_verified_at, created_at, updated_at
       )
       select
         user_id, wallet_address, signer_address, venue, fee_program, chain_id,
@@ -155,8 +211,17 @@ export async function upsertVenueFeeAccruals(
         fee_rate_bps, fee_basis, notional_amount, notional_amount_raw,
         fee_amount, fee_amount_raw, venue_fee_rate_bps,
         venue_effective_fee_bps, venue_fee_amount, venue_fee_amount_raw,
-        filled_at, 'accrued', now(), now()
+        filled_at, case when $29::boolean then 'verified' else 'accrued' end,
+        case when $29::boolean then now() else null end, now(), now()
       from input
+      where not $29::boolean or not exists (
+        select 1 from venue_fee_accruals existing_debit
+        where existing_debit.tx_hash = input.tx_hash
+          and existing_debit.venue = 'limitless'
+          and existing_debit.fee_program = 'venue_share'
+          and existing_debit.chain_id = '8453'
+          and existing_debit.venue_fill_id = input.venue_fill_id
+      )
       on conflict (venue, fee_program, order_id, venue_fill_id)
       do update set
         tx_hash = coalesce(excluded.tx_hash, venue_fee_accruals.tx_hash),
@@ -174,8 +239,8 @@ export async function upsertVenueFeeAccruals(
         venue_fee_amount_raw = excluded.venue_fee_amount_raw,
         filled_at = excluded.filled_at,
         updated_at = now()
-      where venue_fee_accruals.status in ('accrued', 'verified')
-      returning id
+      where not $29::boolean and venue_fee_accruals.status in ('accrued', 'verified')
+      returning order_id
     `,
     [
       rows.map((row) => row.userId),
@@ -206,10 +271,14 @@ export async function upsertVenueFeeAccruals(
       rows.map((row) => row.venueFeeAmount ?? null),
       rows.map((row) => row.venueFeeAmountRaw ?? null),
       rows.map((row) => row.filledAt),
+      verifiedCollateral,
     ],
   );
 
-  return { upserted: result.rowCount ?? 0 };
+  return {
+    upserted: result.rowCount ?? 0,
+    orderIds: result.rows.map((row) => row.order_id),
+  };
 }
 
 export async function markVenueFeeBackfillAttempts(
@@ -233,10 +302,11 @@ export async function markVenueFeeBackfillAttempts(
           $4::text[],
           $5::text[],
           $6::text[],
-          $7::timestamptz[]
+          $7::timestamptz[],
+          $9::boolean[]
         ) as t(
           venue, fee_program, order_id, venue_order_id, status, reason,
-          next_attempt_at
+          next_attempt_at, consume_attempt
         )
       )
       insert into venue_fee_backfill_attempts (
@@ -245,7 +315,8 @@ export async function markVenueFeeBackfillAttempts(
         updated_at
       )
       select
-        venue, fee_program, order_id, venue_order_id, status, reason, 1,
+        venue, fee_program, order_id, venue_order_id, status, reason,
+        case when consume_attempt then 1 else 0 end,
         next_attempt_at, now(), now(), now(), now()
       from input
       on conflict (venue, fee_program, order_id)
@@ -256,20 +327,23 @@ export async function markVenueFeeBackfillAttempts(
         ),
         status = case
           when excluded.status = 'retry'
-            and venue_fee_backfill_attempts.attempts + 1 >= $8::int
+            and excluded.attempts > 0
+            and venue_fee_backfill_attempts.attempts + excluded.attempts >= $8::int
             then 'failed'
           else excluded.status
         end,
         reason = case
           when excluded.status = 'retry'
-            and venue_fee_backfill_attempts.attempts + 1 >= $8::int
+            and excluded.attempts > 0
+            and venue_fee_backfill_attempts.attempts + excluded.attempts >= $8::int
             then excluded.reason || ' (max attempts reached)'
           else excluded.reason
         end,
-        attempts = venue_fee_backfill_attempts.attempts + 1,
+        attempts = venue_fee_backfill_attempts.attempts + excluded.attempts,
         next_attempt_at = case
           when excluded.status = 'retry'
-            and venue_fee_backfill_attempts.attempts + 1 >= $8::int
+            and excluded.attempts > 0
+            and venue_fee_backfill_attempts.attempts + excluded.attempts >= $8::int
             then null
           else excluded.next_attempt_at
         end,
@@ -286,6 +360,7 @@ export async function markVenueFeeBackfillAttempts(
       inputs.map((input) => input.reason),
       inputs.map((input) => input.nextAttemptAt ?? null),
       maxRetryAttempts,
+      inputs.map((input) => input.consumeAttempt !== false),
     ],
   );
   return { marked: result.rowCount ?? 0 };
@@ -431,6 +506,15 @@ export async function unlockVenueFeeAccruals(
       chain_id = $1
       and status = 'verified'
       and fee_event_id is null
+      and (
+        venue <> 'limitless' or fee_program <> 'venue_share'
+        or venue_fill_id like 'collateral:%'
+        or not exists (
+          select 1 from orders stored_order
+          where stored_order.id=venue_fee_accruals.order_id
+            and ${limitlessFrozenCollateralSql("stored_order.order_payload")}
+        )
+      )
     `;
     if (options.venue) {
       params.push(options.venue);

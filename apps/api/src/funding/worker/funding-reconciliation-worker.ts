@@ -2,6 +2,11 @@ import type { Pool } from "@hunch/infra";
 
 import { RelayClient } from "../../funding-providers/relay/client.js";
 import {
+  assertLimitlessTradeFundingFeeAllowance,
+  delegatedLimitlessFeeDependencies,
+} from "../planner/limitless-fee-preflight.js";
+import { fetchFundingOperationForUser } from "../persistence/funding-operation-repository.js";
+import {
   createRelayDepositAddressCodec,
   createRelayReferenceCodec,
 } from "../../funding-providers/relay/reference-codec.js";
@@ -24,6 +29,7 @@ import { reconcileRelayDestinationReceipts } from "../reconciliation/relay-desti
 import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
 import { runTelegramRouterContinuation } from "../reconciliation/telegram-router-continuation.js";
 import {
+  reconcileLimitlessDirectOrderJournals,
   runLimitlessTradeAttemptReconciliationBatch,
   type LimitlessFundingReconciliationConfig,
 } from "../reconciliation/limitless-trade-attempt-reconciler.js";
@@ -53,6 +59,10 @@ import {
   resolveTelegramFundingReceiptDisposition,
   type TelegramFundingReceiptOperationPreparer,
 } from "../../services/telegram-funding-route.js";
+
+// The funding loop itself can run every second. Limit the separate
+// pre-dispatch journal poll on the same worker without changing that loop.
+const nextLimitlessDirectJournalPoll = new WeakMap<Pool, number>();
 
 // Channel composition belongs at the worker edge. The receipt router itself
 // only executes a provider-neutral disposition, so a new Telegram venue is a
@@ -499,6 +509,38 @@ export async function runFundingReconciliationJob(
                 profile != null,
             ),
             referenceCodec: transactionCodec,
+            verifyNewFundingTransfer: async (claim) => {
+              if (
+                claim.venueId !== "limitless" ||
+                claim.action.kind !== "evm_transaction" ||
+                claim.action.data.toLowerCase().startsWith("0x095ea7b3")
+              )
+                return;
+              const operation = await fetchFundingOperationForUser(pool, claim);
+              if (!operation)
+                throw new Error(
+                  "Delegated Limitless funding operation is unavailable",
+                );
+              if (operation.purpose !== "trade_shortfall") return;
+              if (!options.limitless)
+                throw new Error(
+                  "Limitless funding fee preflight is unavailable",
+                );
+              await assertLimitlessTradeFundingFeeAllowance(operation, {
+                ...delegatedLimitlessFeeDependencies(options.limitless),
+                loadMarket: async (id) =>
+                  (
+                    await pool.query<{
+                      venue: string;
+                      slug: string | null;
+                      metadata: unknown;
+                    }>(
+                      "select venue,slug,metadata from unified_markets where id=$1 and venue='limitless'",
+                      [id],
+                    )
+                  ).rows[0] ?? null,
+              });
+            },
           }).runBatch({ limit: options.limit ?? 25, now: options.now })
         : null;
     return {
@@ -649,6 +691,20 @@ export async function runFundingReconciliationJob(
         now: options.now,
       })
     : null;
+  if (
+    options.limitless &&
+    Date.now() >= (nextLimitlessDirectJournalPoll.get(pool) ?? 0)
+  ) {
+    nextLimitlessDirectJournalPoll.set(pool, Date.now() + 30_000);
+    await reconcileLimitlessDirectOrderJournals(pool, {
+      config: options.limitless,
+      now: options.now,
+    }).catch(() =>
+      console.warn(
+        "[funding-reconcile] Limitless direct journal observation failed",
+      ),
+    );
+  }
   const finalTelegramFundingProgress =
     await runTelegramFundingProgressProjectionBatch(pool, {
       limit: options.limit ?? 25,

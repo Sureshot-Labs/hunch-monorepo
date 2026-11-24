@@ -46,6 +46,7 @@ export type EmbeddedPrivyAuthorizationSignature = {
 };
 
 export type EmbeddedEthereumTransactionSpec = {
+  limitlessFeeMarketSlug?: string;
   id: string;
   label: string;
   to: string;

@@ -11,6 +11,10 @@ import {
 } from "../lib/limitless-token.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
+  extractHistoryMarketSlug,
+  normalizeHistorySide,
+} from "../lib/limitless-history-identity.js";
+import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "./limitless-client.js";
@@ -96,14 +100,6 @@ function normalizeHistoryStrategy(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length ? trimmed : null;
-}
-
-function normalizeHistorySide(strategy: string | null): "BUY" | "SELL" | null {
-  if (!strategy) return null;
-  const normalized = strategy.trim().toLowerCase();
-  if (normalized.includes("buy")) return "BUY";
-  if (normalized.includes("sell")) return "SELL";
-  return null;
 }
 
 function normalizeHistoryOrderType(
@@ -221,19 +217,6 @@ function extractHistoryMarketId(entry: Record<string, unknown>): string | null {
     entry.marketId ??
     entry.market_id;
   return normalizeOrderId(raw);
-}
-
-function extractHistoryMarketSlug(
-  entry: Record<string, unknown>,
-): string | null {
-  const market = isRecord(entry.market) ? entry.market : null;
-  const raw =
-    (market && (market.slug ?? market.marketSlug ?? market.market_slug)) ??
-    entry.marketSlug ??
-    entry.market_slug;
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  return trimmed.length ? trimmed : null;
 }
 
 function extractHistoryTxHash(entry: Record<string, unknown>): string | null {
@@ -663,6 +646,11 @@ export async function syncLimitlessHistoryForWallet(
           venue: "limitless",
           venueOrderId,
           replacementOrderId: match.id,
+          latestLimitlessHistory: {
+            providerOrderId: submittedOrderId,
+            clientOrderId,
+            txHash: orderHash,
+          },
         });
         if (shouldApplyPositionFill) {
           try {
@@ -704,7 +692,7 @@ export async function syncLimitlessHistoryForWallet(
       status: "filled",
       errorMessage: null,
       rawError: null,
-      orderPayload: entry,
+      orderPayload: clientOrderId ? { ...entry, clientOrderId } : entry,
       orderHash,
       postedAt: timestamp,
       lastUpdate: timestamp,

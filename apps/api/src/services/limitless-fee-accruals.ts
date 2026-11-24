@@ -1,12 +1,34 @@
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 import { env } from "../env.js";
-import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
+import {
+  normalizeLimitlessRawTokenId,
+  normalizeLimitlessScopedTokenId,
+} from "../lib/limitless-token.js";
 import { withRewardsChainLocks } from "../lib/rewards-locks.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
+import { retainLimitlessFeeReceiptLocators } from "../repos/orders-repo.js";
+import {
+  fetchLimitlessHistoryReceiptLocators,
+  limitlessFrozenCollateralSql,
+} from "../repos/limitless-history-receipt-locators.js";
 import { isRecord } from "../lib/type-guards.js";
 import { createEvmRpcProvider } from "./rpc-client-factory.js";
+import { parseLimitlessOrderResult } from "./limitless-order-result.js";
+import {
+  buildLimitlessClobSubmissionContext,
+  LIMITLESS_COLLATERAL_ATTEMPT_PROGRAM,
+  limitlessClobFrozenContext,
+  limitlessClobSubmittedOrder,
+  readLimitlessHistoryTxHashes,
+  resolveLimitlessClobEvidenceIdentity,
+} from "./limitless-clob-evidence-identity.js";
+import { resolveLimitlessMarketExchangeAddress } from "./limitless-market-contracts.js";
+import {
+  readCanonicalFinalizedBuyReceipt,
+  type VerifiedBuyEvmProvider,
+} from "./verified-buy-evm-receipt.js";
 import {
   fetchLimitlessOrderStatusBatch as fetchSharedLimitlessOrderStatusBatch,
   type LimitlessOrderStatusItem,
@@ -14,6 +36,7 @@ import {
 import {
   clearVenueFeeBackfillAttempts,
   markVenueFeeBackfillAttempts,
+  insertVerifiedLimitlessCollateralAccruals,
   unlockVenueFeeAccruals,
   upsertVenueFeeAccruals,
   type VenueFeeBackfillAttemptInput,
@@ -35,7 +58,13 @@ const UUID_RE =
 const SETTLED_STATUSES = new Set(["MINED", "CONFIRMED"]);
 const FAILED_STATUSES = new Set(["FAILED"]);
 const BACKFILL_RETRY_DELAY_MS = 15 * 60 * 1000;
+const COLLATERAL_CAPACITY_RETRY_MS = 2 * 60_000;
+const feeObservationCursor = new Map<string, string>();
+const MAX_FEE_LOCATOR_CURSORS = 512;
 const BACKFILL_MAX_RETRY_ATTEMPTS = 8;
+const COLLATERAL_RPC_BUDGET_EXHAUSTED =
+  "Limitless collateral fee RPC budget exhausted";
+const LIMITLESS_USD_FEE_RECEIPT_REQUIRED = "Limitless USD fee receipt required";
 const ZERO_ASSET_ID = "0";
 const LIMITLESS_ORDER_FILLED_EVENT =
   "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)";
@@ -52,6 +81,23 @@ const limitlessFeeChargedInterface = new ethers.Interface([
 const limitlessFeeRefundedInterface = new ethers.Interface([
   LIMITLESS_FEE_REFUNDED_EVENT,
 ]);
+const collateralFeeTopic =
+  "0x363a587c4640b524767666acd46b6600a7308a3692b1c11c2f5a930318e04866";
+const erc20TransferInterface = new ethers.Interface([
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
+]);
+const erc20TransferTopic = ethers.id("Transfer(address,address,uint256)");
+
+function collateralFeeContext(
+  payload: unknown,
+): Record<string, unknown> | null {
+  const context = isRecord(payload)
+    ? limitlessClobFrozenContext(payload)
+    : null;
+  return isRecord(context) && Object.hasOwn(context, "collateralFeeModule")
+    ? context
+    : null;
+}
 
 export type LimitlessFeeShareConfig = {
   active: boolean;
@@ -71,6 +117,7 @@ export type LimitlessAccrualOrderRow = {
   order_hash: string | null;
   token_id: string | null;
   side: "BUY" | "SELL" | null;
+  order_type?: string | null;
   filled_at: Date | null;
   last_update: Date | null;
   posted_at: Date | null;
@@ -250,6 +297,99 @@ function extractExecutionRecord(
   return null;
 }
 
+/** Old/provider-only records have no trusted module. A zero signing rate
+ * paired with a positive USD fee cannot use legacy status-only verification. */
+function statusNeedsCollateralProof(
+  data: Record<string, unknown>,
+  execution: Record<string, unknown>,
+): boolean {
+  const usdFee = rawDigits(extractTotalsRaw(execution)?.usdFee) ?? 0n;
+  const rates = [execution.feeRateBps, extractOrderRecord(data)?.feeRateBps]
+    .map(numberOrNull)
+    .filter((value): value is number => value != null);
+  return usdFee > 0n && (!rates.length || rates.some((value) => value <= 0));
+}
+
+/** A provider execution rate is not the signed fee policy. Only a locally
+ * frozen positive-rate order is eligible for the legacy no-tx lane. */
+export function hasTrustedLimitlessLegacyFeeRate(payload: unknown): boolean {
+  return trustedLimitlessLegacyIdentity(payload) !== null;
+}
+
+function trustedLimitlessLegacyIdentity(payload: unknown) {
+  if (!isRecord(payload) || collateralFeeContext(payload)) return null;
+  const context = limitlessClobFrozenContext(payload);
+  const localOrder = limitlessClobSubmittedOrder(payload);
+  if (
+    !isRecord(context) ||
+    !localOrder ||
+    (rawDigits(localOrder.feeRateBps) ?? 0n) <= 0n
+  )
+    return null;
+  return resolveLimitlessClobEvidenceIdentity({
+    orderPayload: payload,
+    marketMetadata: null,
+    legacyExchangeAddress: "",
+    providerOrder: {},
+  });
+}
+
+/** Before fee context was frozen for all direct orders, the server stored
+ * the original signed request under order/submitted. The current catalog
+ * is only a domain candidate: require its exact signature and receipt fill.
+ * Never import a signing domain, fee rate or signature from the status API. */
+async function recoverLegacyFeeOrderPayload(
+  db: Pick<Pool, "query">,
+  order: Pick<
+    LimitlessAccrualOrderRow,
+    "order_payload" | "wallet_address" | "signer_address" | "token_id" | "side"
+  >,
+): Promise<unknown> {
+  const payload = order.order_payload;
+  if (!isRecord(payload) || limitlessClobFrozenContext(payload) !== undefined)
+    return payload;
+  const signed = limitlessClobSubmittedOrder(payload);
+  const tokenId = normalizeLimitlessScopedTokenId(order.token_id);
+  const maker = normalizeAddress(signed?.maker);
+  const signer = normalizeAddress(signed?.signer);
+  if (
+    !signed ||
+    !tokenId ||
+    typeof signed.signature !== "string" ||
+    !maker ||
+    !signer ||
+    normalizeAddress(order.wallet_address) !== maker ||
+    normalizeAddress(order.signer_address ?? order.wallet_address) !== signer ||
+    (rawDigits(signed.feeRateBps) ?? 0n) <= 0n ||
+    normalizeLimitlessScopedTokenId(rawDigits(signed.tokenId)) !== tokenId ||
+    normalizeSide(signed.side) !== order.side
+  )
+    return payload;
+  const { rows } = await db.query<{ metadata: unknown }>(
+    `select market_row.metadata from unified_tokens token_row
+      join unified_markets market_row on market_row.id=token_row.market_id
+      where token_row.venue='limitless' and token_row.token_id=$1 limit 1`,
+    [tokenId],
+  );
+  const exchange = resolveLimitlessMarketExchangeAddress(
+    rows[0]?.metadata,
+    env.limitlessClobAddress,
+  );
+  if (!exchange) return payload;
+  try {
+    const context = buildLimitlessClobSubmissionContext(exchange, signed);
+    if (
+      ethers
+        .recoverAddress(context.orderHash, signed.signature)
+        .toLowerCase() !== signer
+    )
+      return payload;
+    return { ...payload, _hunchLimitlessClob: context };
+  } catch {
+    return payload;
+  }
+}
+
 function extractTotalsRaw(
   execution: Record<string, unknown>,
 ): Record<string, unknown> | null {
@@ -270,12 +410,10 @@ function extractStoredLimitlessUpstreamPayload(
   return null;
 }
 
-function extractTxHashFromLimitlessStatus(
+export function extractTxHashFromLimitlessStatus(
   status: LimitlessOrderStatusItem,
 ): string | null {
-  const data = extractStatusData(status.payload);
-  const execution = data ? extractExecutionRecord(data) : null;
-  return execution ? normalizeHash(textOrNull(execution.txHash)) : null;
+  return normalizeHash(parseLimitlessOrderResult(status.payload).txHash);
 }
 
 function shouldTryReceiptForStatusResult(
@@ -283,7 +421,8 @@ function shouldTryReceiptForStatusResult(
 ): boolean {
   return Boolean(
     result.attempt?.reason.includes("contract-denominated") ||
-    result.attempt?.reason.includes("USD fee total missing"),
+    result.attempt?.reason.includes("USD fee total missing") ||
+    result.attempt?.reason === "Limitless collateral fee provenance missing",
   );
 }
 
@@ -295,6 +434,10 @@ export function buildStoredLimitlessOrderStatusItem(
 ): LimitlessOrderStatusItem | null {
   const upstream = extractStoredLimitlessUpstreamPayload(order.order_payload);
   if (!upstream) return null;
+  if (upstream.status === "found" && isRecord(upstream.data)) {
+    if (upstream.orderId !== order.venue_order_id) return null;
+    return { orderId: order.venue_order_id, payload: upstream };
+  }
   return {
     orderId: order.venue_order_id,
     payload: {
@@ -507,6 +650,121 @@ function usdNotionalRawFromLimitlessLog(
   return null;
 }
 
+// Wire layout observed on Base, BUY 0x6dc5d11186a012965f75caa54b19442b06993e1ad88f44e59ac9502f48548016
+// and SELL 0xf3c4ef69e4954e4f957c1cb30a857e5de6d76bc18e6f92ba541a634556b98aa8.
+// The module event is not itself proof of a debit: pair it with the exact
+// Base USDC transfer, and with the signed taker order's fill on its exchange.
+function readLimitlessCollateralFeeProof(input: {
+  module: string;
+  fill: ParsedLimitlessOrderFilledLog;
+  side: "BUY" | "SELL";
+  logs: LimitlessLogLike[];
+}): { fee: bigint; notional: bigint; logIndex: number } | null {
+  const { fill, logs } = input;
+  const tokenId = input.side === "BUY" ? fill.takerAssetId : fill.makerAssetId;
+  const isChargeForOrder = (log: LimitlessLogLike) =>
+    log.address.toLowerCase() === input.module &&
+    log.topics[0] === collateralFeeTopic &&
+    log.topics[1]?.toLowerCase() === fill.orderHash;
+  const index = logs.findIndex(isChargeForOrder);
+  if (
+    index < 0 ||
+    logs.some(
+      (candidate, otherIndex) =>
+        otherIndex > index && isChargeForOrder(candidate),
+    )
+  )
+    return null;
+  const log = logs[index];
+  if (
+    !log ||
+    log.index == null ||
+    !Number.isSafeInteger(log.index) ||
+    log.topics.length !== 4 ||
+    log.index <= fill.logIndex
+  )
+    return null;
+  try {
+    if (
+      !/^0x0{24}[\da-f]{40}$/i.test(log.topics[2]) ||
+      !ethers.isHexString(log.topics[3], 32) ||
+      normalizeAddress(
+        ethers.getAddress(ethers.dataSlice(log.topics[2], 12)),
+      ) !== fill.maker ||
+      BigInt(log.topics[3]).toString() !== tokenId ||
+      ethers.dataLength(log.data) !== 32 * 8
+    )
+      return null;
+    const [side, makerAmount, netNotional, shares, fee, , recipient] =
+      ethers.AbiCoder.defaultAbiCoder().decode(
+        [
+          "uint256",
+          "uint256",
+          "uint256",
+          "uint256",
+          "uint256",
+          "uint256",
+          "address",
+          "address",
+        ],
+        log.data,
+      ) as unknown as [
+        bigint,
+        bigint,
+        bigint,
+        bigint,
+        bigint,
+        bigint,
+        string,
+        string,
+      ];
+    const fillNotional = usdNotionalRawFromLimitlessLog(fill);
+    const feeRecipient = normalizeAddress(recipient);
+    if (
+      side !== (input.side === "BUY" ? 0n : 1n) ||
+      makerAmount !== fill.makerAmountFilled ||
+      shares !==
+        (input.side === "BUY"
+          ? fill.takerAmountFilled
+          : fill.makerAmountFilled) ||
+      netNotional <= 0n ||
+      fillNotional == null ||
+      netNotional > fillNotional ||
+      !feeRecipient ||
+      feeRecipient === fill.maker ||
+      fee <= 0n
+    )
+      return null;
+    const transfer = logs[index - 1];
+    if (
+      !transfer ||
+      (transfer.index ?? index - 1) !== (log.index ?? index) - 1 ||
+      transfer.address.toLowerCase() !==
+        env.limitlessUsdcAddress.toLowerCase() ||
+      transfer.topics[0] !== erc20TransferTopic ||
+      transfer.topics.length !== 3 ||
+      !/^0x0{24}[\da-f]{40}$/i.test(transfer.topics[1]) ||
+      !/^0x0{24}[\da-f]{40}$/i.test(transfer.topics[2]) ||
+      !ethers.isHexString(transfer.data, 32)
+    )
+      return null;
+    const paid = erc20TransferInterface.parseLog({
+      data: transfer.data,
+      topics: [...transfer.topics],
+    });
+    if (
+      !paid ||
+      normalizeAddress(paid.args[0]) !== fill.maker ||
+      normalizeAddress(paid.args[1]) !== feeRecipient ||
+      paid.args[2] !== fee
+    )
+      return null;
+    return { fee, notional: netNotional, logIndex: log.index };
+  } catch {
+    return null;
+  }
+}
+
 function effectiveBpsFromRaw(
   feeRaw: bigint,
   notionalRaw: bigint,
@@ -542,10 +800,14 @@ export function buildLimitlessVenueShareAccrualResult(inputs: {
     terminal(reason, "retry");
 
   if (!inputs.config.active) return terminal("Limitless fee share inactive");
+  if (collateralFeeContext(inputs.order.order_payload))
+    return retry("Limitless collateral fee requires a finalized receipt");
   const data = extractStatusData(inputs.status.payload);
   if (!data) return retry("Limitless order status data missing");
   const execution = extractExecutionRecord(data);
   if (!execution) return retry("Limitless execution missing");
+  if (statusNeedsCollateralProof(data, execution))
+    return retry("Limitless collateral fee provenance missing");
   if (execution.matched !== true) return retry("Limitless order not matched");
   const status = settlementStatus(execution);
   if (!status) return retry("Limitless settlement status missing");
@@ -710,12 +972,42 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
   if (!walletAddresses.size) {
     return retry("Limitless order wallet missing for onchain fee check");
   }
+  const frozen = collateralFeeContext(inputs.order.order_payload);
+  const legacyIdentity = trustedLimitlessLegacyIdentity(
+    inputs.order.order_payload,
+  );
+  const module = normalizeAddress(frozen?.collateralFeeModule);
+  const exchange = normalizeAddress(frozen?.exchangeAddress);
+  const signedOrderHash = normalizeHash(frozen?.orderHash);
+  if (frozen && inputs.order.order_type !== "FOK")
+    return terminal("Limitless collateral GTC fee reconciliation unsupported");
+  if (
+    frozen &&
+    (frozen.chainId !== 8453 ||
+      frozen.contextVersion !== 1 ||
+      !module ||
+      !exchange ||
+      module === exchange ||
+      !signedOrderHash ||
+      !inputs.order.side ||
+      !normalizeLimitlessRawTokenId(inputs.order.token_id))
+  ) {
+    return retry("Limitless collateral fee identity missing");
+  }
 
   const orderLogs = inputs.logs
     .map((log, index) => parseLimitlessOrderFilledLog(log, index))
     .filter((log): log is ParsedLimitlessOrderFilledLog => log != null)
-    .filter(
-      (log) => walletAddresses.has(log.maker) || walletAddresses.has(log.taker),
+    .filter((log) =>
+      frozen
+        ? log.address === exchange &&
+          log.orderHash === signedOrderHash &&
+          walletAddresses.has(log.maker)
+        : legacyIdentity
+          ? log.address === legacyIdentity.exchangeAddress.toLowerCase() &&
+            log.orderHash === legacyIdentity.orderHash &&
+            walletAddresses.has(log.maker)
+          : walletAddresses.has(log.maker) || walletAddresses.has(log.taker),
     )
     .sort((a, b) => {
       const scoreDelta =
@@ -735,14 +1027,21 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
     limitlessSideAssetMatches(log, inputs.order.side, inputs.order.token_id),
   );
   if (!matching) return retry("Limitless onchain order fill not found");
-  if (matching.fee <= 0n) return terminal("Limitless onchain fee is zero");
-
-  const feeLogs = inputs.logs
-    .map((log, index) => parseLimitlessFeeChargedLog(log, index))
-    .filter((log): log is ParsedLimitlessFeeChargedLog => log != null);
-  const feeLog = findLimitlessFeeChargedForOrder(matching, feeLogs);
-  if (!feeLog) return retry("Limitless onchain fee charged log not found");
-  const feeTokenId = feeLog.tokenId;
+  if (module && (orderLogs.length !== 1 || matching.fee !== 0n))
+    return retry("Limitless collateral fee fill is ambiguous");
+  if (!module && matching.fee <= 0n) {
+    // History and older reconciliation records might contain only the
+    // provider's fill, not our frozen signing domain. Recognize this conflict
+    // as missing proof; an untrusted emitter is never authority to pay it.
+    const hasModuleCharge = inputs.logs.some(
+      (log) =>
+        log.topics[0] === collateralFeeTopic &&
+        log.topics[1]?.toLowerCase() === matching.orderHash,
+    );
+    if (hasModuleCharge)
+      return retry("Limitless collateral fee provenance missing");
+    return terminal("Limitless onchain fee is zero");
+  }
   const side =
     inputs.order.side ??
     (matching.makerAssetId === ZERO_ASSET_ID
@@ -751,10 +1050,33 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
         ? "SELL"
         : null);
   if (!side) return retry("Limitless onchain order side missing");
-  const feeRaw = floorBps(matching.fee, inputs.config.shareBps);
+  const collateralProof = module
+    ? readLimitlessCollateralFeeProof({
+        module,
+        fill: matching,
+        side,
+        logs: inputs.logs,
+      })
+    : null;
+  if (module && !collateralProof)
+    return retry("Limitless collateral fee transfer not verified");
+  const venueFee = collateralProof?.fee ?? matching.fee;
+  if (venueFee <= 0n) return terminal("Limitless onchain fee is zero");
+  const feeLog = module
+    ? null
+    : findLimitlessFeeChargedForOrder(
+        matching,
+        inputs.logs
+          .map((log, index) => parseLimitlessFeeChargedLog(log, index))
+          .filter((log): log is ParsedLimitlessFeeChargedLog => log != null),
+      );
+  if (!module && !feeLog)
+    return retry("Limitless onchain fee charged log not found");
+  const feeRaw = floorBps(venueFee, inputs.config.shareBps);
   if (feeRaw <= 0n) return terminal("Limitless fee share is zero");
 
-  if (feeTokenId !== ZERO_ASSET_ID) {
+  if (feeLog && feeLog.tokenId !== ZERO_ASSET_ID) {
+    const feeTokenId = feeLog.tokenId;
     const refundLogs = inputs.logs
       .map((log, index) => parseLimitlessFeeRefundedLog(log, index))
       .filter((log): log is ParsedLimitlessFeeRefundedLog => log != null);
@@ -796,7 +1118,8 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
     };
   }
 
-  const notionalRaw = usdNotionalRawFromLimitlessLog(matching);
+  const notionalRaw =
+    collateralProof?.notional ?? usdNotionalRawFromLimitlessLog(matching);
   if (notionalRaw == null || notionalRaw <= 0n) {
     return retry("Limitless onchain USD notional missing or zero");
   }
@@ -806,8 +1129,10 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
     inputs.order.last_update ??
     inputs.order.posted_at ??
     new Date();
-  const venueFillId = `${txHash}:${matching.logIndex}`;
-  const venueFeeEffectiveBps = effectiveBpsFromRaw(matching.fee, notionalRaw);
+  const venueFillId = collateralProof
+    ? `collateral:${txHash}:${collateralProof.logIndex}`
+    : `${txHash}:${matching.logIndex}`;
+  const venueFeeEffectiveBps = effectiveBpsFromRaw(venueFee, notionalRaw);
 
   return {
     accrual: {
@@ -818,7 +1143,10 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
       feeProgram: LIMITLESS_FEE_PROGRAM,
       chainId: BASE_CHAIN_ID,
       orderId: inputs.order.id,
-      orderHash: inputs.order.order_hash ?? txHash,
+      orderHash:
+        collateralProof && signedOrderHash
+          ? signedOrderHash
+          : (inputs.order.order_hash ?? txHash),
       venueOrderId: inputs.order.venue_order_id,
       venueFillId,
       venueTradeId: matching.orderHash,
@@ -834,10 +1162,10 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
       feeAmountRaw: feeRaw.toString(),
       feeAmount: microToDecimal(feeRaw),
       feeAsset: "USDC",
-      venueFeeRateBps: venueFeeEffectiveBps,
+      venueFeeRateBps: module ? 0 : venueFeeEffectiveBps,
       venueEffectiveFeeBps: venueFeeEffectiveBps,
-      venueFeeAmountRaw: matching.fee.toString(),
-      venueFeeAmount: microToDecimal(matching.fee),
+      venueFeeAmountRaw: venueFee.toString(),
+      venueFeeAmount: microToDecimal(venueFee),
       filledAt,
     },
     receivable: null,
@@ -865,10 +1193,47 @@ export async function resolveLimitlessFeeShareConfig(
   };
 }
 
-async function fetchLimitlessOrderStatusBatch(
+export async function fetchLimitlessAccrualOrderStatuses(
   lookups: Array<{ orderId: string; clientOrderId?: string | null }>,
-): Promise<Map<string, LimitlessOrderStatusItem>> {
-  return fetchSharedLimitlessOrderStatusBatch(lookups);
+  fetchBatch = fetchSharedLimitlessOrderStatusBatch,
+): Promise<{
+  statuses: Map<string, LimitlessOrderStatusItem>;
+  unavailable: boolean;
+}> {
+  if (!lookups.length) return { statuses: new Map(), unavailable: false };
+  // Keep the two lookup identities in independent batches. An alias returned
+  // by one batch must not overwrite the other batch's receipt locator.
+  const orderIds = [...new Set(lookups.map((lookup) => lookup.orderId))];
+  const clientIds = [
+    ...new Set(
+      lookups.flatMap((lookup) =>
+        lookup.clientOrderId ? [lookup.clientOrderId] : [],
+      ),
+    ),
+  ];
+  const [byOrder, byClient] = await Promise.allSettled([
+    fetchBatch(orderIds.map((orderId) => ({ orderId }))),
+    clientIds.length
+      ? fetchBatch(clientIds.map((clientOrderId) => ({ clientOrderId })))
+      : new Map<string, LimitlessOrderStatusItem>(),
+  ]);
+  const results = new Map<string, LimitlessOrderStatusItem>();
+  if (byOrder.status === "fulfilled")
+    for (const key of orderIds) {
+      const value = byOrder.value.get(key);
+      if (value) results.set(key, value);
+    }
+  if (byClient.status === "fulfilled")
+    for (const id of clientIds) {
+      const key = `client:${id}`;
+      const value = byClient.value.get(key);
+      if (value) results.set(key, value);
+    }
+  return {
+    statuses: results,
+    unavailable:
+      byOrder.status === "rejected" || byClient.status === "rejected",
+  };
 }
 
 async function buildLimitlessVenueShareAccrualResultFromReceipt(inputs: {
@@ -894,12 +1259,20 @@ async function buildLimitlessVenueShareAccrualResultFromReceipt(inputs: {
   const txHash = normalizeHash(inputs.order.order_hash);
   if (!txHash) return retry("Limitless transaction hash missing");
   try {
-    const receipt = await inputs.provider.getTransactionReceipt(txHash);
+    const receipt = trustedLimitlessLegacyIdentity(inputs.order.order_payload)
+      ? (
+          await readCanonicalFinalizedBuyReceipt(
+            inputs.provider,
+            txHash,
+            () => undefined,
+          )
+        )?.receipt
+      : await inputs.provider.getTransactionReceipt(txHash);
     if (!receipt) return retry("Limitless onchain receipt not found");
     if (receipt.status === 0) {
       return terminal("Limitless transaction reverted", "failed");
     }
-    return buildLimitlessVenueShareAccrualFromReceiptLogs({
+    const result = buildLimitlessVenueShareAccrualFromReceiptLogs({
       order: inputs.order,
       txHash,
       logs: receipt.logs.map((log) => ({
@@ -910,15 +1283,118 @@ async function buildLimitlessVenueShareAccrualResultFromReceipt(inputs: {
       })),
       config: inputs.config,
     });
+    if (
+      result.accrual &&
+      !hasTrustedLimitlessLegacyFeeRate(inputs.order.order_payload)
+    )
+      return retry(
+        "Limitless USD fee receipt requires exact legacy order identity",
+      );
+    return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return retry(`Limitless onchain receipt check failed: ${message}`);
   }
 }
 
+/** Local and venue tx hashes are locators, not evidence. Try each distinct
+ * candidate once per batch; a bad locator must not pin the accrual. */
+export async function resolveLimitlessCollateralAccrual(inputs: {
+  provider: VerifiedBuyEvmProvider;
+  order: LimitlessAccrualOrderRow;
+  config: LimitlessFeeShareConfig;
+  locators: readonly unknown[];
+  checked: Set<string>;
+  onReceiptAttempt?: (hash: string) => void;
+  withinBudget?: () => boolean;
+  shareAt?: (settledAt: Date) => Promise<number>;
+}): Promise<LimitlessAccrualBuildResult> {
+  const pending = (reason: string): LimitlessAccrualBuildResult => ({
+    accrual: null,
+    receivable: null,
+    attempt: { status: "retry", reason, retryable: true },
+  });
+  if (!collateralFeeContext(inputs.order.order_payload))
+    return pending("Limitless collateral fee provenance missing");
+  let result = pending("Limitless collateral fee receipt locator missing");
+  for (const locator of inputs.locators) {
+    const txHash = normalizeHash(locator);
+    if (!txHash || inputs.checked.has(txHash)) continue;
+    let startedLocator = false;
+    try {
+      const evidence = await readCanonicalFinalizedBuyReceipt(
+        inputs.provider,
+        txHash,
+        () => {
+          if (inputs.withinBudget && !inputs.withinBudget())
+            throw new Error(COLLATERAL_RPC_BUDGET_EXHAUSTED);
+          if (!startedLocator) {
+            startedLocator = true;
+            inputs.onReceiptAttempt?.(txHash);
+          }
+        },
+      );
+      inputs.checked.add(txHash);
+      if (!evidence || evidence.receipt.status !== 1) {
+        result = pending("Limitless collateral fee canonical receipt pending");
+        continue;
+      }
+      const proof = buildLimitlessVenueShareAccrualFromReceiptLogs({
+        order: { ...inputs.order, filled_at: new Date(evidence.timestamp) },
+        txHash,
+        logs: evidence.receipt.logs,
+        config: inputs.shareAt
+          ? { ...inputs.config, shareBps: 10_000 }
+          : inputs.config,
+      });
+      if (proof.accrual && inputs.shareAt) {
+        const shareBps = clampShareBps(
+          await inputs.shareAt(proof.accrual.filledAt),
+        );
+        const fee = floorBps(
+          BigInt(proof.accrual.venueFeeAmountRaw ?? "0"),
+          shareBps,
+        );
+        if (fee <= 0n)
+          return {
+            accrual: null,
+            receivable: null,
+            attempt: {
+              status: "skipped",
+              reason: "Limitless collateral fee share is zero at settlement",
+              retryable: false,
+            },
+          };
+        proof.accrual = {
+          ...proof.accrual,
+          feeRateBps: shareBps,
+          feeAmount: microToDecimal(fee),
+          feeAmountRaw: fee.toString(),
+        };
+      }
+      if (proof.accrual || (proof.attempt && !proof.attempt.retryable))
+        return proof;
+      result = pending("Limitless collateral fee transfer not verified");
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === COLLATERAL_RPC_BUDGET_EXHAUSTED
+      )
+        return pending(COLLATERAL_RPC_BUDGET_EXHAUSTED);
+      result = pending("Limitless collateral fee receipt lookup failed");
+    }
+  }
+  return result;
+}
+
 export async function backfillLimitlessVenueShareAccruals(
   pool: Pool,
-  options: { limit?: number; minAgeSec?: number } = {},
+  options: {
+    limit?: number;
+    minAgeSec?: number;
+    fetchStatusBatch?: typeof fetchSharedLimitlessOrderStatusBatch;
+    collateralReceiptProvider?: VerifiedBuyEvmProvider;
+  } = {},
 ): Promise<{ checked: number; upserted: number; skipped: number }> {
   const config = await resolveLimitlessFeeShareConfig(pool);
   if (!config.active && config.source === "env") {
@@ -929,16 +1405,29 @@ export async function backfillLimitlessVenueShareAccruals(
   const useEnvFallback = config.source === "env" && config.shareBps > 0;
   const { rows } = await pool.query<LimitlessAccrualOrderRow>(
     `
-      with candidates as (
+      with candidates as not materialized (
         select o.id, o.user_id, o.wallet_address, o.signer_address,
                o.venue_order_id, o.order_hash, o.token_id,
                case when o.side in ('BUY', 'SELL') then o.side else null end as side,
-               o.filled_at, o.last_update, o.posted_at, o.order_payload,
+               o.filled_at, o.last_update, o.posted_at, o.order_payload, o.order_type,
+               fee_context.is_collateral,
                coalesce(o.filled_at, o.last_update, o.posted_at) as candidate_time
-        from orders o
+        from (
+          select terminal_order.*
+          from orders terminal_order
+          where terminal_order.venue='limitless'
+            and terminal_order.venue_order_id is not null
+            and lower(terminal_order.status) in ('filled', 'matched', 'mined', 'confirmed')
+          union all
+          select pending_order.*
+          from orders pending_order
+          where pending_order.venue='limitless' and pending_order.order_type='FOK'
+            and pending_order.status in ('submitted','open','pending','delayed','unconfirmed','live','active')
+            and ${limitlessFrozenCollateralSql("pending_order.order_payload")}
+        ) o
+        cross join lateral (values (${limitlessFrozenCollateralSql("o.order_payload")})) as fee_context(is_collateral)
         where o.venue = 'limitless'
           and o.venue_order_id ~* $1
-          and lower(o.status) in ('filled', 'matched', 'mined', 'confirmed')
           and coalesce(o.filled_at, o.last_update, o.posted_at, now()) <= now() - ($3::int * interval '1 second')
           and not exists (
             select 1
@@ -946,6 +1435,8 @@ export async function backfillLimitlessVenueShareAccruals(
             where a.venue = 'limitless'
               and a.fee_program = 'venue_share'
               and a.order_id = o.id
+              and (not fee_context.is_collateral or a.venue_fill_id like 'collateral:%'
+                   or a.status = 'collected' or a.fee_event_id is not null)
           )
           and not exists (
             select 1
@@ -958,30 +1449,20 @@ export async function backfillLimitlessVenueShareAccruals(
             select 1
             from venue_fee_backfill_attempts b
             where b.venue = 'limitless'
-              and b.fee_program = 'venue_share'
+              and b.fee_program = case when fee_context.is_collateral then $6::text else 'venue_share' end
               and b.order_id = o.id
               and (
                 b.status in ('skipped', 'failed')
                 or (
                   b.status = 'retry'
                   and coalesce(b.next_attempt_at, 'infinity'::timestamptz) > now()
-                  and not (
-                    jsonb_typeof(o.order_payload) = 'object'
-                    and (
-                      o.order_payload ? '_hunchUpstream'
-                      or (
-                        jsonb_typeof(o.order_payload->'submitted') = 'object'
-                        and (o.order_payload->'submitted') ? '_hunchUpstream'
-                      )
-                    )
-                  )
                 )
               )
           )
-      )
+      ), eligible_candidates as not materialized (
       select c.id, c.user_id, c.wallet_address, c.signer_address,
              c.venue_order_id, c.order_hash, c.token_id, c.side,
-             c.filled_at, c.last_update, c.posted_at, c.order_payload,
+             c.filled_at, c.last_update, c.posted_at, c.order_payload, c.order_type,
              coalesce(
                c.order_payload->>'clientOrderId',
                c.order_payload->'submitted'->>'clientOrderId',
@@ -992,8 +1473,12 @@ export async function backfillLimitlessVenueShareAccruals(
              coalesce(
                active_policy.limitless_fee_share_bps,
                case when $4::boolean then $5::int else null end
-             ) as fee_share_bps
+             ) as fee_share_bps, c.is_collateral, c.candidate_time,
+             coalesce(collateral_attempt.next_attempt_at,c.candidate_time) as observation_due
       from candidates c
+      left join venue_fee_backfill_attempts collateral_attempt on c.is_collateral
+        and collateral_attempt.venue='limitless' and collateral_attempt.fee_program=$6::text
+        and collateral_attempt.order_id=c.id
       left join lateral (
         select p.limitless_fee_share_bps
         from fee_policy p
@@ -1002,36 +1487,193 @@ export async function backfillLimitlessVenueShareAccruals(
         order by p.effective_at desc, p.created_at desc
         limit 1
       ) active_policy on true
-      where coalesce(
+      where (coalesce(
         active_policy.limitless_fee_share_bps,
         case when $4::boolean then $5::int else null end,
         0
-      ) > 0
-      order by c.candidate_time asc nulls last
+      ) > 0 or c.is_collateral)
+      )
+      select admitted.*
+      from (values (true), (false)) as admission_lane(is_collateral)
+      cross join lateral (
+        select eligible.*,
+               row_number() over (order by eligible.observation_due asc nulls last, eligible.id) as lane_position
+        from (
+          select candidate.*
+          from eligible_candidates candidate
+          where candidate.is_collateral = admission_lane.is_collateral
+          order by candidate.observation_due asc nulls last, candidate.id
+          limit $2
+        ) eligible
+      ) admitted
+      order by admitted.lane_position, admitted.is_collateral desc
       limit $2
     `,
-    [UUID_RE.source, limit, minAgeSec, useEnvFallback, config.shareBps],
+    [
+      UUID_RE.source,
+      limit,
+      minAgeSec,
+      useEnvFallback,
+      config.shareBps,
+      LIMITLESS_COLLATERAL_ATTEMPT_PROGRAM,
+    ],
   );
   if (!rows.length) return { checked: 0, upserted: 0, skipped: 0 };
 
+  const collateralOrderIds = rows
+    .filter((row) => collateralFeeContext(row.order_payload))
+    .map((row) => row.id);
+  if (collateralOrderIds.length) {
+    // History can be stored before the exact submit proof. Do not let an
+    // earlier provisional amount suppress or accompany the canonical debit.
+    await pool.query(
+      `update venue_fee_accruals
+      set status = 'failed', verification_error = 'Limitless collateral fee supersedes provisional accrual', updated_at = now()
+      where venue = 'limitless' and fee_program = 'venue_share'
+        and order_id = any($1::uuid[]) and venue_fill_id not like 'collateral:%'
+        and status in ('accrued','verified') and fee_event_id is null`,
+      [collateralOrderIds],
+    );
+  }
+
   const accruals: Array<VenueFeeAccrualInput | null> = [];
+  const verifiedCollateral: VenueFeeAccrualInput[] = [];
+  const collateralChecks = new Map<
+    string,
+    { checked: Set<string>; reason: string }
+  >();
   const receivables: Array<LimitlessContractFeeReceivableInput | null> = [];
   const attempts: VenueFeeBackfillAttemptInput[] = [];
   const rowsNeedingStatus: LimitlessAccrualOrderRow[] = [];
   let baseProvider: ethers.JsonRpcProvider | null = null;
+  let collateralProvider: VerifiedBuyEvmProvider | null =
+    options.collateralReceiptProvider ?? null;
   let skipped = 0;
+  const rpcTimeoutMs = Math.min(env.baseRpcTimeoutMs, 15_000);
+  // Keep a fresh-locator reserve even when old transaction hashes are slow.
+  const collateralBudgetMs = 3 * rpcTimeoutMs;
+  const collateralRpcSpentMs = { stored: 0, fresh: 0 };
+  const collateralAttempted = new Set<string>();
+  const shareBySettlement = new Map<number, number>();
+  const shareAt = async (settledAt: Date) => {
+    const time = settledAt.getTime();
+    const cached = shareBySettlement.get(time);
+    if (cached !== undefined) return cached;
+    const policy = await fetchActiveFeePolicy(pool, "limitless", settledAt);
+    const share = clampShareBps(
+      policy?.limitless_fee_share_bps ?? (useEnvFallback ? config.shareBps : 0),
+    );
+    shareBySettlement.set(time, share);
+    return share;
+  };
+  const resolveCollateral = async (
+    row: LimitlessAccrualOrderRow,
+    shareBps: number,
+    locators: readonly unknown[],
+    checked: Set<string>,
+    phase: "stored" | "fresh",
+  ) => {
+    collateralProvider ??= createEvmRpcProvider(
+      env.baseRpcUrl,
+      8453,
+      undefined,
+      {
+        timeoutMs: rpcTimeoutMs,
+      },
+    );
+    const started = performance.now();
+    const cursorKey = `${row.id}:${phase}`;
+    const available = [
+      ...new Set(
+        locators
+          .map(normalizeHash)
+          .filter((hash): hash is string => Boolean(hash)),
+      ),
+    ];
+    const prior = available.indexOf(feeObservationCursor.get(cursorKey) ?? "");
+    const rotateAt = prior < 0 ? 0 : prior + 1;
+    let lastProbed: string | undefined;
+    try {
+      return await resolveLimitlessCollateralAccrual({
+        order: row,
+        provider: collateralProvider,
+        config: { ...config, active: true, shareBps },
+        locators: [
+          ...available.slice(rotateAt),
+          ...available.slice(0, rotateAt),
+        ],
+        checked,
+        onReceiptAttempt: (hash) => {
+          lastProbed = hash;
+        },
+        shareAt,
+        withinBudget: () =>
+          collateralRpcSpentMs[phase] +
+            performance.now() -
+            started +
+            rpcTimeoutMs <=
+          collateralBudgetMs,
+      });
+    } finally {
+      if (lastProbed) {
+        collateralAttempted.add(row.id);
+        feeObservationCursor.delete(cursorKey);
+        if (feeObservationCursor.size >= MAX_FEE_LOCATOR_CURSORS) {
+          const oldest = feeObservationCursor.keys().next();
+          if (!oldest.done) feeObservationCursor.delete(oldest.value);
+        }
+        feeObservationCursor.set(cursorKey, lastProbed);
+      }
+      collateralRpcSpentMs[phase] += performance.now() - started;
+    }
+  };
+  const finishCollateral = (
+    row: LimitlessAccrualOrderRow,
+    reason: string,
+    retryable: boolean,
+  ) => {
+    skipped += 1;
+    attempts.push({
+      venue: LIMITLESS_VENUE,
+      feeProgram: LIMITLESS_COLLATERAL_ATTEMPT_PROGRAM,
+      orderId: row.id,
+      venueOrderId: row.venue_order_id,
+      status: retryable ? "retry" : "skipped",
+      reason,
+      // Unknown evidence can become available independently of this worker's
+      // polling count. Keep the existing spaced schedule, not a permanent skip.
+      consumeAttempt: !retryable,
+      nextAttemptAt: retryable
+        ? new Date(
+            Date.now() +
+              (reason === COLLATERAL_RPC_BUDGET_EXHAUSTED &&
+              !collateralAttempted.has(row.id)
+                ? COLLATERAL_CAPACITY_RETRY_MS
+                : BACKFILL_RETRY_DELAY_MS),
+          )
+        : null,
+    });
+  };
   const buildOnchainResultFromStatusTx = async (
     row: LimitlessAccrualOrderRow,
     status: LimitlessOrderStatusItem,
     shareBps: number,
   ): Promise<LimitlessAccrualBuildResult | null> => {
-    const txHash = extractTxHashFromLimitlessStatus(status);
+    // Unknown collateral/legacy provenance cannot borrow another fill from
+    // a provider-supplied hash. Enrichment into the frozen lane can wake it.
+    const orderPayload = await recoverLegacyFeeOrderPayload(pool, row);
+    if (!hasTrustedLimitlessLegacyFeeRate(orderPayload)) return null;
+    const txHash =
+      extractTxHashFromLimitlessStatus(status) ?? normalizeHash(row.order_hash);
     if (!txHash) return null;
-    baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453);
+    baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453, undefined, {
+      timeoutMs: env.baseRpcTimeoutMs,
+    });
     return buildLimitlessVenueShareAccrualResultFromReceipt({
       provider: baseProvider,
       order: {
         ...row,
+        order_payload: orderPayload,
         order_hash: txHash,
       },
       config: {
@@ -1043,7 +1685,7 @@ export async function backfillLimitlessVenueShareAccruals(
   };
   for (const row of rows) {
     const shareBps = clampShareBps(row.fee_share_bps);
-    if (shareBps <= 0) {
+    if (shareBps <= 0 && !collateralFeeContext(row.order_payload)) {
       skipped += 1;
       attempts.push({
         venue: LIMITLESS_VENUE,
@@ -1058,6 +1700,42 @@ export async function backfillLimitlessVenueShareAccruals(
     }
 
     const storedStatus = buildStoredLimitlessOrderStatusItem(row);
+    if (collateralFeeContext(row.order_payload)) {
+      // GTC can settle in multiple transactions. The provider does not give
+      // this worker a complete fill journal. Never count only the last fill.
+      if (row.order_type !== "FOK") {
+        finishCollateral(
+          row,
+          "Limitless collateral GTC fee reconciliation unsupported",
+          false,
+        );
+        continue;
+      }
+      const checked = new Set<string>();
+      const proof = await resolveCollateral(
+        row,
+        shareBps,
+        [
+          row.order_hash,
+          storedStatus && extractTxHashFromLimitlessStatus(storedStatus),
+          ...readLimitlessHistoryTxHashes(row.order_payload),
+        ],
+        checked,
+        "stored",
+      );
+      if (proof.accrual) verifiedCollateral.push(proof.accrual);
+      else if (proof.attempt && !proof.attempt.retryable)
+        finishCollateral(row, proof.attempt.reason, false);
+      else {
+        collateralChecks.set(row.id, {
+          checked,
+          reason:
+            proof.attempt?.reason ?? "Limitless collateral fee receipt pending",
+        });
+        rowsNeedingStatus.push(row);
+      }
+      continue;
+    }
     if (!storedStatus) {
       rowsNeedingStatus.push(row);
       continue;
@@ -1119,26 +1797,95 @@ export async function backfillLimitlessVenueShareAccruals(
     }
   }
 
-  const statuses = await fetchLimitlessOrderStatusBatch(
+  const { statuses, unavailable } = await fetchLimitlessAccrualOrderStatuses(
     rowsNeedingStatus.map((row) => ({
       orderId: row.venue_order_id,
       clientOrderId: row.client_order_id,
     })),
+    options.fetchStatusBatch,
   );
   for (const row of rowsNeedingStatus) {
-    const status =
-      statuses.get(row.venue_order_id) ??
-      (row.client_order_id
-        ? statuses.get(`client:${row.client_order_id}`)
-        : null);
+    const providerStatus = statuses.get(row.venue_order_id);
+    const clientStatus = row.client_order_id
+      ? statuses.get(`client:${row.client_order_id}`)
+      : null;
+    const status = providerStatus ?? clientStatus;
+    const pendingCollateral = collateralChecks.get(row.id);
+    if (pendingCollateral) {
+      const exactStatusHashes = [providerStatus, clientStatus]
+        .flatMap((item) =>
+          item &&
+          item.orderId === row.venue_order_id &&
+          (!row.client_order_id ||
+            !item.clientOrderId ||
+            row.client_order_id === item.clientOrderId)
+            ? [extractTxHashFromLimitlessStatus(item)]
+            : [],
+        )
+        .filter((hash): hash is string => hash !== null);
+      const alreadyStored = new Set([
+        normalizeHash(row.order_hash),
+        ...readLimitlessHistoryTxHashes(row.order_payload),
+      ]);
+      await retainLimitlessFeeReceiptLocators(pool, {
+        orderId: row.id,
+        userId: row.user_id,
+        venueOrderId: row.venue_order_id,
+        hashes: exactStatusHashes.filter((hash) => !alreadyStored.has(hash)),
+      });
+      const historical = await fetchLimitlessHistoryReceiptLocators(pool, {
+        userId: row.user_id,
+        walletAddress: row.wallet_address,
+        tokenId: row.token_id,
+        side: row.side,
+        clientOrderId: row.client_order_id,
+        providerOrderId: row.venue_order_id,
+      });
+      const freshTxs = exactStatusHashes.filter(
+        (hash) => !pendingCollateral.checked.has(hash),
+      );
+      for (const hash of historical)
+        if (!pendingCollateral.checked.has(hash) && !freshTxs.includes(hash))
+          freshTxs.push(hash);
+      if (!freshTxs.length) {
+        finishCollateral(
+          row,
+          unavailable
+            ? "Limitless collateral fee status lookup unavailable"
+            : pendingCollateral.reason,
+          true,
+        );
+      } else {
+        const proof = await resolveCollateral(
+          row,
+          clampShareBps(row.fee_share_bps),
+          freshTxs,
+          pendingCollateral.checked,
+          "fresh",
+        );
+        if (proof.accrual) verifiedCollateral.push(proof.accrual);
+        else
+          finishCollateral(
+            row,
+            proof.attempt?.reason ?? pendingCollateral.reason,
+            proof.attempt?.retryable ?? true,
+          );
+      }
+      continue;
+    }
     if (!status) {
       const shareBps = clampShareBps(row.fee_share_bps);
       if (isFilledOrderWithKnownTx(row) && shareBps > 0) {
-        baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453);
+        baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453, undefined, {
+          timeoutMs: env.baseRpcTimeoutMs,
+        });
         const onchainResult =
           await buildLimitlessVenueShareAccrualResultFromReceipt({
             provider: baseProvider,
-            order: row,
+            order: {
+              ...row,
+              order_payload: await recoverLegacyFeeOrderPayload(pool, row),
+            },
             config: {
               ...config,
               active: true,
@@ -1177,6 +1924,7 @@ export async function backfillLimitlessVenueShareAccruals(
         venueOrderId: row.venue_order_id,
         status: "retry",
         reason: "Limitless order status not found",
+        consumeAttempt: !unavailable,
         nextAttemptAt: new Date(Date.now() + BACKFILL_RETRY_DELAY_MS),
       });
       continue;
@@ -1231,10 +1979,31 @@ export async function backfillLimitlessVenueShareAccruals(
     accruals.push(accrual);
   }
   const upsert = await upsertVenueFeeAccruals(pool, accruals);
+  const collateralUpsert = await insertVerifiedLimitlessCollateralAccruals(
+    pool,
+    verifiedCollateral,
+  );
+  const insertedOrders = new Set(collateralUpsert.orderIds);
+  const resolvedOrders = new Set(verifiedCollateral.map((fee) => fee.orderId));
+  for (const row of rows) {
+    if (!insertedOrders.has(row.id) && resolvedOrders.has(row.id))
+      finishCollateral(
+        row,
+        "Limitless collateral debit already accounted for",
+        false,
+      );
+  }
   const receivableUpsert = await upsertLimitlessContractFeeReceivables(
     pool,
     receivables,
   );
+  if (collateralUpsert.upserted > 0) {
+    await clearVenueFeeBackfillAttempts(pool, {
+      venue: LIMITLESS_VENUE,
+      feeProgram: LIMITLESS_COLLATERAL_ATTEMPT_PROGRAM,
+      orderIds: collateralUpsert.orderIds,
+    });
+  }
   if (upsert.upserted > 0 || receivableUpsert.upserted > 0) {
     await clearVenueFeeBackfillAttempts(pool, {
       venue: LIMITLESS_VENUE,
@@ -1257,7 +2026,8 @@ export async function backfillLimitlessVenueShareAccruals(
   });
   return {
     checked: rows.length,
-    upserted: upsert.upserted + receivableUpsert.upserted,
+    upserted:
+      upsert.upserted + collateralUpsert.upserted + receivableUpsert.upserted,
     skipped,
   };
 }
@@ -1321,7 +2091,10 @@ export async function upsertLimitlessVenueShareAccrualFromOrderPayload(
 
 export async function verifyLimitlessVenueShareAccruals(
   pool: Pool,
-  options: { limit?: number } = {},
+  options: {
+    limit?: number;
+    fetchStatuses?: typeof fetchLimitlessAccrualOrderStatuses;
+  } = {},
 ): Promise<{
   checked: number;
   verified: number;
@@ -1340,30 +2113,43 @@ export async function verifyLimitlessVenueShareAccruals(
       where a.venue = 'limitless'
         and a.fee_program = 'venue_share'
         and a.status = 'accrued'
+        and (a.verification_error is distinct from $3 or
+             a.updated_at <= now() - ($4::int * interval '1 millisecond'))
         and a.venue_order_id is not null
         and a.venue_order_id ~* $1
       order by a.filled_at asc, a.created_at asc
       limit $2
     `,
-    [UUID_RE.source, limit],
+    [
+      UUID_RE.source,
+      limit,
+      LIMITLESS_USD_FEE_RECEIPT_REQUIRED,
+      BACKFILL_RETRY_DELAY_MS,
+    ],
   );
   if (!rows.length) return { checked: 0, verified: 0, failed: 0, skipped: 0 };
 
-  const statuses = await fetchLimitlessOrderStatusBatch(
+  const { statuses } = await (
+    options.fetchStatuses ?? fetchLimitlessAccrualOrderStatuses
+  )(
     rows
       .filter((row) => {
         const receiptTxHash =
           normalizeHash(row.tx_hash) ?? normalizeHash(row.order_hash);
         return !receiptTxHash || !row.side;
       })
-      .filter(
-        (row) =>
-          !buildStoredLimitlessOrderStatusItem({
-            venue_order_id: row.venue_order_id ?? "",
-            client_order_id: null,
-            order_payload: row.order_payload,
-          }),
-      )
+      .filter((row) => {
+        const stored = buildStoredLimitlessOrderStatusItem({
+          venue_order_id: row.venue_order_id ?? "",
+          client_order_id: null,
+          order_payload: row.order_payload,
+        });
+        return (
+          !stored ||
+          (!extractTxHashFromLimitlessStatus(stored) &&
+            !hasTrustedLimitlessLegacyFeeRate(row.order_payload))
+        );
+      })
       .map((row) => row.venue_order_id)
       .filter((orderId): orderId is string => Boolean(orderId))
       .map((orderId) => ({ orderId })),
@@ -1374,12 +2160,65 @@ export async function verifyLimitlessVenueShareAccruals(
   let failed = 0;
   let skipped = 0;
   let baseProvider: ethers.JsonRpcProvider | null = null;
+  const deferUnknownReceipt = (id: string) =>
+    pool.query(
+      `update venue_fee_accruals
+    set verification_error=$2, updated_at=now() where id=$1 and status='accrued'`,
+      [id, LIMITLESS_USD_FEE_RECEIPT_REQUIRED],
+    );
   for (const row of rows) {
     checked += 1;
+    const storedStatus = row.venue_order_id
+      ? buildStoredLimitlessOrderStatusItem({
+          venue_order_id: row.venue_order_id,
+          client_order_id: null,
+          order_payload: row.order_payload,
+        })
+      : null;
+    const remoteStatus = row.venue_order_id
+      ? statuses.get(row.venue_order_id)
+      : null;
+    const status = storedStatus ?? remoteStatus;
+    const data = status ? extractStatusData(status.payload) : null;
+    const execution = data ? extractExecutionRecord(data) : null;
+    // This verifier is for the legacy program's provisional rows. New
+    // collateral rows go directly to `verified` from the receipt-first lane.
+    if (collateralFeeContext(row.order_payload)) {
+      failed += 1;
+      await pool.query(
+        `update venue_fee_accruals
+        set status = 'failed', verification_error = 'Limitless collateral fee requires receipt-first reconciliation', updated_at = now()
+        where id = $1 and status = 'accrued'`,
+        [row.id],
+      );
+      continue;
+    }
+    const orderPayload = await recoverLegacyFeeOrderPayload(pool, row);
+    const trustedLegacy = hasTrustedLimitlessLegacyFeeRate(orderPayload);
+    const needsExactReceipt = !!(
+      data &&
+      execution &&
+      (rawDigits(extractTotalsRaw(execution)?.usdFee) ?? 0n) > 0n &&
+      (statusNeedsCollateralProof(data, execution) || !trustedLegacy)
+    );
+    if (needsExactReceipt && !trustedLegacy) {
+      skipped += 1;
+      await deferUnknownReceipt(row.id);
+      continue;
+    }
     const receiptTxHash =
-      normalizeHash(row.tx_hash) ?? normalizeHash(row.order_hash);
+      normalizeHash(row.tx_hash) ??
+      normalizeHash(row.order_hash) ??
+      (needsExactReceipt && storedStatus
+        ? extractTxHashFromLimitlessStatus(storedStatus)
+        : null) ??
+      (needsExactReceipt && remoteStatus
+        ? extractTxHashFromLimitlessStatus(remoteStatus)
+        : null);
     if (receiptTxHash && row.side) {
-      baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453);
+      baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453, undefined, {
+        timeoutMs: env.baseRpcTimeoutMs,
+      });
       const receiptResult =
         await buildLimitlessVenueShareAccrualResultFromReceipt({
           provider: baseProvider,
@@ -1395,6 +2234,7 @@ export async function verifyLimitlessVenueShareAccruals(
             filled_at: row.filled_at,
             last_update: row.last_update,
             posted_at: row.posted_at,
+            order_payload: orderPayload,
           },
           config: {
             active: true,
@@ -1457,7 +2297,12 @@ export async function verifyLimitlessVenueShareAccruals(
         );
         continue;
       }
-      if (receiptResult.attempt && !receiptResult.attempt.retryable) {
+      if (
+        receiptResult.attempt &&
+        (!receiptResult.attempt.retryable ||
+          receiptResult.attempt.reason ===
+            "Limitless collateral fee provenance missing")
+      ) {
         failed += 1;
         await pool.query(
           `
@@ -1472,19 +2317,14 @@ export async function verifyLimitlessVenueShareAccruals(
         continue;
       }
       skipped += 1;
+      if (needsExactReceipt) await deferUnknownReceipt(row.id);
       continue;
     }
-    const orderId = row.venue_order_id;
-    const storedStatus = orderId
-      ? buildStoredLimitlessOrderStatusItem({
-          venue_order_id: orderId,
-          client_order_id: null,
-          order_payload: row.order_payload,
-        })
-      : null;
-    const status = storedStatus ?? (orderId ? statuses.get(orderId) : null);
-    const data = status ? extractStatusData(status.payload) : null;
-    const execution = data ? extractExecutionRecord(data) : null;
+    if (needsExactReceipt) {
+      skipped += 1;
+      await deferUnknownReceipt(row.id);
+      continue;
+    }
     const executionStatus = execution ? settlementStatus(execution) : null;
     if (!status || !data || !execution || !executionStatus) {
       skipped += 1;

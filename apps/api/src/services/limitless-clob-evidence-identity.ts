@@ -8,12 +8,85 @@ import {
 } from "./limitless-order-contract.js";
 import { resolveLimitlessMarketExchangeAddress } from "./limitless-market-contracts.js";
 
+export const LIMITLESS_COLLATERAL_ATTEMPT_PROGRAM = "venue_share_collateral";
+export const LIMITLESS_RECEIPT_LOCATOR_HASHES_KEY =
+  "_hunchLimitlessReceiptLocatorHashes";
+
 export type LimitlessClobSubmissionContext = {
   contextVersion: 1;
   chainId: typeof LIMITLESS_CLOB_CHAIN_ID;
   exchangeAddress: string;
   orderHash: string;
+  collateralFeeModule?: string;
 };
+
+export type RetainedLimitlessClobSubmission = {
+  context: LimitlessClobSubmissionContext;
+  order: Record<string, string>;
+  /** Resolved by the server before dispatch, for scoped history reads only. */
+  providerOwnerId?: number;
+  providerMarketSlug?: string;
+};
+
+export function normalizeLimitlessReceiptLocatorHashes(
+  values: readonly unknown[],
+): string[] {
+  return [
+    ...new Set(
+      values.flatMap((value) =>
+        typeof value === "string" && /^0x[0-9a-f]{64}$/i.test(value)
+          ? [value.toLowerCase()]
+          : [],
+      ),
+    ),
+  ];
+}
+
+/** Match these only against finalized receipts for the frozen order hash. */
+export function readLimitlessHistoryTxHashes(payload: unknown): string[] {
+  if (!isRecord(payload)) return [];
+  const history = isRecord(payload.history) ? payload.history : {};
+  const retained = payload._hunchLimitlessHistoryTxHashes;
+  return normalizeLimitlessReceiptLocatorHashes([
+    ...(Array.isArray(retained) ? retained.slice(0, 6) : []),
+    history.txHash,
+    history.transactionHash,
+    history.tx_hash,
+    ...limitlessClobSubmittedPayloads(payload).flatMap((record) => {
+      const recovered = record[LIMITLESS_RECEIPT_LOCATOR_HASHES_KEY];
+      const direct = isRecord(record._hunchLimitlessDirectLocator)
+        ? record._hunchLimitlessDirectLocator
+        : null;
+      return [
+        ...(Array.isArray(recovered) ? recovered.slice(0, 8) : []),
+        direct?.txHash,
+        ...(Array.isArray(direct?.txHashes) ? direct.txHashes.slice(0, 8) : []),
+      ];
+    }),
+  ]);
+}
+
+/** Recovery needs venue status/receipt locators, not signatures echoed in
+ * the response. This also covers nested result/order arrays. */
+export function withoutLimitlessRecoverySignatures(
+  value: unknown,
+  depth = 0,
+): unknown {
+  if (depth >= 16 && (isRecord(value) || Array.isArray(value))) return null;
+  if (Array.isArray(value))
+    return value.map((entry) =>
+      withoutLimitlessRecoverySignatures(entry, depth + 1),
+    );
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !/^(?:order_?)?signatures?$/i.test(key))
+      .map(([key, entry]) => [
+        key,
+        withoutLimitlessRecoverySignatures(entry, depth + 1),
+      ]),
+  );
+}
 
 function orderHash(exchangeAddress: string, order: Record<string, unknown>) {
   return TypedDataEncoder.hash(
@@ -27,11 +100,31 @@ function orderHash(exchangeAddress: string, order: Record<string, unknown>) {
     order,
   );
 }
+export function directLimitlessClobClientOrderId(
+  order: Record<string, unknown>,
+): string | null {
+  try {
+    // Domain-free so the exact submitted order remains findable even if
+    // today's market metadata changed. EIP-712 ignores unsigned extras and
+    // normalizes equivalent uint/address encodings.
+    const structHash = TypedDataEncoder.hashStruct(
+      "Order",
+      {
+        Order: LIMITLESS_CLOB_ORDER_TYPES.Order.map((field) => ({ ...field })),
+      },
+      order,
+    );
+    return `hunch-direct-${structHash.slice(2, 34)}`;
+  } catch {
+    return null;
+  }
+}
 
 /** Call only with the server-resolved exchange actually used to sign this order. */
 export function buildLimitlessClobSubmissionContext(
   exchangeAddress: string,
   signedOrder: Record<string, unknown>,
+  collateralFeeModule?: string,
 ): LimitlessClobSubmissionContext {
   const address = getAddress(exchangeAddress);
   return {
@@ -39,7 +132,72 @@ export function buildLimitlessClobSubmissionContext(
     chainId: LIMITLESS_CLOB_CHAIN_ID,
     exchangeAddress: address,
     orderHash: orderHash(address, signedOrder),
+    ...(collateralFeeModule
+      ? { collateralFeeModule: getAddress(collateralFeeModule) }
+      : {}),
   };
+}
+
+/** Durable recovery keeps the signed fields and server domain, never the
+ * signature itself or arbitrary request/provider properties. */
+export function readRetainedLimitlessClobSubmission(
+  value: unknown,
+  identity: { walletAddress: string; tokenId: string; side: "BUY" | "SELL" },
+): RetainedLimitlessClobSubmission | null {
+  if (!isRecord(value) || !isRecord(value.order) || !isRecord(value.context))
+    return null;
+  const { context } = value;
+  if (
+    context.contextVersion !== 1 ||
+    context.chainId !== LIMITLESS_CLOB_CHAIN_ID ||
+    typeof context.exchangeAddress !== "string" ||
+    typeof context.orderHash !== "string" ||
+    (Object.hasOwn(context, "collateralFeeModule") &&
+      typeof context.collateralFeeModule !== "string")
+  )
+    return null;
+  try {
+    const order: Record<string, string> = {};
+    for (const { name } of LIMITLESS_CLOB_ORDER_TYPES.Order) {
+      const field = value.order[name];
+      if (
+        typeof field !== "string" &&
+        typeof field !== "number" &&
+        typeof field !== "bigint"
+      )
+        return null;
+      order[name] = String(field);
+    }
+    const wallet = getAddress(identity.walletAddress);
+    if (
+      getAddress(order.maker) !== wallet ||
+      getAddress(order.signer) !== wallet ||
+      BigInt(order.tokenId) !==
+        BigInt(identity.tokenId.replace(/^limitless:/, "")) ||
+      BigInt(order.side) !== (identity.side === "BUY" ? 0n : 1n)
+    )
+      return null;
+    const module =
+      typeof context.collateralFeeModule === "string"
+        ? getAddress(context.collateralFeeModule)
+        : undefined;
+    const expected = buildLimitlessClobSubmissionContext(
+      context.exchangeAddress,
+      order,
+      module,
+    );
+    if (
+      expected.orderHash !== context.orderHash.toLowerCase() ||
+      (module &&
+        (module === expected.exchangeAddress ||
+          BigInt(module) === 0n ||
+          BigInt(order.feeRateBps) !== 0n))
+    )
+      return null;
+    return { order, context: expected };
+  } catch {
+    return null;
+  }
 }
 
 export function limitlessClobSubmittedPayloads(

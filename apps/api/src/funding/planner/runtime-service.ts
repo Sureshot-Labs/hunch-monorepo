@@ -20,10 +20,17 @@ import {
   stableWalletOpaqueId,
 } from "../../account-value/canonical.js";
 import {
+  findTradeMarketById,
   resolveTradeMarketByRef,
   resolveTradeMarketOutcomeIdentity,
   type ApiTradeMarket,
 } from "../../services/api-trading-market-repo.js";
+import {
+  fetchLimitlessClobMarket,
+  marketLimitlessFeePolicy,
+  verifyLimitlessFeeModuleAllowance,
+} from "../../services/limitless-clob-fee-runtime.js";
+import { assertLimitlessTradeFundingFeeAllowance } from "./limitless-fee-preflight.js";
 import {
   canonicalJsonHash,
   fundingSubjectLookupHmac,
@@ -264,7 +271,10 @@ export class FundingPlanningRuntime {
       undefined,
       options.unreadyInspectionReuseMs,
     );
-    this.actionRuntime = new FundingOperationActionRuntime(db);
+    this.actionRuntime = new FundingOperationActionRuntime(db, {
+      verifyTradeFundingFeeAllowance: (operation) =>
+        this.verifyTradeFundingFeeAllowance(operation),
+    });
     this.withdrawalRuntime = new WithdrawalDestinationRuntime(db);
     this.opportunisticPreparationReconcileTimeoutMs =
       options.opportunisticPreparationReconcileTimeoutMs ??
@@ -999,6 +1009,17 @@ export class FundingPlanningRuntime {
     return projection;
   }
 
+  private verifyTradeFundingFeeAllowance(
+    operation: Parameters<typeof assertLimitlessTradeFundingFeeAllowance>[0],
+  ) {
+    return assertLimitlessTradeFundingFeeAllowance(operation, {
+      loadMarket: (id) => findTradeMarketById(this.db, id),
+      loadFeePolicy: async (slug) =>
+        marketLimitlessFeePolicy(await fetchLimitlessClobMarket(slug)),
+      verifyAllowance: verifyLimitlessFeeModuleAllowance,
+    });
+  }
+
   private async quoteUsing(
     userId: string,
     request: FundingQuoteRequest,
@@ -1012,29 +1033,36 @@ export class FundingPlanningRuntime {
     return new FundingQuoteService({
       db: this.db,
       planningStore: this.planningStore,
-      verifySourceCapacity: (plan) =>
-        checkQuoteSourceReservations(this.db, userId, plan, async (sources) => {
-          // A same-component hold may have arrived after the account snapshot.
-          // Recollect once only when the snapshots visibly disagree.
-          const needsRefresh = sources.some(
-            ({ reservation, projectedHeldRaw }) =>
-              BigInt(projectedHeldRaw) >
-              BigInt(
-                account.cashAvailability.components.find(
-                  (entry) => entry.componentId === reservation.componentId,
-                )?.reservedRaw ?? "0",
-              ),
-          );
-          const quoteAccount = needsRefresh
-            ? await buildAccountValueReadModel({ pool: this.db, userId })
-            : account;
-          assertSharedFundingSourceCapacity(
-            quoteAccount,
-            userId,
-            sources,
-            sourceCapacityOptions(plan),
-          );
-        }),
+      verifySourceCapacity: async (plan) => {
+        await this.verifyTradeFundingFeeAllowance(plan.operation);
+        await checkQuoteSourceReservations(
+          this.db,
+          userId,
+          plan,
+          async (sources) => {
+            // A same-component hold may have arrived after the account snapshot.
+            // Recollect once only when the snapshots visibly disagree.
+            const needsRefresh = sources.some(
+              ({ reservation, projectedHeldRaw }) =>
+                BigInt(projectedHeldRaw) >
+                BigInt(
+                  account.cashAvailability.components.find(
+                    (entry) => entry.componentId === reservation.componentId,
+                  )?.reservedRaw ?? "0",
+                ),
+            );
+            const quoteAccount = needsRefresh
+              ? await buildAccountValueReadModel({ pool: this.db, userId })
+              : account;
+            assertSharedFundingSourceCapacity(
+              quoteAccount,
+              userId,
+              sources,
+              sourceCapacityOptions(plan),
+            );
+          },
+        );
+      },
       revalidateWithdrawalRecipient: async (ownerId, recipientId) => {
         await this.withdrawalRuntime.resolve(ownerId, recipientId);
       },
@@ -1122,6 +1150,13 @@ export class FundingPlanningRuntime {
       ownershipRevision: account.ownershipEvidenceRevision,
       ...(options.commitScope ? { commitScope: options.commitScope } : {}),
     });
+    // Let the repository check idempotency/consent for a previously consumed
+    // quote. Current allowance is only a prerequisite for a new transfer.
+    if (!operation.quote.consumedAt) {
+      await this.verifyTradeFundingFeeAllowance(
+        operation.quote.planSnapshot.operation,
+      );
+    }
     return { operation, service };
   }
 
