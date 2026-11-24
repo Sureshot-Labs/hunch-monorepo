@@ -26,24 +26,14 @@ maximum exposure if its raw key is compromised.
   Store a JSON object with **only** `HUNCH_HOUSE_TRADER_PRIVATE_KEY`. Keep it
   out of the repo, common secret bundles, and all `.env` files.
 - The worker reads this bundle directly from Secrets Manager at startup with
-  the common Secrets Manager client and a **dedicated workload identity**.
-  No wallet key file or host staging script is used, including after reboot.
-  The worker keeps the private key in memory, not in Docker config or in the
-  shared environment. The expected public controller must match exactly.
-- The normal EC2 instance profile, API, and other workloads must be denied
-  `secretsmanager:GetSecretValue` and `secretsmanager:BatchGetSecretValue`
-  on this secret (including the actual ARN suffix). Restrict the dedicated
-  role to the exact secret and the common bundles required by this worker;
-  allow the corresponding KMS keys only as needed through Secrets Manager.
-  A separate `sts:AssumeRole` target that all EC2 workloads can assume is not
-  isolation. Docker/host root can still read process memory on the same host.
+  the same client and EC2 instance role as the other production workers.
+  No wallet key file, staging script, or new AWS credentials are needed.
+  The worker keeps the key in memory and checks that it matches the expected
+  public controller. A separate bundle keeps it out of other workers' startup
+  config, but is not an IAM boundary: workloads with the same role can read it.
 - The only House Trader setting in `/opt/hunch/.env` is
   `HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER` (the public address derived
-  offline). The loader accepts the standard AWS container credentials URI
-  (automatically injected by ECS tasks) or an authenticated workload-scoped
-  credentials endpoint for Compose. Plain Compose on EC2 does not provide a
-  per-container AWS role by itself. Without workload credentials, the check
-  stops before trying the host instance role, even if it can read other bundles.
+  offline).
 
 The worker has no automatic restart policy. Never switch keys for an
 existing funded controller or to recover an in-flight operation. Compose

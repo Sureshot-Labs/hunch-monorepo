@@ -19,7 +19,7 @@ try {
   if (process.argv.length > 2 && !checkConfig)
     throw new Error("unknown_house_trader_argument");
   const { expected } = readHouseTraderPublicSettings(process.env);
-  stage = "workload_key";
+  stage = "aws_key";
   const { privateKey, controller } = await loadHouseTraderKey(expected);
   if (checkConfig) {
     console.info(

@@ -5,9 +5,9 @@ import path from "node:path";
 
 import {
   buildSecretBundles,
+  getAwsSecretJson,
   loadRuntimeSecrets,
   parseSecretBundleRefs,
-  readAwsWorkloadSecret,
 } from "./secrets.js";
 
 type Test = {
@@ -43,77 +43,57 @@ test("parseSecretBundleRefs accepts aws-sm and bare secret ids", () => {
   ]);
 });
 
-test("workload-only secret does not use static credentials or IMDS", async () => {
+test("direct secret read uses the normal EC2 role without injecting keys", async () => {
   const envBefore = snapshotEnv();
   try {
     process.env.AWS_REGION = "eu-north-1";
-    process.env.AWS_ACCESS_KEY_ID = "shared-key";
-    process.env.AWS_SECRET_ACCESS_KEY = "shared-secret";
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
     delete process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
     delete process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
-    let attempts = 0;
-    await assert.rejects(
-      readAwsWorkloadSecret("/dedicated", {
-        fetchImpl: async () => {
-          attempts += 1;
-          throw new Error("must not fall back");
-        },
-      }),
-      /Workload credentials are unavailable/,
-    );
-    assert.equal(attempts, 0);
-  } finally {
-    restoreEnv(envBefore);
-  }
-});
-
-test("workload signer reads only the named AWS secret and leaves process env unchanged", async () => {
-  const envBefore = snapshotEnv();
-  try {
-    process.env.AWS_REGION = "eu-north-1";
-    process.env.AWS_ACCESS_KEY_ID = "shared-key";
-    process.env.AWS_SECRET_ACCESS_KEY = "shared-secret";
-    delete process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
-    process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI = "/v2/credentials/test";
-    delete process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE;
-    delete process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN;
-    delete process.env.TEST_WORKLOAD_KEY;
+    delete process.env.AWS_EC2_METADATA_SERVICE_ENDPOINT;
+    delete process.env.TEST_DIRECT_SECRET;
+    const metadata = "http://169.254.169.254/latest";
+    const rolePath = `${metadata}/meta-data/iam/security-credentials/`;
+    const secretId = "/hunch/prod/house-trader";
     let reads = 0;
     const fetchImpl = async (input: string | URL, init?: RequestInit) => {
-      assert.ok(init?.signal);
-      if (String(input) === "http://169.254.170.2/v2/credentials/test")
+      const url = String(input);
+      const headers = new Headers(init?.headers);
+      if (url === `${metadata}/api/token`) {
+        assert.equal(init?.method, "PUT");
+        return new Response("test-imds-token");
+      }
+      if (url === rolePath || url === `${rolePath}test-ec2-role`) {
+        assert.equal(
+          headers.get("x-aws-ec2-metadata-token"),
+          "test-imds-token",
+        );
+        if (url === rolePath) return new Response("test-ec2-role");
         return Response.json({
-          AccessKeyId: "workload-key",
-          SecretAccessKey: "workload-secret",
-          Token: "workload-session",
+          AccessKeyId: "ec2-role-key",
+          SecretAccessKey: "ec2-role-secret",
+          Token: "ec2-role-session",
         });
+      }
       reads++;
-      assert.equal(
-        String(input),
-        "https://secretsmanager.eu-north-1.amazonaws.com/",
-      );
+      assert.equal(url, "https://secretsmanager.eu-north-1.amazonaws.com/");
       assert.match(
-        new Headers(init.headers).get("authorization") ?? "",
-        /Credential=workload-key\//,
+        headers.get("authorization") ?? "",
+        /Credential=ec2-role-key\//,
       );
-      assert.equal(
-        new Headers(init.headers).get("x-amz-security-token"),
-        "workload-session",
-      );
-      assert.deepEqual(JSON.parse(String(init.body)), {
-        SecretId: "/dedicated",
-      });
+      assert.equal(headers.get("x-amz-security-token"), "ec2-role-session");
+      assert.deepEqual(JSON.parse(String(init?.body)), { SecretId: secretId });
       return Response.json({
-        SecretString: JSON.stringify({ TEST_WORKLOAD_KEY: "test-value" }),
+        SecretString: JSON.stringify({ TEST_DIRECT_SECRET: "test-value" }),
       });
     };
-    assert.deepEqual(await readAwsWorkloadSecret("/dedicated", { fetchImpl }), {
-      TEST_WORKLOAD_KEY: "test-value",
+    assert.deepEqual(await getAwsSecretJson(secretId, { fetchImpl }), {
+      TEST_DIRECT_SECRET: "test-value",
     });
     assert.equal(reads, 1);
-    assert.equal(process.env.TEST_WORKLOAD_KEY, undefined);
     await assert.rejects(
-      readAwsWorkloadSecret("/dedicated", {
+      getAwsSecretJson(secretId, {
         fetchImpl: async (input, init) =>
           String(input).includes("secretsmanager")
             ? Response.json(
@@ -124,22 +104,7 @@ test("workload signer reads only the named AWS secret and leaves process env unc
       }),
       /AccessDeniedException/,
     );
-    assert.equal(process.env.TEST_WORKLOAD_KEY, undefined);
-    await assert.rejects(
-      readAwsWorkloadSecret("/dedicated", {
-        fetchImpl: async (input) => {
-          assert.equal(
-            String(input),
-            "http://169.254.170.2/v2/credentials/test",
-          );
-          return Response.json({
-            AccessKeyId: "static-key",
-            SecretAccessKey: "static-secret",
-          });
-        },
-      }),
-      /Workload credentials are unavailable/,
-    );
+    assert.equal(process.env.TEST_DIRECT_SECRET, undefined);
   } finally {
     restoreEnv(envBefore);
   }

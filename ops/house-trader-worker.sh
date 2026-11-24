@@ -39,8 +39,8 @@ if [[ ! "$image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 69
 fi
 
-HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" run --rm "${compose_worker_flags[@]}" "$worker" \
-  node apps/api/dist/house-trader-worker.js --check-config
+HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" run --rm -T "${compose_worker_flags[@]}" "$worker" \
+  /bin/sh /app/ops/run-js-runtime.sh apps/api/dist/house-trader-worker.js --check-config </dev/null
 
 if [[ "$1" == start ]]; then
   if [[ "$(running_api_image)" != "$image" ]]; then

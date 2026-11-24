@@ -321,10 +321,6 @@ services:
       HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER: ${HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER:-}
       AWS_REGION: ${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-north-1}}
-      # Workload identity, not the shared EC2 instance profile. ECS injects
-      # the relative URI itself; Compose can use a scoped credential endpoint.
-      AWS_CONTAINER_CREDENTIALS_FULL_URI: ${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}
-      AWS_CONTAINER_AUTHORIZATION_TOKEN: ${AWS_CONTAINER_AUTHORIZATION_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
