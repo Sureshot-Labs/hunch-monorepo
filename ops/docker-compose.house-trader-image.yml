@@ -1,0 +1,3 @@
+services:
+  house-trader-worker:
+    image: ${HUNCH_BACKEND_IMAGE}

@@ -13,6 +13,8 @@ services:
     image: ${HUNCH_BACKEND_IMAGE}
   finance-worker:
     image: ${HUNCH_BACKEND_IMAGE}
+  house-trader-worker:
+    image: ${HUNCH_BACKEND_IMAGE}
   signal-bot:
     image: ${HUNCH_BACKEND_IMAGE}
   social-media-worker:

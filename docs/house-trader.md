@@ -16,10 +16,12 @@ maximum exposure if its raw key is compromised.
   process. Local tests do not attest provider allowlists, EIP-1271 verification
   on the live deployed wallet, live relayer credentials, or execution quality.
 
-## Pilot configuration (not automatic rollout)
+## Production setup and pilot
 
-- Normal production Compose does **not** start the `house-trader` profile.
-  Start/Pause for trading is controlled in the admin panel.
+- Normal production deploys start the House Trader worker on the backend
+  release image. Docker restarts it after a daemon restart or reboot unless it
+  was explicitly stopped. This does not create an account or enable trading.
+  Create, Start/Pause, and strategy settings are controlled in the admin panel.
   The application API uses the existing common service modules; their
   bootstrap imports API config, but the trader does not sign with Privy.
 - Create `/hunch/prod/house-trader` in the same AWS region as the deployment.
@@ -35,31 +37,24 @@ maximum exposure if its raw key is compromised.
   `HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER` (the public address derived
   offline).
 
-The worker has no automatic restart policy. Never switch keys for an
-existing funded controller or to recover an in-flight operation. Compose
-supports standalone 1.29 and v2; its launcher uses the immutable image ID
-of the healthy running API.
-The optional worker is not in the normal deployment service list. Pause and
-stop it before subsequent backend releases with `bash ops/house-trader-worker.sh stop`.
-Starting it again automatically selects the new healthy API image; no image
-tag or environment variable needs editing.
+Never switch keys for an existing funded controller or to recover an in-flight
+operation. The worker's configuration check uses the immutable image ID of the
+healthy running API and supports standalone Compose 1.29 and v2.
 
 From the deployed backend directory, run the config check. It calls AWS to
 verify the dedicated key, prints only its public controller and status, and
-exits before opening the database or contacting Polymarket. Neither it nor
-the worker-start command downloads or builds images.
+exits before opening the database or contacting Polymarket. It does not
+restart the running worker, download images, or build them.
 
 ```bash
 bash ops/house-trader-worker.sh check
 ```
 
-Before any real run, confirm venue eligibility from the actual deployment
-environment; do not use routing to bypass access restrictions. Only then
-start just the worker explicitly:
-
-```bash
-bash ops/house-trader-worker.sh start
-```
+Before enabling trading, confirm venue eligibility from the actual deployment
+environment; do not use routing to bypass access restrictions. Use the admin
+panel to pause trading. For an emergency container stop or manual recovery,
+`bash ops/house-trader-worker.sh stop` and `start` remain available; a subsequent
+normal deploy starts the worker again without changing the saved strategy.
 
 - Finance → Trading Bot (interactive superadmin) creates the account paused.
   Setup deploys the canonical Deposit Wallet if needed and verifies its

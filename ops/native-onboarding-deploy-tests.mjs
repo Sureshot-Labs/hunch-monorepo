@@ -151,6 +151,10 @@ try {
           c.args.includes("api"),
       );
       assert.ok(started.length);
+      assert.ok(
+        started.some((c) => c.args.includes("house-trader-worker")),
+        `${script}: normal releases must include House Trader regardless of APNs selection`,
+      );
       assert.equal(
         started.some(
           (c) =>
@@ -182,10 +186,12 @@ try {
       c.args.some(
         (a) =>
           a === "hunch-native-onboarding-worker" ||
-          a === "native-onboarding-worker",
+          a === "native-onboarding-worker" ||
+          a === "hunch-house-trader-worker" ||
+          a === "house-trader-worker",
       ),
     ),
-    "explicit API-only repair must not manage native worker",
+    "explicit API-only repair must not manage unrelated workers",
   );
   checks++;
   reset("", { existing: true });

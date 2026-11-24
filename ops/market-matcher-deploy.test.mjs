@@ -15,17 +15,21 @@ function probe(script, args = [], overrides = {}) {
   const mock = `#!${process.execPath}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.CALL_LOG, JSON.stringify([require('node:path').basename(process.argv[1]), ...args]) + '\\n');
+const executable = require('node:path').basename(process.argv[1]);
+const overlay = args.some((arg) => arg.endsWith('/docker-compose.house-trader-image.yml')) ? [process.env.HUNCH_BACKEND_IMAGE] : [];
+fs.appendFileSync(process.env.CALL_LOG, JSON.stringify([executable, ...args, ...overlay]) + '\\n');
 const s = args.join(' ');
-if (require('node:path').basename(process.argv[1]) === 'ssh') {
+if (executable === 'ssh') {
   const r = require('node:child_process').spawnSync('bash', ['-c', args.at(-1)], {input:fs.readFileSync(0), stdio:['pipe', 'inherit', 'inherit']});
   process.exit(r.status ?? 1);
 }
+if (args[0] === 'compose' && args[1] === 'version' && process.env.COMPOSE_V1 === '1') process.exit(1);
 if (s.includes('accessSync') && process.env.LEGACY_IMAGE === '1') process.exit(1);
 if (s.includes('migrate.js') && process.env.MIGRATION_FAIL === '1') process.exit(1);
 if (args[0] === 'inspect') {
-  if (process.env.MISSING === '1') process.exit(1);
-  if (s.includes('com.docker.compose.service')) console.log(process.env.SERVICE || '<no value>');
+  if (process.env.MISSING === '1' || args.at(-1) === 'hunch-native-onboarding-worker') process.exit(1);
+  if (args.includes('--type') && args.at(-1) === 'hunch-api') console.log('sha256:' + 'a'.repeat(64));
+  else if (s.includes('com.docker.compose.service')) console.log(process.env.SERVICE || '<no value>');
   else if (s.includes('com.docker.compose.project')) console.log(process.env.PROJECT || '<no value>');
   else if (s.includes('.Config.Image')) console.log(process.env.IMAGE || 'hunch-backend:old');
   else if (s.includes('.Config.Cmd')) console.log(process.env.COMMAND || ' ["node","packages/config/dist/run-with-secrets.js","apps/market-matcher/dist/main.js","run"]'.trim());
@@ -172,8 +176,63 @@ for (const script of ["deploy-ec2.sh", "deploy-ec2-prebuilt.sh"]) {
         call.includes("up"),
     );
     assert.ok(composeStop.includes("market-matcher"));
+    assert.ok(composeStop.includes("house-trader-worker"));
     assert.ok(
-      composeStart.includes("api") && composeStart.includes("market-matcher"),
+      composeStart.includes("api") &&
+        composeStart.includes("market-matcher") &&
+        composeStart.includes("house-trader-worker"),
     );
   });
 }
+
+test("House Trader config check pins the healthy API image without starting the service", () => {
+  for (const v1 of [false, true]) {
+    const result = probe("house-trader-worker.sh", ["check"], {
+      COMPOSE_V1: v1 ? "1" : "0",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const checks = result.calls.filter((call) =>
+      call.includes("--check-config"),
+    );
+    assert.equal(checks.length, 1);
+    const [check] = checks;
+    assert.equal(check[0], v1 ? "docker-compose" : "docker");
+    assert.equal(check.includes("--pull"), !v1);
+    assert.ok(check.includes("--no-deps") && check.includes("--rm"));
+    assert.ok(check.includes("/app/ops/run-js-runtime.sh"));
+    assert.equal(check.includes("--profile"), false);
+    assert.ok(
+      check.some((arg) =>
+        arg.endsWith("/docker-compose.house-trader-image.yml"),
+      ),
+    );
+    assert.equal(check.at(-1), `sha256:${"a".repeat(64)}`);
+    assert.ok(!result.calls.some((call) => call.includes("up")));
+  }
+});
+
+test("House Trader no-build repair only replaces the selected service gracefully", () => {
+  const result = probe("recreate-services-no-build.sh", [], {
+    SERVICES: "house-trader-worker",
+    RESTART_NGINX: "0",
+    VERIFY: "0",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(mutations(result.calls), [
+    ["docker", "stop", "--time", "120", "container-id"],
+    ["docker", "rm", "container-id"],
+  ]);
+  const started = result.calls.find((call) => call.includes("up"));
+  assert.deepEqual(started.slice(started.indexOf("up")), [
+    "up",
+    "-d",
+    "--no-build",
+    "--no-deps",
+    "house-trader-worker",
+  ]);
+  assert.ok(
+    result.calls.some((call) =>
+      call.includes("hunch-monorepo_house-trader-worker:latest"),
+    ),
+  );
+});

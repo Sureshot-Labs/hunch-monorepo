@@ -62,6 +62,7 @@ application_services=(
   ai-worker
   market-matcher
   finance-worker
+  house-trader-worker
   signal-bot
   social-media-worker
   nginx

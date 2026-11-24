@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Only manage the optional trader. Resolve the immutable image of the healthy API.
+# Diagnostics or emergency operations for the worker managed by backend deploys.
 set -euo pipefail
 
 if [[ "$#" != 1 || ! "$1" =~ ^(check|start|stop)$ ]]; then
@@ -20,8 +20,8 @@ else
   echo "Docker Compose is required" >&2
   exit 69
 fi
-compose+=(--project-directory "$app_dir" --env-file /opt/hunch/.env
-  -f "$app_dir/ops/docker-compose.prod.yml" --profile house-trader)
+compose+=(--project-directory "$app_dir" --env-file "${ENV_FILE:-/opt/hunch/.env}"
+  -f "$app_dir/ops/docker-compose.prod.yml")
 worker=house-trader-worker
 
 if [[ "$1" == stop ]]; then
@@ -39,7 +39,12 @@ if [[ ! "$image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 69
 fi
 
-HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" run --rm -T "${compose_worker_flags[@]}" "$worker" \
+compose_on_api_image() {
+  HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" \
+    -f "$app_dir/ops/docker-compose.house-trader-image.yml" "$@"
+}
+
+compose_on_api_image run --rm -T "${compose_worker_flags[@]}" "$worker" \
   /bin/sh /app/ops/run-js-runtime.sh apps/api/dist/house-trader-worker.js --check-config </dev/null
 
 if [[ "$1" == start ]]; then
@@ -47,5 +52,5 @@ if [[ "$1" == start ]]; then
     echo "The API image changed during the check; run start again after the release" >&2
     exit 75
   fi
-  HUNCH_BACKEND_IMAGE="$image" "${compose[@]}" up -d --no-build "${compose_worker_flags[@]}" "$worker"
+  compose_on_api_image up -d --no-build "${compose_worker_flags[@]}" "$worker"
 fi

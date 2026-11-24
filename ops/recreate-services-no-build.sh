@@ -6,7 +6,7 @@ APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
 ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 PROJECT_NAME="${PROJECT_NAME:-hunch-monorepo}"
 SERVICES_EXPLICIT="${SERVICES+x}"
-SERVICES="${SERVICES-api indexer-polymarket indexer-limitless indexer-dflow ai-worker market-matcher finance-worker signal-bot social-media-worker}"
+SERVICES="${SERVICES-api indexer-polymarket indexer-limitless indexer-dflow ai-worker market-matcher finance-worker house-trader-worker signal-bot social-media-worker}"
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
 HUNCH_SOCIAL_MEDIA_WORKER_IMAGE="${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE:-}"
 RESTART_NGINX="${RESTART_NGINX:-1}"
@@ -76,7 +76,7 @@ find_backend_image() {
     return 0
   fi
 
-  for container in hunch-api hunch-indexer-polymarket hunch-indexer-limitless hunch-indexer-dflow hunch-ai-worker hunch-market-matcher hunch-finance-worker hunch-signal-bot; do
+  for container in hunch-api hunch-indexer-polymarket hunch-indexer-limitless hunch-indexer-dflow hunch-ai-worker hunch-market-matcher hunch-finance-worker hunch-house-trader-worker hunch-signal-bot; do
     image_id="$(docker inspect -f '{{.Image}}' "${container}" 2>/dev/null || true)"
     if [ -n "${image_id}" ]; then
       echo "${image_id}"
@@ -192,7 +192,7 @@ for service in "${selected_services[@]}"; do
   ids="$(docker ps -aq --filter "name=^/${container}$" || true)"
   if [ -n "${ids}" ]; then
     echo "Removing existing container(s) for ${container}"
-    if [ "${service}" = "market-matcher" ]; then
+    if [[ "${service}" == market-matcher || "${service}" == house-trader-worker ]]; then
       docker stop --time 120 ${ids} >/dev/null
       docker rm ${ids}
     else
@@ -256,7 +256,7 @@ fi
 if [[ "${manage_native_worker}" == 1 ]]; then native_onboarding_verify "${backend_image:-}"; fi
 
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' \
-  | grep -E 'hunch-(api|indexer|ai-worker|market-matcher|finance-worker|signal-bot|social-media-worker|nginx|postgres|redis|web)' || true
+  | grep -E 'hunch-(api|indexer|ai-worker|market-matcher|finance-worker|house-trader-worker|signal-bot|social-media-worker|nginx|postgres|redis|web)' || true
 EOF
 )
 REMOTE_CMD="${native_helper_functions}"$'\n'"${REMOTE_CMD}"
