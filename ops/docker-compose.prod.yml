@@ -320,7 +320,9 @@ services:
     environment:
       HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER: ${HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER:-}
-      AWS_REGION: ${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-north-1}}
+      # Compose v1 cannot expand nested defaults. The AWS loader picks the region.
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-eu-north-1}
     depends_on:
       postgres:
         condition: service_healthy
