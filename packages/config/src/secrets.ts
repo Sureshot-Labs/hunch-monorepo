@@ -334,25 +334,21 @@ function validateRequiredSecrets(raw: string | undefined): void {
   }
 }
 
-async function getAwsSecretJson(
+/** Read one bundle without importing its contents into process.env. */
+export async function getAwsSecretJson(
   secretId: string,
-  options: { fetchImpl: FetchLike; now?: Date; containerOnly?: boolean },
+  options: { fetchImpl?: FetchLike; now?: Date } = {},
 ): Promise<Record<string, string>> {
   const region = resolveAwsRegion();
-  const credentials = options.containerOnly
-    ? await tryResolveEcsCredentials(options.fetchImpl)
-    : await resolveAwsCredentials(options.fetchImpl);
-  if (
-    !credentials?.accessKeyId ||
-    !credentials.secretAccessKey ||
-    (options.containerOnly && !credentials.sessionToken)
-  )
-    throw new Error("[secrets] Workload credentials are unavailable");
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const credentials = await resolveAwsCredentials(fetchImpl);
+  if (!credentials?.accessKeyId || !credentials.secretAccessKey)
+    throw new Error("[secrets] AWS credentials are unavailable");
   const body = JSON.stringify({ SecretId: secretId });
   const res = await signedAwsJsonRequest({
     body,
     credentials,
-    fetchImpl: options.fetchImpl,
+    fetchImpl,
     now: options.now ?? new Date(),
     region,
     service: "secretsmanager",
@@ -379,27 +375,6 @@ async function getAwsSecretJson(
     throw new Error(`[secrets] ${secretId} SecretString must be a JSON object`);
   }
   return parsed as Record<string, string>;
-}
-
-/** Use the same Secrets Manager reader, but never fall back to the shared
- * instance role or static environment credentials for a workload-only secret. */
-export function readAwsWorkloadSecret(
-  secretId: string,
-  options: { fetchImpl?: FetchLike; now?: Date } = {},
-): Promise<Record<string, unknown>> {
-  const transport = options.fetchImpl ?? fetch;
-  return getAwsSecretJson(secretId, {
-    now: options.now,
-    containerOnly: true,
-    fetchImpl: (input, init) =>
-      transport(input, {
-        ...init,
-        signal: AbortSignal.any([
-          AbortSignal.timeout(10_000),
-          ...(init?.signal ? [init.signal] : []),
-        ]),
-      }),
-  });
 }
 
 function resolveAwsRegion(): string {

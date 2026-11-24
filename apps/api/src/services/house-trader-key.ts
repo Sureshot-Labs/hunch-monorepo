@@ -1,4 +1,4 @@
-import { readAwsWorkloadSecret } from "@hunch/config/secrets";
+import { getAwsSecretJson } from "@hunch/config/secrets";
 import { computeAddress, getAddress, ZeroAddress } from "ethers";
 
 const secretId = "/hunch/prod/house-trader";
@@ -32,8 +32,11 @@ export function parseHouseTraderKey(
 }
 
 export async function loadHouseTraderKey(expectedController: string) {
+  const signal = AbortSignal.timeout(10_000);
   return parseHouseTraderKey(
-    await readAwsWorkloadSecret(secretId),
+    await getAwsSecretJson(secretId, {
+      fetchImpl: (input, init) => fetch(input, { ...init, signal }),
+    }),
     expectedController,
   );
 }
