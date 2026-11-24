@@ -44,6 +44,7 @@ import { buildPolymarketRedemptionPlan } from "./polymarket-redemption-plan.js";
 import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 import { PolymarketQuoteError } from "./polymarket-quote.js";
 import { EvidenceBudgetExhausted } from "./verified-buy.js";
+import { safePolymarketRelayerDiagnostic } from "./polymarket-deposit-wallet-relayer.js";
 
 const safePreflightReasons = new Set([
   "strategy_changed_or_paused",
@@ -665,6 +666,9 @@ export async function houseTick(pool: Pool, wallet: HouseWallet) {
             claim,
             "submitted",
             "submission_requires_reconciliation",
+            claim.kind === "setup" && current.result.phase === "approvals"
+              ? { relayerDiagnostic: safePolymarketRelayerDiagnostic(error) }
+              : undefined,
           );
       }
     }

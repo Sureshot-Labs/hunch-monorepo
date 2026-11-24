@@ -86,11 +86,12 @@ normal deploy starts the worker again without changing the saved strategy.
   or transaction without trustworthy evidence leaves the reserve pending and
   needs investigation; it is not proof of no execution. Automatic exits do not enqueue alongside another exit for the
   position, and failed automatic exits wait five minutes before another try.
-- Defaults are 100 pUSD capital cap, 10/day UTC, 5/event, 2/order including
-  fees; entry filters are signal age up to 30 minutes and 5 minutes to seven
-  days to market close. AI entry/exit, take-profit and stop-loss default off.
-  Save deliberately small limits for the first funded pilot; the defaults are
-  not a one-order mode. The **Activity** section shows recent decisions and
+- Pilot defaults are 3 pUSD total exposure, 1.50/day UTC, 1.50/event and a
+  fixed 1.50 budget per buy including fees; entry filters are signal age up to
+  30 minutes and 5 minutes to seven days to market close. AI entry/exit,
+  take-profit and stop-loss default off. Example AI prompts are editable and
+  are not used until AI is enabled with a positive daily budget. Loading pilot
+  defaults is an edit, not a save or a trading command. The **Activity** section shows recent decisions and
   outstanding actions, including rejection, missing evidence, transaction
   finality, and the worker's last completed cycle.
 - The panel lists open positions by market and side, confirmed shares,

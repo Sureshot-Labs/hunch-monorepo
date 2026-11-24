@@ -9,3 +9,15 @@ export const DEFAULT_CATEGORY_COUNTS_SQL = `WITH category_totals AS MATERIALIZED
 )
 SELECT venue,category,events FROM category_totals
 WHERE venue=ANY($1::text[]) ORDER BY events DESC,venue ASC,category ASC`;
+export const DEFAULT_CATEGORY_NAMES = [
+  "politics",
+  "crypto",
+  "sports",
+  "economics",
+  "technology",
+  "entertainment",
+  "weather",
+  "health",
+  "mentions",
+  "other",
+] as const;

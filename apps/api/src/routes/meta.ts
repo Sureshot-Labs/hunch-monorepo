@@ -9,7 +9,10 @@ import {
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
-import { DEFAULT_CATEGORY_COUNTS_SQL } from "../repos/meta-categories.js";
+import {
+  DEFAULT_CATEGORY_COUNTS_SQL,
+  DEFAULT_CATEGORY_NAMES,
+} from "../repos/meta-categories.js";
 import { DefaultCategoryCache } from "../services/default-category-cache.js";
 import {
   fetchFeedCategoryFacetRows,
@@ -36,18 +39,6 @@ type CategoryRow = {
 const DYNAMIC_CATEGORY_FACETS_ENABLED = false;
 const DEFAULT_CATEGORIES_CACHE_TTL_SEC = 600;
 const DEFAULT_CATEGORIES_STALE_TTL_SEC = 24 * 60 * 60;
-const DEFAULT_CATEGORY_NAMES = [
-  "politics",
-  "crypto",
-  "sports",
-  "economics",
-  "technology",
-  "entertainment",
-  "weather",
-  "health",
-  "mentions",
-  "other",
-] as const;
 const defaultCategoryCache = new DefaultCategoryCache(
   DEFAULT_CATEGORIES_CACHE_TTL_SEC,
   DEFAULT_CATEGORIES_STALE_TTL_SEC,

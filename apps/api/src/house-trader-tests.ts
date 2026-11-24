@@ -33,11 +33,56 @@ import {
   adverseEntry,
   costBasisForShares,
   houseDepositSetupRetry,
+  houseModelContextMessage,
   houseTraderDefault,
   houseTraderPolicy,
   priceExit,
   usdRaw,
 } from "./services/house-trader-policy.js";
+import {
+  PolymarketRelayerHttpError,
+  safePolymarketRelayerDiagnostic,
+} from "./services/polymarket-deposit-wallet-relayer.js";
+
+const pilotDefaults = houseTraderPolicy.parse(houseTraderDefault);
+assert.equal(pilotDefaults.dailyBuyUsd, "1.50");
+assert.ok(!pilotDefaults.aiEntry && !pilotDefaults.aiExit);
+assert.match(pilotDefaults.aiEntryInstruction, /SKIP/);
+assert.match(pilotDefaults.aiExitInstruction, /HOLD/);
+const aiMessage = houseModelContextMessage({
+  operatorInstruction: pilotDefaults.aiExitInstruction,
+  buyMin: "1",
+  buyMax: "1.50",
+  maxSellBps: 5000,
+  facts: {
+    feeAdjustedProceedsRaw: "123456",
+    evidence: [{ text: "x".repeat(8000) }, { text: "bounded note" }],
+  },
+});
+assert.ok(aiMessage.length <= 8000);
+assert.deepEqual(JSON.parse(aiMessage).facts, {
+  feeAdjustedProceedsRaw: "123456",
+  evidence: [{ text: "bounded note" }],
+});
+assert.deepEqual(
+  safePolymarketRelayerDiagnostic(
+    new PolymarketRelayerHttpError(
+      400,
+      "call blocked: raw sensitive provider text",
+    ),
+  ),
+  { status: 400, reason: "call_not_allowed" },
+);
+assert.deepEqual(
+  safePolymarketRelayerDiagnostic(
+    new PolymarketRelayerHttpError(429, "private body"),
+  ),
+  { status: 429, reason: "rate_or_quota_limit" },
+);
+assert.deepEqual(
+  safePolymarketRelayerDiagnostic(new Error("sensitive transport failure")),
+  { reason: "transport_or_unknown" },
+);
 import {
   houseValuationContext,
   summarizeHouseValuations,

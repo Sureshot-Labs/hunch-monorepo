@@ -9,6 +9,37 @@ import {
 export { POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS };
 export const POLYMARKET_RELAYER_BASE_URL = "https://relayer-v2.polymarket.com";
 const POLYMARKET_RELAYER_REQUEST_TIMEOUT_MS = 15_000;
+
+export class PolymarketRelayerHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export function safePolymarketRelayerDiagnostic(error: unknown) {
+  if (!(error instanceof PolymarketRelayerHttpError))
+    return { reason: "transport_or_unknown" } as const;
+  const reason =
+    /call blocked|not in the allowed list|calls? to .* not permitted/i.test(
+      error.message,
+    )
+      ? "call_not_allowed"
+      : /not registered/i.test(error.message)
+        ? "wallet_not_registered"
+        : /(?:invalid|bad) signature/i.test(error.message)
+          ? "invalid_signature"
+          : error.status === 401 || error.status === 403
+            ? "authentication_or_policy"
+            : error.status === 429 || /quota/i.test(error.message)
+              ? "rate_or_quota_limit"
+              : error.status >= 500
+                ? "upstream_failure"
+                : "request_rejected";
+  return { status: error.status, reason };
+}
 export const POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES = {
   Call: [
     { name: "target", type: "address" },
@@ -261,7 +292,8 @@ async function fetchRelayerJson<T>(
               typeof value === "string" && value.trim().length > 0,
           )
         : null;
-    throw new Error(
+    throw new PolymarketRelayerHttpError(
+      response.status,
       message ?? `Polymarket relayer request failed: ${response.status}`,
     );
   }

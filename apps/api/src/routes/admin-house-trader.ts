@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { tx, type Pool } from "@hunch/infra";
 import { z } from "zod";
 import { createAdminMiddleware } from "../auth.js";
+import { DEFAULT_CATEGORY_NAMES } from "../repos/meta-categories.js";
 import { houseWithdrawalRecipient } from "../services/house-trader-withdrawal.js";
 import {
   account,
@@ -67,7 +68,12 @@ export function registerAdminHouseTrader(app: FastifyInstance, pool: Pool) {
     const actions = data
       ? (await pool.query(houseAdminActivitySql, [data.user_id])).rows
       : [];
-    return { account: data, defaults: houseTraderDefault, actions };
+    return {
+      account: data,
+      defaults: houseTraderDefault,
+      categoryOptions: DEFAULT_CATEGORY_NAMES,
+      actions,
+    };
   });
   app.post(path, { preHandler: adminOnly }, async (request, reply) => {
     const parsed = operation.safeParse(request.body);

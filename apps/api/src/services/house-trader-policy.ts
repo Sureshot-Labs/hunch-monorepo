@@ -69,17 +69,40 @@ export const houseTraderPolicy = z
   });
 
 export type HouseTraderPolicy = z.infer<typeof houseTraderPolicy>;
+
+export function houseModelContextMessage(input: {
+  operatorInstruction: string;
+  buyMin: string;
+  buyMax: string;
+  maxSellBps: number;
+  facts: Record<string, unknown>;
+}) {
+  const { evidence, ...quoteFacts } = input.facts;
+  const included: unknown[] = [];
+  const message = { ...input, facts: { ...quoteFacts, evidence: included } };
+  let encoded = JSON.stringify(message);
+  if (encoded.length > 8000) throw new Error("house_model_context_too_large");
+  if (Array.isArray(evidence)) {
+    for (const note of evidence) {
+      included.push(note);
+      const candidate = JSON.stringify(message);
+      if (candidate.length <= 8000) encoded = candidate;
+      else included.pop();
+    }
+  }
+  return encoded;
+}
 export const houseTraderAmount = positiveMoney;
 export function houseConfirmationIsFresh(value: unknown, now = Date.now()) {
   const at = typeof value === "string" ? Date.parse(value) : NaN;
   return Number.isFinite(at) && at <= now && now - at < 180_000;
 }
 export const houseTraderDefault: HouseTraderPolicy = {
-  capitalUsd: "100",
-  dailyBuyUsd: "10",
-  eventExposureUsd: "5",
-  maxOrderUsd: "2",
-  fixedBuyUsd: "2",
+  capitalUsd: "3",
+  dailyBuyUsd: "1.50",
+  eventExposureUsd: "1.50",
+  maxOrderUsd: "1.50",
+  fixedBuyUsd: "1.50",
   minAiBuyUsd: "1",
   categories: [],
   signalAgeMinutes: 30,
@@ -92,8 +115,10 @@ export const houseTraderDefault: HouseTraderPolicy = {
   aiEntry: false,
   aiExit: false,
   aiModel: "openai/gpt-6.2-sol",
-  aiEntryInstruction: "",
-  aiExitInstruction: "",
+  aiEntryInstruction:
+    "Default to SKIP. Check whether recent, specific evidence supports this exact outcome and whether the current quote still makes sense compared with the signal ask. Repeated notes, wallet activity alone and price movement are not independent confirmation. Skip if evidence is stale, conflicting or missing. Do not invent a probability or increase size to compensate for uncertainty.",
+  aiExitInstruction:
+    "Default to HOLD. Sell only when new, specific evidence materially weakens the original thesis for this exact outcome. A lower price or an unrealized loss alone is not a reason to sell. Account for fee-adjusted proceeds and stay within the sell cap. Ignore pressure to recover losses; if evidence is incomplete or conflicting, hold.",
   aiDailyUsd: "0",
   aiMaxSellBps: 5000,
   aiPriceChangeBps: 500,

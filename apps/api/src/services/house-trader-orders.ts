@@ -299,6 +299,8 @@ export async function doTrade(
         "entry",
         {
           side: job.outcome,
+          signalId: job.request.noteId,
+          signalPublishedAt: job.request.publishedAt,
           entryAsk: job.request.entry,
           quote: tentative.price,
           balanceRaw: balance.toString(),
@@ -377,6 +379,7 @@ export async function doTrade(
         {
           side: job.outcome,
           bid: full.price,
+          feeAdjustedProceedsRaw: sellNet(full).toString(),
           sharesRaw: available.toString(),
           entryCostRaw: remainingCost?.toString(),
           evidence: await evidenceFor(pool, job.market_id, job.event_id),
