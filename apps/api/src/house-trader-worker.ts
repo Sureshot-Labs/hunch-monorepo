@@ -1,12 +1,12 @@
 import {
-  HOUSE_TRADER_KEY_FILE,
-  readHouseTraderKeyFile,
+  loadHouseTraderKey,
   readHouseTraderPublicSettings,
-} from "./services/house-trader-key-file.js";
+} from "./services/house-trader-key.js";
 
 let stopping = false;
 let wake: (() => void) | undefined;
 let close: (() => Promise<void>) | undefined;
+let stage = "public_settings";
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     stopping = true;
@@ -19,10 +19,8 @@ try {
   if (process.argv.length > 2 && !checkConfig)
     throw new Error("unknown_house_trader_argument");
   const { expected } = readHouseTraderPublicSettings(process.env);
-  const { privateKey, controller } = readHouseTraderKeyFile(
-    HOUSE_TRADER_KEY_FILE,
-    expected,
-  );
+  stage = "workload_key";
+  const { privateKey, controller } = await loadHouseTraderKey(expected);
   if (checkConfig) {
     console.info(
       JSON.stringify({
@@ -31,8 +29,9 @@ try {
       }),
     );
   } else {
-    // Load only the common runtime configuration, after checking the explicit
-    // mounted key. The dedicated key never transits AWS on this host.
+    // Load common application config separately; the dedicated key stays out
+    // of process.env and is never taken from a common bundle.
+    stage = "common_bundles";
     const { loadRuntimeSecrets } = await import("@hunch/config/secrets");
     process.env.HUNCH_SECRETS_MODE = "strict";
     process.env.HUNCH_SECRET_BUNDLES =
@@ -42,9 +41,9 @@ try {
     await loadRuntimeSecrets({
       envPath: "/dev/null",
       logger: { info: () => {}, warn: () => {}, error: () => {} },
+      forbiddenBundleKeys: new Set(["HUNCH_HOUSE_TRADER_PRIVATE_KEY"]),
     });
-    if (Object.hasOwn(process.env, "HUNCH_HOUSE_TRADER_PRIVATE_KEY"))
-      throw new Error("house_trader_key_in_common_bundle");
+    stage = "runtime";
     const [{ pool }, { houseTick }, { HouseWallet }] = await Promise.all([
       import("./db.js"),
       import("./services/house-trader-runner.js"),
@@ -75,7 +74,7 @@ try {
   }
 } catch {
   // Provider/SDK errors may contain secrets or URLs. Never log the exception.
-  console.error("house_trader_configuration_failed");
+  console.error("house_trader_configuration_failed", stage);
   process.exitCode = 1;
 } finally {
   await close?.();

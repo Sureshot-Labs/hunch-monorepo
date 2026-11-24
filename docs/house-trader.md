@@ -25,55 +25,39 @@ maximum exposure if its raw key is compromised.
 - Create `/hunch/prod/house-trader` in the same AWS region as the deployment.
   Store a JSON object with **only** `HUNCH_HOUSE_TRADER_PRIVATE_KEY`. Keep it
   out of the repo, common secret bundles, and all `.env` files.
+- The worker reads this bundle directly from Secrets Manager at startup with
+  the common Secrets Manager client and a **dedicated workload identity**.
+  No wallet key file or host staging script is used, including after reboot.
+  The worker keeps the private key in memory, not in Docker config or in the
+  shared environment. The expected public controller must match exactly.
 - The normal EC2 instance profile, API, and other workloads must be denied
   `secretsmanager:GetSecretValue` and `secretsmanager:BatchGetSecretValue`
-  on this secret (including the actual ARN suffix). Verify the effective IAM
-  permissions without retrieving its value. Do not give the instance role
-  access merely to make startup pass. Stage the key using an **operator AWS
-  session** that can read this dedicated secret. Docker/host root can still
-  read process memory and files; this is isolation from other ordinary
-  containers on that host, not from host or Docker administrators.
+  on this secret (including the actual ARN suffix). Restrict the dedicated
+  role to the exact secret and the common bundles required by this worker;
+  allow the corresponding KMS keys only as needed through Secrets Manager.
+  A separate `sts:AssumeRole` target that all EC2 workloads can assume is not
+  isolation. Docker/host root can still read process memory on the same host.
 - The only House Trader setting in `/opt/hunch/.env` is
   `HUNCH_HOUSE_TRADER_EXPECTED_CONTROLLER` (the public address derived
-  offline). Compose passes the existing AWS region. The worker launcher
-  uses the immutable image ID of the healthy running API.
+  offline). The loader accepts the standard AWS container credentials URI
+  (automatically injected by ECS tasks) or an authenticated workload-scoped
+  credentials endpoint for Compose. Plain Compose on EC2 does not provide a
+  per-container AWS role by itself. Without workload credentials, the check
+  stops before trying the host instance role, even if it can read other bundles.
 
-After both repos have been released, the authorized operator can stage the key
-from their workstation without printing it. The host needs `jq`. A host
-administrator first installs the reviewed version of
-`ops/stage-house-trader-key.sh` as `/usr/local/sbin/hunch-stage-house-trader-key`,
-owned by root and not editable by the SSH user. Use noninteractive sudo only
-for that installed entrypoint; do not grant sudo to a mutable source checkout.
-Do not use AWS CLI debugging/response history or session stdin recording for
-this stream. This replaces only
-the dedicated staged file, so stage while the worker is stopped. Replace the
-deployment host/IP or app directory below only if they differ from the actual
-release.
-
-```bash
-set -o pipefail
-aws secretsmanager get-secret-value --secret-id /hunch/prod/house-trader \
-  --query SecretString --output text --no-cli-pager |
-  ssh -T ubuntu@13.51.155.185 'sudo -n /usr/local/sbin/hunch-stage-house-trader-key'
-```
-
-The staging file is `/run/hunch-house-trader/key.json` (owner UID 10001,
-mode `0400`, parent root-only). It is bind-mounted read-only only into
-`house-trader-worker`. It disappears after a host reboot and must be staged
-again. The worker has no automatic restart policy. Never switch to the new
-key for an existing funded controller or to recover an in-flight operation.
-The Compose file supports standalone Compose 1.29 as well as Compose v2.
-The launcher's strict Docker bind check rejects a missing key file before
-Compose can create a directory at that path.
+The worker has no automatic restart policy. Never switch keys for an
+existing funded controller or to recover an in-flight operation. Compose
+supports standalone 1.29 and v2; its launcher uses the immutable image ID
+of the healthy running API.
 The optional worker is not in the normal deployment service list. Pause and
 stop it before subsequent backend releases with `bash ops/house-trader-worker.sh stop`.
 Starting it again automatically selects the new healthy API image; no image
 tag or environment variable needs editing.
 
-From the deployed backend directory, run the **offline** config check against
-the authorized worker image after staging. It loads no application secrets,
-contacts no providers, and prints only the public controller and check status.
-Neither it nor the worker-start command downloads or builds images.
+From the deployed backend directory, run the config check. It calls AWS to
+verify the dedicated key, prints only its public controller and status, and
+exits before opening the database or contacting Polymarket. Neither it nor
+the worker-start command downloads or builds images.
 
 ```bash
 bash ops/house-trader-worker.sh check
@@ -90,7 +74,10 @@ bash ops/house-trader-worker.sh start
 - Finance → Trading Bot (interactive superadmin) creates the account paused.
   Setup deploys the canonical Deposit Wallet if needed and verifies its
   controller and approvals at a finalized Polygon block, plus CLOB
-  credentials, before showing the deposit address. After repeated proven
+  credentials, before showing the deposit address. Order approvals cover
+  pUSD and Conditional Tokens for standard and negative-risk CTF markets
+  (including both for the distinct Neg Risk Adapter), and pUSD and
+  PositionManager for the shared V2 ExchangeV3. After repeated proven
   setup failures, check the venue/relayer and use **Retry wallet setup**.
   Fund a small amount of Polygon pUSD only after setup is complete. Native
   Polygon gas for cash-out is sent separately to the controller.

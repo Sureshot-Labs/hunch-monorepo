@@ -6,7 +6,7 @@ import {
 } from "../lib/credentials-encryption.js";
 import { AuthService } from "../auth.js";
 import { env } from "../env.js";
-import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
+import { missingHouseTraderApprovals } from "./house-trader-approvals.js";
 import {
   inspectPolymarketDepositWallet,
   POLYMARKET_DEPOSIT_WALLET_FACTORY,
@@ -30,15 +30,11 @@ import type { Account } from "./house-trader-store.js";
 
 const erc20 = new ethers.Interface([
   "function balanceOf(address) view returns (uint256)",
-  "function allowance(address,address) view returns (uint256)",
-  "function approve(address,uint256) returns (bool)",
   "function transfer(address,uint256) returns (bool)",
   "event Transfer(address indexed from,address indexed to,uint256 value)",
 ]);
 const shares = new ethers.Interface([
   "function balanceOf(address,uint256) view returns (uint256)",
-  "function isApprovedForAll(address,address) view returns (bool)",
-  "function setApprovalForAll(address,bool)",
 ]);
 
 export function exactTransfer(
@@ -214,50 +210,16 @@ export class HouseWallet {
     funder: string,
     blockTag?: number,
   ): Promise<DepositWalletCall[]> {
-    const c = POLYMARKET_PROTOCOL_CONTRACTS;
-    const exchanges = [c.exchangeV2, c.negRiskExchangeV2, c.exchangeV3];
-    const calls: DepositWalletCall[] = [];
-    for (const exchange of exchanges) {
-      const raw = await this.provider.call({
-        to: this.collateral,
-        data: erc20.encodeFunctionData("allowance", [funder, exchange]),
-        blockTag,
-      });
-      if (erc20.decodeFunctionResult("allowance", raw)[0] < 1_000_000_000_000n)
-        calls.push({
-          target: this.collateral,
-          value: "0",
-          data: erc20.encodeFunctionData("approve", [
-            exchange,
-            ethers.MaxUint256,
-          ]),
-        });
-    }
-    for (const [ledger, operator] of [
-      [c.conditionalTokens, c.exchangeV2],
-      [c.conditionalTokens, c.negRiskExchangeV2],
-      [c.positionManager, c.exchangeV3],
-      [c.positionManager, c.router],
-      [c.conditionalTokens, env.polymarketCtfCollateralAdapterAddress],
-      [c.conditionalTokens, env.polymarketNegRiskCollateralAdapterAddress],
-    ]) {
-      if (!operator) continue;
-      const raw = await this.provider.call({
-        to: ledger,
-        data: shares.encodeFunctionData("isApprovedForAll", [funder, operator]),
-        blockTag,
-      });
-      if (!shares.decodeFunctionResult("isApprovedForAll", raw)[0])
-        calls.push({
-          target: ledger,
-          value: "0",
-          data: shares.encodeFunctionData("setApprovalForAll", [
-            operator,
-            true,
-          ]),
-        });
-    }
-    return calls;
+    return missingHouseTraderApprovals({
+      funder,
+      collateral: this.collateral,
+      ctfRedemptionAdapters: [
+        env.polymarketCtfCollateralAdapterAddress,
+        env.polymarketNegRiskCollateralAdapterAddress,
+      ],
+      blockTag,
+      read: (call) => this.provider.call(call),
+    });
   }
   async submitBatch(
     funder: string,

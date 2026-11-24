@@ -12,6 +12,7 @@ import {
   usdRaw,
 } from "./house-trader-policy.js";
 import { exactTransfer, type HouseWallet } from "./house-trader-wallet.js";
+import { houseApprovalBatchSettled } from "./house-trader-approvals.js";
 import {
   houseReceiptMatchesFinalized,
   houseSweepBoundarySql,
@@ -187,8 +188,19 @@ export async function setupHouse(
         )
         .then(() => undefined);
     const observation = await batchReceipt(wallet, job);
+    const finalizedNonce =
+      job.result.phase === "approvals" &&
+      observation?.status === 1 &&
+      observation.blockNumber <= finalized.number
+        ? await wallet.batchNonceAt(dw.address, finalized.number)
+        : null;
     if (
-      observation?.status === 0 ||
+      houseApprovalBatchSettled(
+        observation,
+        finalized.number,
+        job.reference,
+        finalizedNonce,
+      ) ||
       (await wallet.expiredUnspentBatch(dw.address, job.reference))
     ) {
       if (tries >= 3)
