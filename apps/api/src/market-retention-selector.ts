@@ -4,6 +4,7 @@ import {
   matchingProtectedReferences,
   matchingDerivedReferences,
 } from "./services/matching-retention.js";
+import { houseTraderProtectedMarketReferencesSql } from "./services/house-trader-retention.js";
 import { pool } from "./db.js";
 import {
   hasCliFlag as hasFlag,
@@ -169,6 +170,7 @@ export function protectedRefsSql(
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
     includePolymarketAssetBindings?: boolean;
+    includeHouseTraderActions?: boolean;
   } = {},
 ): string {
   // Likes deliberately do not protect markets: they are removable derived edges.
@@ -288,6 +290,7 @@ export function protectedRefsSql(
     from ${candidatePoolTable} c join ai_notes social_note on social_note.source_kind='market' and social_note.source_id=c.market_id
     join copy_attributions attribution_row on attribution_row.source_ai_note_id=social_note.id
     ${fundingOperationsRef}
+    ${options.includeHouseTraderActions ? `union ${houseTraderProtectedMarketReferencesSql(candidatePoolTable)}` : ""}
     ${options.includeMatchingHistory ? `union ${matchingProtectedReferences(candidatePoolTable)}` : ""}
     ${fundingLiquidityProjectionsRef}
     ${fundingPreparationRunsRef}
@@ -719,6 +722,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeTelegramFundingBuyReturns: boolean;
   includeTelegramTradeIntents: boolean;
   includePolymarketAssetBindings: boolean;
+  includeHouseTraderActions: boolean;
 }> {
   const [
     includeMatchingHistory,
@@ -730,6 +734,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
     includePolymarketAssetBindings,
+    includeHouseTraderActions,
   ] = await Promise.all([
     relationExists(client, "public.market_contract_versions"),
     relationExists(client, "public.funding_operations"),
@@ -740,6 +745,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     relationExists(client, "public.telegram_funding_buy_return_revisions"),
     relationExists(client, "public.telegram_trade_intents"),
     relationExists(client, "public.polymarket_asset_bindings"),
+    relationExists(client, "public.house_trader_actions"),
   ]);
   return {
     includeMatchingHistory,
@@ -751,6 +757,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
     includePolymarketAssetBindings,
+    includeHouseTraderActions,
   };
 }
 

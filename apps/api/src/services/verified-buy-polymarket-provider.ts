@@ -16,6 +16,7 @@ export async function readPolymarketFillCandidates(input: {
   owner: string;
   orderHash: string;
   tokenId: string;
+  side?: "BUY" | "SELL";
   consume: () => void;
   assertBudget: (needed: number) => void;
   readOrder: () => ReturnType<typeof fetchPolymarketOrderByHash>;
@@ -44,7 +45,7 @@ export async function readPolymarketFillCandidates(input: {
       order.id.toLowerCase() !== input.orderHash.toLowerCase() ||
       order.makerAddress.toLowerCase() !== input.owner.toLowerCase() ||
       order.assetId !== input.tokenId ||
-      order.side.toUpperCase() !== "BUY"
+      order.side.toUpperCase() !== (input.side ?? "BUY")
     )
       return { state: "identity_conflict" };
     if (
