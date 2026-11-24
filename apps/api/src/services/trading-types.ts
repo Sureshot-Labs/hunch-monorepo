@@ -245,6 +245,8 @@ export type SubmitResult = {
   venueOrderId: string | null;
   orderHash: string | null;
   txSignature: string | null;
+  /** Recovery hints only, not a transaction attestation. */
+  limitlessReceiptLocatorHashes?: readonly string[];
   price: number | null;
   size: number | null;
   raw?: unknown;

@@ -369,6 +369,11 @@ export class FundingQuoteService {
           ...(storedPlan.operation.supportMetadata ?? {}),
           discoveryProjectionId: planning.id,
           ownershipRevision: planning.ownershipRevision,
+          ...(input.request.limitlessOrderType === "GTC" &&
+          storedPlan.operation.purpose === "trade_shortfall" &&
+          storedPlan.operation.venueId === "limitless"
+            ? { limitlessFundingOrderType: "GTC" }
+            : {}),
         },
       },
     };

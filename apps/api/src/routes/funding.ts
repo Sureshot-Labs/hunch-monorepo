@@ -13,6 +13,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { buildAccountValueReadModel } from "../account-value/runtime-service.js";
 import { stableOpaqueId } from "../account-value/canonical.js";
+import { LimitlessClobFeeError } from "../services/limitless-clob-fees.js";
 import type {
   FundingCommitRequest,
   FundingDestinationOption,
@@ -533,6 +534,7 @@ async function publicProjectedOperationResponse(
 }
 
 function errorStatus(error: unknown): number {
+  if (error instanceof LimitlessClobFeeError) return error.responseStatus;
   if (error instanceof WithdrawalDestinationError) {
     if (error.code === "withdrawal_destination_not_found") return 404;
     if (error.code === "withdrawal_destination_expired") return 410;
@@ -594,6 +596,7 @@ function errorCode(error: unknown): string {
     error instanceof FundingPlannerError ||
     error instanceof FundingPersistenceError ||
     error instanceof PreparationContractError ||
+    error instanceof LimitlessClobFeeError ||
     error instanceof WithdrawalDestinationError
   ) {
     return error.code;
@@ -660,7 +663,9 @@ async function handleFundingRequest<T>(
       error:
         error instanceof FundingSourceCapacityChangedError
           ? "Available funds changed or are reserved. Refresh your funding options and try again."
-          : input.publicError,
+          : error instanceof LimitlessClobFeeError
+            ? error.message
+            : input.publicError,
       code: errorCode(error),
       ...(error instanceof FundingReceiveSessionSelectionConflictError
         ? { activeReceiveSessionId: error.activeReceiveSessionId }
@@ -753,6 +758,7 @@ export function registerFundingRoutes(
             fundingCapabilitiesResponseSchema.parse({
               ok: true,
               ...capabilities,
+              limitlessGtcFundingOrderBinding: true,
             }),
           );
         },

@@ -16,6 +16,7 @@ export type FeePolicyRow = {
 export async function fetchActiveFeePolicy(
   pool: Pool,
   venue: "polymarket" | "kalshi" | "limitless",
+  effectiveAt?: Date,
 ): Promise<FeePolicyRow | null> {
   const { rows } = await pool.query<FeePolicyRow>(
     `
@@ -32,11 +33,11 @@ export async function fetchActiveFeePolicy(
         created_at
       from fee_policy
       where venue = $1
-        and effective_at <= now()
-      order by effective_at desc
+        and effective_at <= coalesce($2::timestamptz, now())
+      order by effective_at desc, created_at desc
       limit 1
     `,
-    [venue],
+    [venue, effectiveAt ?? null],
   );
   return rows[0] ?? null;
 }

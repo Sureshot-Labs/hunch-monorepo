@@ -11,7 +11,10 @@ import {
   markPositionFlatByIdInTx,
   withPositionMutationLock,
 } from "../repos/positions-repo.js";
-import { positionDeltaAppliedSqlExpression } from "../repos/orders-repo.js";
+import {
+  inheritLimitlessPositionDeltaFromOrderAlias,
+  positionDeltaAppliedSqlExpression,
+} from "../repos/orders-repo.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 
 type SupportedVenue = "polymarket" | "kalshi" | "limitless";
@@ -424,6 +427,21 @@ export async function applyOptimisticPositionTradeOnce(
           applied: false,
           reason: "position_delta_already_applied",
         };
+      }
+      if (tradeInput.venue === "limitless") {
+        const aliasResolution =
+          await inheritLimitlessPositionDeltaFromOrderAlias(
+            client,
+            input.orderId,
+          );
+        if (aliasResolution !== "none")
+          return {
+            applied: false,
+            reason:
+              aliasResolution === "inherited"
+                ? "position_delta_already_applied"
+                : "position_delta_needs_wallet_sync",
+          };
       }
 
       const applyResult = await applyPositionTradeDeltaInTx(client, tradeInput);

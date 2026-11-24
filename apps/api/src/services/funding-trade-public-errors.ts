@@ -53,7 +53,10 @@ export function toPublicFundingTradeError(
         error: "Funding reservation is unavailable.",
       };
     }
-    if (error.code === "attempt_conflict") {
+    if (
+      error.code === "attempt_conflict" ||
+      error.code === "limitless_history_conflict"
+    ) {
       return {
         code: "funding_trade_reconciling",
         error: "This funding trade is already being reconciled.",

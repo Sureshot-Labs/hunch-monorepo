@@ -62,6 +62,50 @@ const TEST_USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const tests: TestCase[] = [
   {
+    name: "Limitless fee sponsorship is scoped to the exact market's Base USDC approval",
+    run: async () => {
+      const module = "0x0000000000000000000000000000000000000022";
+      const other = "0x0000000000000000000000000000000000000033";
+      const erc20 = new ethers.Interface([
+        "function approve(address,uint256)",
+        "function transfer(address,uint256)",
+      ]);
+      const base = {
+        id: "limitless-clob-approve-fee-module",
+        label: "Approve Limitless fees",
+        to: env.limitlessUsdcAddress,
+        data: erc20.encodeFunctionData("approve", [module, 1_000_000n]),
+        limitlessFeeMarketSlug: "exact-market",
+      };
+      const run = (change = {}, chainId = 8453) =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          chainId,
+          signer: walletContext.signer,
+          userId: TEST_USER_ID,
+          transactions: [{ ...base, ...change }],
+          dependencies: {
+            ...denyDynamicDependencies,
+            isLimitlessFeeModuleForMarket: async (slug, spender) =>
+              slug === "exact-market" && spender === module,
+          },
+        });
+      await run();
+      await assert.rejects(run({}, 137));
+      await assert.rejects(run({ to: other }));
+      await assert.rejects(
+        run({ data: erc20.encodeFunctionData("approve", [other, 1n]) }),
+      );
+      await assert.rejects(
+        run({ data: erc20.encodeFunctionData("approve", [module, 0n]) }),
+      );
+      await assert.rejects(
+        run({ data: erc20.encodeFunctionData("transfer", [module, 1n]) }),
+      );
+      await assert.rejects(run({ limitlessFeeMarketSlug: "other-market" }));
+      await assert.rejects(run({ value: "1" }));
+    },
+  },
+  {
     name: "V2 interactive sponsored approvals and compatibility redemption remain canonical and caller-bound",
     run: async () => {
       const approvals = new ethers.Interface([

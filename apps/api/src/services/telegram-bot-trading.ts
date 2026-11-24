@@ -7613,6 +7613,11 @@ export async function reconcileStaleTelegramTradeIntents(
       WHERE ti.status = ANY($1::text[])
         AND ($2::text IS NULL OR ti.telegram_user_id = $2)
         AND ti.order_id IS NULL
+        -- Use the exact venue observer to attach the frozen fee context
+        -- before a collateral handoff can become terminal from history.
+        AND NOT (ti.venue = 'limitless' AND coalesce(
+          (ti.prepared_snapshot #> '{recoveryPayload,submissionContext}') ? 'collateralFeeModule', false
+        ))
         AND o.user_id = ti.user_id
         AND o.venue = ti.venue
         AND o.order_payload IS NOT NULL

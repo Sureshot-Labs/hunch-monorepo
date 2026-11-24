@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z as zod } from "zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { LimitlessClobFeeError } from "../services/limitless-clob-fees.js";
 import { PolymarketFundingPredecessorUnresolvedError } from "../funding/preparation/polymarket-funding-commit-guard.js";
 import { env } from "../env.js";
 import {
@@ -131,6 +132,7 @@ function readTelegramAppHandoffV2RouteScope(
 }
 
 function telegramAppHandoffFailureCode(error: unknown): string {
+  if (error instanceof LimitlessClobFeeError) return error.code;
   if (error instanceof PolymarketFundingPredecessorUnresolvedError)
     return "plan_changed";
   return error instanceof TelegramAppHandoffV2Error ||
@@ -255,6 +257,9 @@ async function registerTelegramRoutes(
   };
 
   const sendHandoffError = (reply: FastifyReply, error: unknown) => {
+    if (error instanceof LimitlessClobFeeError) {
+      return reply.code(error.responseStatus).send({ error: error.code });
+    }
     // Commit was rejected before creating funding or submitting an order.
     // Use the existing definitive plan-change contract, not an ambiguous 503
     // which makes the Mini App show indefinite authoritative-status polling.

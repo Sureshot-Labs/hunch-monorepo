@@ -252,6 +252,7 @@ export const fundingQuoteRequestSchema = z
   .object({
     liquidityProjectionId: opaqueIdSchema,
     selectedSourceOptionId: opaqueIdSchema,
+    limitlessOrderType: z.literal("GTC").optional(),
     confirmedSourceAmount: moneySchema.nullable(),
     requestedDestinationAmount: moneySchema.nullable(),
   })

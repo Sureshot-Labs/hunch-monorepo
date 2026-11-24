@@ -12,6 +12,11 @@ import {
 } from "../funding/persistence/funding-trade-attempt-repository.js";
 import type { FundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
 import { isRawAmount } from "../funding/domain/raw-amount.js";
+import { appendLimitlessObservedLocatorSql } from "./limitless-observed-locator.js";
+import {
+  lockLimitlessFokScope,
+  readOtherPendingLimitlessFok,
+} from "./limitless-fok-submit-fence.js";
 import type { TelegramAppHandoffV2TradeVenue } from "../services/telegram-app-handoff-v2-contract.js";
 
 /**
@@ -180,6 +185,36 @@ type DirectTradeTerminalReason = Readonly<{
   code: string;
   message: string;
 }>;
+
+export async function noteTelegramAppHandoffLimitlessLocator(
+  db: Pick<Pool, "query">,
+  input: {
+    handoffId: string;
+    userId: string;
+    clientOrderId: string;
+    providerOrderId: string | null;
+    txHash: string | null;
+  },
+): Promise<void> {
+  await db.query(
+    `update telegram_trade_intents telegram_intent
+    set result=coalesce(telegram_intent.result,'{}'::jsonb)||jsonb_build_object(
+        'limitlessLocator',${appendLimitlessObservedLocatorSql("telegram_intent.result -> 'limitlessLocator'", "$4::text", "$5::text")})
+    from telegram_app_handoffs handoff_row
+    where handoff_row.id=$1 and handoff_row.user_id=$2 and telegram_intent.id=handoff_row.trade_intent_id
+      and telegram_intent.user_id=$2 and telegram_intent.venue='limitless'
+      and telegram_intent.status in ('executing','reconcile_required','submitted')
+      and ($4::text is null or coalesce(telegram_intent.result #>> '{limitlessLocator,providerOrderId}',$4)=$4)
+      and telegram_intent.prepared_snapshot #>> '{reconcileKeys,clientOrderId}'=$3`,
+    [
+      input.handoffId,
+      input.userId,
+      input.clientOrderId,
+      input.providerOrderId,
+      input.txHash,
+    ],
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return (
@@ -731,9 +766,9 @@ function hasSameReconcileKeys(
 export async function claimTelegramAppHandoffV2DirectTradeSubmission(
   pool: Pool,
   input: TelegramAppHandoffV2DirectTradeClaimInput,
-): Promise<void> {
+): Promise<boolean> {
   validateClaimInput(input);
-  await tx(pool, (client) =>
+  return tx(pool, (client) =>
     claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction(client, input),
   );
 }
@@ -741,7 +776,7 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmission(
 export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction(
   client: PoolClient,
   input: TelegramAppHandoffV2DirectTradeClaimInput,
-): Promise<void> {
+): Promise<boolean> {
   validateClaimInput(input);
   const locked = await lockDirectTrade(client, {
     handoffId: input.binding.handoffId.trim(),
@@ -752,15 +787,13 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
     locked,
     submission: input.submission,
   });
-  // A retry with the same provider identity must be harmless.  In particular,
-  // a caller can safely re-broadcast the same signed AMM transaction after a
-  // response loss; the chain deduplicates its hash and this row remains the
-  // only claim.  A changed identity still fails closed below.
+  // Return an existing claim distinctly: Limitless CLOB uses status-only
+  // recovery. AMM callers may still rebroadcast an identical signed tx hash.
   if (
     locked.intentStatus === "executing" &&
     hasSameReconcileKeys(locked.intentPreparedSnapshot, input.reconcileKeys)
   ) {
-    return;
+    return false;
   }
   await assertLiveScope({
     assertion: input.assertCurrentScope,
@@ -770,6 +803,27 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
   });
   if (locked.intentStatus !== "external_handoff") {
     throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
+  }
+  if (
+    input.submission.venue === "limitless" &&
+    input.submission.executionKind === "clob" &&
+    isRecord(input.recoveryPayload) &&
+    input.recoveryPayload.orderType === "FOK" &&
+    isRecord(input.recoveryPayload.submissionContext) &&
+    input.recoveryPayload.submissionContext.collateralFeeModule &&
+    "clientOrderId" in input.reconcileKeys &&
+    input.reconcileKeys.clientOrderId
+  ) {
+    const fokScope = {
+      userId: input.userId,
+      walletAddress: input.submission.signer,
+      tokenId: input.submission.outcomeTokenId,
+      side: scope.action === "sell" ? ("SELL" as const) : ("BUY" as const),
+      clientOrderId: input.reconcileKeys.clientOrderId,
+    };
+    await lockLimitlessFokScope(client, fokScope);
+    if (await readOtherPendingLimitlessFok(client, fokScope))
+      throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
   }
   if (scope.action === "sell") {
     await lockDirectSellLaneInTransaction({ client, scope });
@@ -820,6 +874,7 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
   if ((claimed.rowCount ?? 0) !== 1) {
     throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
   }
+  return true;
 }
 
 /**
@@ -869,6 +924,7 @@ export async function claimTelegramAppHandoffV2FundedTradeAttempt(
     idempotencyKey: string;
     marketId: string;
     operationId: string;
+    freshSubmissionError?: Error;
     reservationId: string;
     submission: TelegramAppHandoffV2DirectTradeSubmission;
     userId: string;
@@ -893,6 +949,7 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
     idempotencyKey: string;
     marketId: string;
     operationId: string;
+    freshSubmissionError?: Error;
     reservationId: string;
     submission: TelegramAppHandoffV2DirectTradeSubmission;
     userId: string;
@@ -939,6 +996,7 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
     marketId: input.marketId,
     now: input.now,
     operationId: input.operationId,
+    freshSubmissionError: input.freshSubmissionError,
     reservationId: input.reservationId,
     userId: input.userId,
     venueId: scope.venue,

@@ -2996,6 +2996,7 @@ export async function releaseFundingReservationForProvenAbsentLimitlessTrade(
     expectedClaimToken: string;
     link: FundingTradeReservationLink;
     minimumAgeMs: number;
+    negativeCheckedHashes?: readonly string[];
     now?: Date;
     operationSupportMetadataPatch?: JsonRecord;
     tradeAttemptId: string;
@@ -3008,6 +3009,7 @@ export async function releaseFundingReservationForProvenAbsentLimitlessTrade(
       clientOrderId: input.clientOrderId,
       expectedClaimToken: input.expectedClaimToken,
       minimumAgeMs: input.minimumAgeMs,
+      negativeCheckedHashes: input.negativeCheckedHashes,
       now: input.now,
       operationSupportMetadataPatch: input.operationSupportMetadataPatch,
       userId: input.userId,
@@ -3033,6 +3035,8 @@ export async function releaseFundingReservationForProvenLimitlessFokNoFill(
     expectedClaimToken: string;
     link: FundingTradeReservationLink;
     now?: Date;
+    providerOrderId?: string | null;
+    negativeCheckedHashes?: readonly string[];
     tradeAttemptId: string;
     userId: string;
   }>,
@@ -3043,6 +3047,8 @@ export async function releaseFundingReservationForProvenLimitlessFokNoFill(
       clientOrderId: input.clientOrderId,
       expectedClaimToken: input.expectedClaimToken,
       now: input.now,
+      providerOrderId: input.providerOrderId,
+      negativeCheckedHashes: input.negativeCheckedHashes,
       userId: input.userId,
     });
     await releaseFundingReservationForAbandonedTradeInTransaction(client, {
@@ -3066,6 +3072,8 @@ export async function releaseFundingReservationForProvenLimitlessTerminalRejecti
     expectedClaimToken: string;
     link: FundingTradeReservationLink;
     now?: Date;
+    providerOrderId?: string | null;
+    negativeCheckedHashes?: readonly string[];
     tradeAttemptId: string;
     userId: string;
   }>,
@@ -3077,6 +3085,8 @@ export async function releaseFundingReservationForProvenLimitlessTerminalRejecti
       errorCode: input.errorCode,
       expectedClaimToken: input.expectedClaimToken,
       now: input.now,
+      providerOrderId: input.providerOrderId,
+      negativeCheckedHashes: input.negativeCheckedHashes,
       userId: input.userId,
     });
     await releaseFundingReservationForAbandonedTradeInTransaction(client, {

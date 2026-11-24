@@ -516,6 +516,7 @@ export type FundingDiscoveryRequest = FundingIntent;
 export type FundingQuoteRequest = Readonly<{
   liquidityProjectionId: string;
   selectedSourceOptionId: string;
+  limitlessOrderType?: "GTC";
 }> &
   FundingQuoteAmountBinding;
 
