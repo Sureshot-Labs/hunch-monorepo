@@ -20,10 +20,17 @@ export class LimitlessClobFeeError extends Error {
       | "limitless_fee_wallet_mismatch"
       | "limitless_funding_order_type_mismatch"
       | "limitless_fee_module_approval_required"
-      | "limitless_fee_module_allowance_unavailable",
+      | "limitless_fee_module_allowance_unavailable"
+      | "limitless_trade_validation_rejected"
+      | "limitless_collateral_check_unavailable",
     message: string,
     readonly responseStatus: 409 | 503,
     readonly feePolicy?: LimitlessClobFeePolicy,
+    readonly exchangeAllowance?: Readonly<{
+      exchangeAddress: string;
+      requiredRaw: string;
+      availableRaw: string | null;
+    }>,
   ) {
     super(message);
   }
@@ -32,6 +39,9 @@ export class LimitlessClobFeeError extends Error {
     return {
       code: this.code,
       ...(this.feePolicy ? { feePolicy: this.feePolicy } : {}),
+      ...(this.exchangeAllowance
+        ? { exchangeAllowance: this.exchangeAllowance }
+        : {}),
     };
   }
 
@@ -176,4 +186,45 @@ export async function assertLimitlessFeeModuleAllowance(input: {
       policy,
     );
   }
+}
+
+/** The exchange spends principal; the fee module has its own allowance. */
+export async function assertLimitlessExchangeAllowance(input: {
+  policy: LimitlessClobFeePolicy;
+  owner: string;
+  exchangeAddress: string;
+  principal: bigint;
+  readAllowance: (input: {
+    tokenAddress: string;
+    owner: string;
+    spender: string;
+  }) => Promise<bigint>;
+}): Promise<void> {
+  const { policy, owner, exchangeAddress, principal } = input;
+  if (policy.mode !== "collateral" || principal <= 0n) return;
+  const allowance = await input
+    .readAllowance({
+      tokenAddress: policy.collateralToken,
+      owner,
+      spender: exchangeAddress,
+    })
+    .catch(() => null);
+  if (allowance !== null && allowance >= principal) return;
+  // Use existing pre-dispatch codes so older web clients do not turn a
+  // rejection of a fresh order into a permanent "checking status" state.
+  throw new LimitlessClobFeeError(
+    allowance === null
+      ? "limitless_collateral_check_unavailable"
+      : "limitless_trade_validation_rejected",
+    allowance === null
+      ? "Could not check the Limitless exchange USDC allowance. Refresh and try again."
+      : "The Limitless exchange USDC allowance is too low for this buy. Refresh trading wallet preparation before retrying.",
+    allowance === null ? 503 : 409,
+    policy,
+    {
+      exchangeAddress,
+      requiredRaw: principal.toString(),
+      availableRaw: allowance?.toString() ?? null,
+    },
+  );
 }

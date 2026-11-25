@@ -1933,11 +1933,13 @@ export class WalletPreparationRuntimeService {
       marketClass: effectiveMarketClass,
       marketExchangeAddress: marketContext.exchangeAddress,
     });
-    const feeModuleAllowancePromise =
+    const scopedMarketBuy =
       input.limitlessMarketBuyRaw !== undefined &&
       input.purpose === "buy" &&
       (effectiveMarketClass === "clob" ||
-        effectiveMarketClass === "clob_neg_risk")
+        effectiveMarketClass === "clob_neg_risk");
+    const feeModuleAllowancePromise =
+      scopedMarketBuy && input.limitlessMarketBuyRaw !== undefined
         ? inspectLimitlessFeeApproval({
             owner: input.wallet.walletAddress,
             principalRaw: input.limitlessMarketBuyRaw,
@@ -1958,7 +1960,7 @@ export class WalletPreparationRuntimeService {
       ammAddress: marketContext.ammAddress,
       conditionalTokensAddress:
         fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress,
-      forceFresh: input.forceFresh === true,
+      forceFresh: input.forceFresh === true || scopedMarketBuy,
     }).catch(() => null);
     const venueLockedCollateralPromise = effectiveMarketClass?.startsWith(
       "clob",
@@ -2052,14 +2054,8 @@ export class WalletPreparationRuntimeService {
       cashObserved: cashRaw != null,
       cashRaw,
       cashLockedRaw,
-      clobAllowance:
-        snapshot != null && snapshot.allowanceClob != null
-          ? snapshot.allowanceClob > 0n
-          : false,
-      negRiskClobAllowance:
-        snapshot != null && snapshot.allowanceNegRisk != null
-          ? snapshot.allowanceNegRisk > 0n
-          : false,
+      clobAllowance: snapshot?.allowanceClob ?? null,
+      negRiskClobAllowance: snapshot?.allowanceNegRisk ?? null,
       feeModuleAllowance,
       ammAllowance:
         snapshot != null && snapshot.allowanceAmm != null

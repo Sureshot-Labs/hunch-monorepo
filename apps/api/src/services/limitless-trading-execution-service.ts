@@ -107,6 +107,7 @@ import {
   fetchLimitlessClobMarket,
   marketLimitlessFeePolicy,
   readBaseUsdcAllowance,
+  verifyLimitlessExchangeAllowance,
   verifyLimitlessFeeModuleAllowance,
 } from "./limitless-clob-fee-runtime.js";
 import {
@@ -3878,6 +3879,20 @@ export async function submitLimitlessClientSignedOrder(input: {
       if (feePolicy.mode === "collateral") {
         const exchange = extractLimitlessMarketExchangeAddress(marketPayload);
         if (!exchange) throw unavailableLimitlessFeePolicy();
+        // Retained unfunded Telegram handoffs have a separate dispatch fence.
+        // Do not turn a possible past submission into a pre-dispatch rejection.
+        if (
+          input.body.orderType === "FOK" &&
+          side === "BUY" &&
+          (!directHandoffBinding || fundingReservation) &&
+          coercedMakerAmount !== null
+        )
+          await verifyLimitlessExchangeAllowance({
+            policy: feePolicy,
+            owner: signer,
+            exchangeAddress: exchange,
+            principal: BigInt(coercedMakerAmount),
+          });
         collateralFeeSubmissionContext = buildLimitlessClobSubmissionContext(
           exchange,
           orderForUpstream,

@@ -42,6 +42,7 @@ import {
   syncLimitlessOrderHistoryRoute,
 } from "../services/limitless-trading-execution-service.js";
 import { assertLimitlessSigningFee } from "../services/limitless-clob-fees.js";
+import { verifyLimitlessExchangeAllowance } from "../services/limitless-clob-fee-runtime.js";
 import {
   enforceLimitlessCollateralBuyCheck,
   inspectLimitlessCollateralBuy,
@@ -210,6 +211,13 @@ async function prepareEmbeddedLimitlessOrderSigningRequest(inputs: {
       responseStatus: failure.statusCode,
       responsePayload: failure.payload,
     });
+  if (principal !== null)
+    await verifyLimitlessExchangeAllowance({
+      policy: market.feePolicy,
+      owner: inputs.context.signer,
+      exchangeAddress: market.exchangeAddress,
+      principal,
+    });
 
   return {
     exchangeAddress,
@@ -295,12 +303,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         readCollateral &&
         (!signer || !isEvmWallet(signer) || principal === null)
       )
-        return reply
-          .code(400)
-          .send({
-            error:
-              "Select a Limitless wallet and a USDC amount with up to 6 decimals.",
-          });
+        return reply.code(400).send({
+          error:
+            "Select a Limitless wallet and a USDC amount with up to 6 decimals.",
+        });
       if (readCollateral) reply.header("Cache-Control", "private, no-store");
       const [quote, collateralBuy] = await Promise.all([
         quoteLimitlessClobMarket({

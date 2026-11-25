@@ -1,5 +1,6 @@
 import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import {
+  assertLimitlessExchangeAllowance,
   assertLimitlessFeeModuleAllowance,
   assertLimitlessMarketPayloadSlug,
   readLimitlessClobFeePolicy,
@@ -55,10 +56,27 @@ export function readBaseUsdcAllowance(input: {
   tokenAddress: string;
   owner: string;
   spender: string;
+  timeoutMs?: number;
 }) {
   return fetchErc20Allowance({
     ...input,
     rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
-    timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+    timeoutMs: Math.min(
+      input.timeoutMs ?? Infinity,
+      fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+    ),
+  });
+}
+
+export function verifyLimitlessExchangeAllowance(
+  input: Omit<
+    Parameters<typeof assertLimitlessExchangeAllowance>[0],
+    "readAllowance"
+  >,
+  readAllowance = readBaseUsdcAllowance,
+) {
+  return assertLimitlessExchangeAllowance({
+    ...input,
+    readAllowance: (request) => readAllowance({ ...request, timeoutMs: 3_000 }),
   });
 }
