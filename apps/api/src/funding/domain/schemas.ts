@@ -307,6 +307,10 @@ export const evmTransactionActionSchema = normalizedActionBaseSchema
     data: z.string().regex(hexDataPattern),
     valueRaw: rawAmountSchema,
     gasLimitRaw: rawAmountSchema.nullable(),
+    limitlessFeeMarketSlug: z
+      .string()
+      .regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/i)
+      .optional(),
   })
   .strict();
 

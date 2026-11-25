@@ -18,6 +18,7 @@ import type {
   PreparationActionMaterializer,
   PreparationActionTemplate,
 } from "./core-adapter.js";
+import type { LimitlessFeeApproval } from "./limitless-fee-approval.js";
 
 const ERC20 = new Interface([
   "function approve(address spender,uint256 amount) returns (bool)",
@@ -388,6 +389,7 @@ export function createLimitlessRuntimeActionMaterializer(input: {
   /** Canonical CLOB contracts selected from this market's metadata. */
   clobAddress?: string | null;
   negRiskAddress?: string | null;
+  feeApproval?: LimitlessFeeApproval;
   fetchSigningMessage?: () => Promise<string>;
 }): PreparationActionMaterializer {
   return async ({ facts, requiredActions }) => {
@@ -447,6 +449,30 @@ export function createLimitlessRuntimeActionMaterializer(input: {
         });
       }
       const checkId = source.actionKey.replace(/^approve-/, "");
+      if (checkId === "limitless_fee_module_allowance") {
+        const approval = input.feeApproval;
+        if (
+          !approval ||
+          facts.binding.settlementLocation.asset.networkId !== "evm:8453"
+        ) {
+          throw new Error(
+            "Limitless fee approval has no exact Base market binding",
+          );
+        }
+        return requirement(source, {
+          kind: "evm_transaction",
+          networkId: "evm:8453",
+          senderWalletId: facts.binding.executionWalletId,
+          to: approval.token,
+          data: ERC20.encodeFunctionData("approve", [
+            approval.spender,
+            BigInt(approval.amountRaw),
+          ]),
+          limitlessFeeMarketSlug: approval.marketSlug,
+          valueRaw: "0",
+          gasLimitRaw: null,
+        });
+      }
       const approval = spenderForLimitlessCheck(checkId, {
         adapterAddress: input.adapterAddress,
         ammAddress: input.ammAddress,

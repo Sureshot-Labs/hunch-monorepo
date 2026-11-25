@@ -220,6 +220,64 @@ try {
     );
   await db.query("insert into users(id) values($1)", [userId]);
 
+  await test("changing a Limitless Buy amount cannot replace a dispatched fee approval", async () => {
+    const scope = {
+      ...request(),
+      marketContextId: "limitless:100",
+      limitlessMarketBuyRaw: "1000000",
+    };
+    const feeSlug = "test-fee-market";
+    const run = await prepare(scope, 1, future(), async (runId) => ({
+      controllerWalletRef: controllerId,
+      actions: [
+        {
+          ...action(runId),
+          limitlessFeeMarketSlug: feeSlug,
+        },
+      ],
+    }));
+    const reloaded = await read(run);
+    assert.equal(reloaded.request.limitlessMarketBuyRaw, "1000000");
+    const grant = await admit(reloaded, randomUUID(), "privy_authorization");
+    assert.ok(grant.executionKey);
+    const parsed = parsePreparationExecutionKey(grant.executionKey);
+    assert.ok(parsed);
+    const exactPayload: EmbeddedFundingPayload = {
+      kind: "ethereum",
+      signer,
+      chainId: 8453,
+      executionMode: "sequential",
+      returnOnAccepted: true,
+      transactions: [
+        { to: token, data, sponsor: true, limitlessFeeMarketSlug: feeSlug },
+      ],
+    };
+    await assert.rejects(
+      inspectEmbeddedPreparationAdmission(
+        db,
+        userId,
+        grant.executionKey,
+        payload(),
+      ),
+      /committed action/,
+    );
+    await inspectEmbeddedPreparationAdmission(
+      db,
+      userId,
+      grant.executionKey,
+      exactPayload,
+    );
+    await beginPreparationProviderDispatch(db, userId, parsed, exactPayload);
+    const changed = await prepare({
+      ...scope,
+      limitlessMarketBuyRaw: "2000000",
+      expectedInspectionRevision: `inspection_${randomUUID()}`,
+    });
+    assert.equal(changed.runId, run.runId);
+    assert.equal(changed.request.limitlessMarketBuyRaw, "1000000");
+    assert.equal(await journalCount(scope), 1);
+  });
+
   await test("expired never-admitted run creates a fresh generation and preserves historical actions", async () => {
     const { scope, run } = await fixture();
     await expire(run);

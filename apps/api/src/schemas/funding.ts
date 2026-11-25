@@ -81,6 +81,13 @@ const preparationRequestBaseSchema = z
     marketClass: z.string().trim().min(1).max(80).nullable(),
     positionActionRef: z.string().uuid().nullable().optional(),
     controllerWalletRef: z.string().uuid().nullable().optional(),
+    // Narrow opt-in for a market BUY. The amount caps the new approval;
+    // the collateral token and spender are resolved by the server.
+    limitlessMarketBuyRaw: z
+      .string()
+      .regex(/^[1-9][0-9]{0,15}$/)
+      .refine((value) => Number.isSafeInteger(Number(value)))
+      .optional(),
   })
   .strict();
 
@@ -96,7 +103,16 @@ export const fundingPreparationPrepareRequestSchema =
       expectedInspectionRevision: opaqueIdSchema,
       admissionProtocolVersion: z.literal(1).optional(),
     })
-    .strict();
+    .strict()
+    .refine(
+      (request) =>
+        request.limitlessMarketBuyRaw === undefined ||
+        request.admissionProtocolVersion === 1,
+      {
+        message: "Limitless fee approval requires preparation admission",
+        path: ["admissionProtocolVersion"],
+      },
+    );
 
 export const actionSummarySchema = z
   .object({
@@ -713,6 +729,7 @@ const fundingPreparationRunResponseFields = {
   expiresAt: z.string().datetime(),
   resolvedAt: z.string().datetime().nullable(),
   replayed: z.boolean(),
+  limitlessFeePreparation: z.literal(true).optional(),
   admissionProtocolVersion: z.literal(1).nullable().optional(),
 } as const;
 

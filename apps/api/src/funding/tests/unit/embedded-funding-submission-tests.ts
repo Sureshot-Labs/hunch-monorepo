@@ -96,6 +96,34 @@ const payload: Extract<EmbeddedFundingPayload, { kind: "ethereum" }> = {
   transactions: [{ to, data: "0x1234", value: "0x7", sponsor: true }],
 };
 validateEmbeddedFundingPayload(action, lease, payload);
+const feeAction = { ...action, limitlessFeeMarketSlug: "test-market" };
+const feePayload = {
+  ...payload,
+  transactions: payload.transactions.map((transaction) => ({
+    ...transaction,
+    limitlessFeeMarketSlug: "test-market",
+  })),
+};
+validateEmbeddedFundingPayload(feeAction, lease, feePayload);
+assert.throws(
+  () => validateEmbeddedFundingPayload(feeAction, lease, payload),
+  /committed action/,
+);
+assert.throws(
+  () => validateEmbeddedFundingPayload(action, lease, feePayload),
+  /committed action/,
+);
+assert.throws(
+  () =>
+    validateEmbeddedFundingPayload(feeAction, lease, {
+      ...feePayload,
+      transactions: feePayload.transactions.map((transaction) => ({
+        ...transaction,
+        limitlessFeeMarketSlug: "different-market",
+      })),
+    }),
+  /committed action/,
+);
 const transaction = payload.transactions[0];
 assert.ok(transaction);
 validateEmbeddedFundingPayload(action, lease, {

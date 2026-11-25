@@ -33,6 +33,7 @@ export type FundingPreparationRunRequest = Readonly<{
   positionActionRef: string | null;
   controllerWalletRef: string | null;
   expectedInspectionRevision: string;
+  limitlessMarketBuyRaw?: string;
   executionJournal?: PreparationExecutionJournal;
 }>;
 
@@ -202,6 +203,9 @@ export function fundingPreparationRequestFingerprint(
     positionActionRef: request.positionActionRef,
     controllerWalletRef: request.controllerWalletRef,
     expectedInspectionRevision: request.expectedInspectionRevision,
+    ...(request.limitlessMarketBuyRaw === undefined
+      ? {}
+      : { limitlessMarketBuyRaw: request.limitlessMarketBuyRaw }),
   })}`;
 }
 

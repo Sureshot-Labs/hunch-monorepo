@@ -174,7 +174,16 @@ const resolveLimitlessRequirements: PreparationRequirementResolver = (
     return LIMITLESS_PREPARATION_REQUIREMENTS[input.purpose].clob;
   }
   if (!isLimitlessMarketClass(input.marketClass)) return null;
-  return LIMITLESS_PREPARATION_REQUIREMENTS[input.purpose][input.marketClass];
+  const checks =
+    LIMITLESS_PREPARATION_REQUIREMENTS[input.purpose][input.marketClass];
+  if (
+    input.limitlessMarketBuyRaw !== undefined &&
+    input.purpose === "buy" &&
+    (input.marketClass === "clob" || input.marketClass === "clob_neg_risk")
+  ) {
+    return [...checks, "limitless_fee_module_allowance"];
+  }
+  return checks;
 };
 
 export class LimitlessWalletPreparationAdapter extends PurposeAwareWalletPreparationAdapter {

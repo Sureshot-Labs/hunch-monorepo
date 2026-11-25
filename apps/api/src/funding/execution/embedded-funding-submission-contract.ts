@@ -108,6 +108,7 @@ export type EmbeddedFundingPayload =
         value?: string;
         gas?: string;
         sponsor?: boolean;
+        limitlessFeeMarketSlug?: string;
       }[];
     }
   | {
@@ -168,6 +169,9 @@ export function validateEmbeddedFundingPayload(
         if (
           !addressEqual(call.to, actual.to) ||
           call.data.toLowerCase() !== actual.data.toLowerCase() ||
+          (action.kind === "evm_transaction"
+            ? action.limitlessFeeMarketSlug
+            : undefined) !== actual.limitlessFeeMarketSlug ||
           BigInt(call.valueRaw) !== BigInt(actual.value ?? "0") ||
           (action.kind === "evm_transaction" &&
             (action.gasLimitRaw === null

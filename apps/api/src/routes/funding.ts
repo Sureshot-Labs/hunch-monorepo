@@ -203,6 +203,7 @@ export type FundingRouteDependencies = Readonly<{
       marketClass: string | null;
       positionActionRef?: string | null;
       controllerWalletRef?: string | null;
+      limitlessMarketBuyRaw?: string;
     }>,
   ): Promise<PreparationResult>;
   prepare(
@@ -217,6 +218,7 @@ export type FundingRouteDependencies = Readonly<{
       operationId?: string;
       expectedInspectionRevision: string;
       admissionProtocolVersion?: 1;
+      limitlessMarketBuyRaw?: string;
     }>,
   ): Promise<FundingPreparationRun>;
   admitPreparationAction(
@@ -462,6 +464,9 @@ function publicPreparationRun(run: FundingPreparationRun) {
     expiresAt: run.expiresAt.toISOString(),
     resolvedAt: run.resolvedAt?.toISOString() ?? null,
     replayed: run.replayed,
+    ...(run.request.limitlessMarketBuyRaw === undefined
+      ? {}
+      : { limitlessFeePreparation: true as const }),
     admissionProtocolVersion: requiresAdmission ? (1 as const) : null,
   };
 }
