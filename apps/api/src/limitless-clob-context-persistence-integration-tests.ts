@@ -1450,6 +1450,41 @@ try {
     providerOrderId: scopedProviderId,
     txHash: scopedTxHash,
   });
+  // An unrelated update just touched last_update, but the original
+  // submission is already due and has never been observed.
+  const { rows: clocks } = await client.query<{ last_update: Date }>(
+    `update orders set posted_at=now()-interval '31 seconds' where id=$1 returning last_update`,
+    [scopedClaim.order.id],
+  );
+  const observationNow = clocks[0]!.last_update;
+  let firstPolls = 0;
+  const observeClocked = (now: Date) =>
+    reconcileLimitlessDirectOrderJournals(db, {
+      config: fixtureConfig,
+      now,
+      lookup: async (ids) => {
+        assert.deepEqual(ids, [secondId]);
+        firstPolls++;
+        return new Map([[secondId, { kind: "not_found" }]]);
+      },
+      readFreshHistory: async () => null,
+      readHistoryReceipt: async () => null,
+    });
+  assert.equal(await observeClocked(observationNow), 0);
+  assert.equal(
+    firstPolls,
+    1,
+    "last_update cannot postpone the first observation",
+  );
+  assert.equal(
+    await observeClocked(new Date(observationNow.getTime() + 29_000)),
+    0,
+  );
+  assert.equal(
+    firstPolls,
+    1,
+    "rechecks still respect the worker observation cooldown",
+  );
   for (const [index, scenario] of [
     "wrong-provider-id",
     "wrong-salt",

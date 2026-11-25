@@ -1255,10 +1255,10 @@ export async function reconcileLimitlessDirectOrderJournals(
   },
 ): Promise<number> {
   const now = input.now ?? new Date();
-  // orders.last_update is overwritten by a database trigger (even if
-  // explicitly set). Keep observation order independent of that column.
+  // The orders trigger refreshes last_update on unrelated writes. Use the
+  // original submission time until the worker records its first observation.
   const observationTime =
-    "coalesce((order_payload->>'_hunchLimitlessDirectObservedAt')::timestamptz,last_update)";
+    "coalesce((order_payload->>'_hunchLimitlessDirectObservedAt')::timestamptz,posted_at)";
   const { rows } = await pool.query<{
     id: string;
     user_id: string;
