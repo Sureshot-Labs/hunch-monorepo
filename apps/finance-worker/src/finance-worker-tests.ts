@@ -781,6 +781,7 @@ const tests: TestCase[] = [
       let observedOptions: Record<string, unknown> = {};
       setFundingWorkerModuleLoaderForTests(
         async () => ({
+          runFreshLimitlessOrderObservation: async () => 0,
           runFundingReconciliationJob: async (pool, options) => {
             observedPool = pool;
             observedOptions = options;

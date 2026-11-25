@@ -1130,6 +1130,7 @@ export async function promoteLimitlessDirectOrderJournal(
     filledAt?: Date | null;
     negativeCheckedHashes?: readonly string[];
     rejectConcurrentOrderEvidence?: boolean;
+    expectedDirectLocator?: unknown;
   },
 ): Promise<boolean> {
   return tx(pool, async (db) => {
@@ -1147,6 +1148,8 @@ export async function promoteLimitlessDirectOrderJournal(
        where id=$1 and user_id=$2 and venue='limitless' and venue_order_id=concat('client:',$3::text)
          and status='submitted' and ${limitlessHistoryClientIdSql("journal_order.order_payload")}=$3
          and ${limitlessFrozenCollateralSql("journal_order.order_payload")}
+         and ($12::jsonb is null or
+              coalesce(journal_order.order_payload->'_hunchLimitlessDirectLocator','null'::jsonb)=$12)
          and ($4::text is null or coalesce(journal_order.order_payload #>> '{_hunchLimitlessDirectLocator,providerOrderId}',$4)=$4)
          and ($4::text is null or not exists(
            select 1 from orders existing_order where existing_order.venue='limitless'
@@ -1183,6 +1186,9 @@ export async function promoteLimitlessDirectOrderJournal(
         input.filledAt ?? null,
         input.negativeCheckedHashes ?? [],
         input.rejectConcurrentOrderEvidence ?? false,
+        input.expectedDirectLocator === undefined
+          ? null
+          : JSON.stringify(input.expectedDirectLocator),
       ],
     );
     if (updated.rowCount === 1) return true;
@@ -1209,6 +1215,10 @@ export async function promoteLimitlessDirectOrderJournal(
           and journal_order.status='submitted' and journal_order.side in ('BUY','SELL')
           and ${limitlessHistoryClientIdSql("journal_order.order_payload")}=$3
           and coalesce(journal_order.order_payload #>> '{_hunchLimitlessDirectLocator,providerOrderId}',$4)=$4
+          and ($5::jsonb is null or (
+            coalesce(journal_order.order_payload->'_hunchLimitlessDirectLocator','null'::jsonb)=$5
+            and (provider_order.order_hash is null or lower(provider_order.order_hash)=lower($6::text))
+          ))
           and (${limitlessHistoryClientIdSql("provider_order.order_payload")} is null
             or ${limitlessHistoryClientIdSql("provider_order.order_payload")}=$3)
           and provider_order.funding_operation_id is null and provider_order.funding_reservation_id is null
@@ -1218,6 +1228,10 @@ export async function promoteLimitlessDirectOrderJournal(
         input.userId,
         input.clientOrderId,
         input.providerOrderId,
+        input.expectedDirectLocator === undefined
+          ? null
+          : JSON.stringify(input.expectedDirectLocator),
+        input.orderHash ?? null,
       ],
     );
     if (adoption.rows.length !== 1) return false;

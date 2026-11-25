@@ -15,6 +15,8 @@ import {
 } from "./finance-jobs.js";
 import {
   closeFundingReconciliationPool,
+  limitlessFundingWorkerConfig,
+  runFreshLimitlessOrderObservationJob,
   runFundingReceiveInventoryReviewJob,
   runFundingReceiveSpentReviewJob,
   runFundingReconciliationJob,
@@ -229,6 +231,21 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
       jitterSec: 0,
       run: () => runContentWorkerJob(),
       isNoopResult: isContentWorkerNoop,
+    },
+    {
+      name: "limitless_fresh_order_observation",
+      enabled:
+        workerEnv.fundingReconciliationEnabled &&
+        Boolean(
+          workerEnv.databaseUrl && limitlessFundingWorkerConfig(workerEnv),
+        ),
+      intervalSec: 3,
+      timeoutSec: 8,
+      maxRetries: 0,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: 0,
+      run: runFreshLimitlessOrderObservationJob,
+      isNoopResult: (result) => result === 0,
     },
     {
       name: "funding_reconciliation",

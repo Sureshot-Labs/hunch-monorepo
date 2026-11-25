@@ -281,6 +281,7 @@ export type PositionActionResult = Readonly<{
   status: "in_progress" | "completed" | "reconcile_required" | "failed";
   submissionFingerprint: string | null;
   reasonCodes: readonly FundingReasonCode[];
+  confirmationStage?: "payout_seen_awaiting_finality";
 }>;
 
 export interface PositionActionExecutor {

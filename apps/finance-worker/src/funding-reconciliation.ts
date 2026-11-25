@@ -99,6 +99,10 @@ type FundingReconciliationResult = {
 };
 
 type FundingWorkerModule = {
+  runFreshLimitlessOrderObservation: (
+    pool: Pool,
+    config: NonNullable<FundingReconciliationOptions["limitless"]>,
+  ) => Promise<number>;
   runFundingReconciliationJob: (
     pool: Pool,
     options: FundingReconciliationOptions,
@@ -308,6 +312,21 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
     ...(delegatedExecution ? { delegatedExecution } : {}),
     ...(privyTransactionLookup ? { privyTransactionLookup } : {}),
   });
+}
+
+let freshLimitlessObservation: Promise<number> | null = null;
+export function runFreshLimitlessOrderObservationJob(): Promise<number> {
+  const config = limitlessFundingWorkerConfig(env);
+  if (!config) return Promise.resolve(0);
+  // Scheduler timeouts must not start overlapping observations.
+  freshLimitlessObservation ??= getFundingWorkerModule()
+    .then((module) =>
+      module.runFreshLimitlessOrderObservation(getFundingPool(), config),
+    )
+    .finally(() => {
+      freshLimitlessObservation = null;
+    });
+  return freshLimitlessObservation;
 }
 
 export async function runFundingReceiveSpentReviewJob(): Promise<

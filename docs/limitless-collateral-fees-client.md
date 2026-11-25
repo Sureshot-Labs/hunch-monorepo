@@ -96,18 +96,95 @@ reserve in the funding budget.
 
 See [Limitless balance and approval checks](https://docs.limitless.exchange/developers/migrate-to-new-trading-venues#balance-and-approval-checks).
 
-### Prepare the fee approval with the trading wallet
+### Prepare the exchange and fee approvals with the trading wallet
 
 For a COLLATERAL FOK BUY, pass the exact order principal in micro-USDC as
 `limitlessMarketBuyRaw` to both `POST /funding/preparation/inspect` and
 `POST /funding/preparation/prepare`. Use the same owned binding on both calls
 and send `admissionProtocolVersion: 1` when preparing. Inspect even if the
-unscoped destination says it is ready. The server verifies the market and fee
-spender, and requests a bounded approval only when the observed allowance is
-zero. The embedded executor must forward the admitted action's
+unscoped destination says it is ready. The server verifies the market and both
+spenders. The exchange allowance must cover the principal; preparation can
+return a bounded update when a positive allowance no longer covers it.
+The fee module is a separate approval. Execute only the admitted actions
+with user authorization and follow that preparation run to readiness.
+The embedded executor must forward the admitted action's
 `limitlessFeeMarketSlug` unchanged. Continue an existing run through its
 status and admission endpoints instead of recreating an uncertain action.
 This opt-in does not replace the balance/fee-reserve check before signing.
+
+## iOS: fund the current amount, then sign once
+
+Bind, quote and prepare for the same selected wallet, market, token, side and
+amount. On `standard_reserve_shortfall` or `insufficient_principal`, use
+`POST /funding/liquidity` for the current
+draft. Send the actual order principal as `consumerIntent.spend.raw`, the full
+`collateralBuy.standardRequiredRaw` as `requestedDestinationAmount.raw`, and
+the current principal in cents as `marketBuyAmountUsdCents` for market buys.
+Discovery can use eligible Solana USDC or other owned cash; it is not itself a
+transfer. Check the returned options before asking the user to confirm funding.
+After funding, recheck readiness and obtain a fresh quote before signing.
+
+When the user changes the amount or trading context, invalidate the old
+funding result and ignore late responses for that draft. For example, with
+2.019319 USDC on Base a $2 order needs 2.10 USDC on a fee-enabled market.
+The $1.92 direct-only maximum is not the total wallet budget. A rejected
+$100 funding projection says nothing about the edited $2 draft.
+
+## iOS: direct FOK order status is not a second order
+
+`POST /trade/limitless/order` still returns the existing filled/no-fill
+responses. For a tracked direct FOK with an uncertain result it can return
+the backward-compatible HTTP 409 with this additive body:
+
+```json
+{
+  "code": "limitless_submit_reconciling",
+  "error": "Limitless order status is being reconciled.",
+  "recoveryState": "pending",
+  "clientOrderId": "hunch-direct-0123456789abcdef0123456789abcdef"
+}
+```
+
+Decode the **code** before mapping 409s to errors. Do not display
+“Trade failed” for this or for `limitless_prior_submission_reconciling`
+(the latter points to a different existing order; the new one was not sent).
+Persist the recovery handle with the original wallet, and use
+`GET /trade/limitless/orders/{clientOrderId}` with that wallet. Do not poll
+by re-POSTing the order. The backend checks fresh orders early and continues
+status-only recovery in the background.
+
+- `filled` plus a venue `orderId`: show success and refresh orders/positions.
+- `pending`, `missing`, network error or timeout: the result is not known.
+  Keep the original attempt available; no duplicate signing or submission.
+- `no_fill` or `failed`: the tracked attempt has a terminal outcome.
+  A new trade needs fresh user consent.
+
+Older responses or a lost response can lack the handle. Before the POST,
+persist the local recovery ID: `hunch-direct-` plus the first 32 lowercase
+hex characters (without `0x`) of the EIP-712 CLOB `Order` **struct hash**.
+Use the original signed fields and the CLOB Order type, not the domain-bound
+digest, signature, JSON hash, or a new salt.
+Copy and funded attempts must follow their original Copy/funding IDs, not
+be converted into a direct order.
+
+## iOS: redeem payout seen vs finalized
+
+After reporting the wallet submission, follow the original
+`/position-actions/{id}` operation. The existing
+`POST /position-actions/{id}/reconcile` can return
+`result.status: "in_progress"` with optional
+`result.confirmationStage: "payout_seen_awaiting_finality"` when the exact
+Base redemption and USDC credit are visible in a canonical block. This
+applies to direct Conditional Tokens redemptions; adapter redemptions
+continue to wait for finalized evidence before reporting completion.
+
+This is a non-terminal hint, not a persisted completion or a promise of
+finality. The screen can say “Payout detected; waiting for network
+confirmation” and can be closed. An absent hint on a later check is not a
+failure or permission to redeem again. Continue tracking the same operation
+at a bounded cadence; only show completion after final receipt and position
+verification. Never prepare or broadcast another redeem just because the UI
+timed out.
 
 ## Checking an existing Copy
 

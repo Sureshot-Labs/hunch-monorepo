@@ -150,6 +150,7 @@ try {
       submissionFingerprint: hash,
     });
   }
+  let finalizedBlock = "0x63";
   globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     assert.equal(
@@ -162,7 +163,7 @@ try {
         jsonrpc: "2.0",
         id: body.id,
         result: {
-          number: "0x64",
+          number: body.params[0] === "finalized" ? finalizedBlock : "0x64",
           hash: blockHash,
           timestamp: ethers.toBeHex(Math.floor(Date.now() / 1000) + 1),
         },
@@ -180,6 +181,21 @@ try {
     }) as unknown as ethers.TransactionReceipt;
   const [first, second] = actions;
   assert.ok(first && second);
+  const pending = await runtime.reconcile(userId, first.id);
+  assert.equal(pending.status, "in_progress");
+  assert.equal(pending.confirmationStage, "payout_seen_awaiting_finality");
+  assert.equal(
+    (await runtime.reconcile(userId, second.id)).confirmationStage,
+    undefined,
+  );
+  const notFinalized = await fetchPositionActionForUser(pool, {
+    userId,
+    operationId: first.id,
+  });
+  assert.equal(notFinalized?.status, "submitted");
+  assert.equal(notFinalized?.receiptStatus, "pending");
+  assert.equal(notFinalized?.postconditionStatus, "pending");
+  finalizedBlock = "0x64";
   assert.equal((await runtime.reconcile(userId, first.id)).status, "completed");
   assert.equal(
     (await runtime.reconcile(userId, second.id)).status,

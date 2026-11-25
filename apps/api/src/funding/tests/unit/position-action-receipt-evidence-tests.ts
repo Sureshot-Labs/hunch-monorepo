@@ -133,12 +133,17 @@ try {
   );
   failBlockRead = false;
   finalizedHeight = 99;
-  assert.equal(await read(a), null, "mined is not finalized settlement");
+  assert.equal((await read(a))?.evidence.finality, "mined");
+  assert.equal((await read(a))?.actualPayoutRaw, "1000000");
+  assert.equal((await read(b))?.actualPayoutRaw, null);
+  canonicalBlockHash = ethers.id("unfinalized-orphan");
+  assert.equal(await read(a), null, "an orphaned receipt is not a payout hint");
+  canonicalBlockHash = blockHash;
   receiptStatus = 0;
   assert.equal(
-    await read(a),
-    null,
-    "a pre-final revert cannot trigger terminal failure/retry",
+    (await read(a))?.evidence.finality,
+    "mined",
+    "a pre-final revert remains tentative",
   );
   finalizedHeight = 100;
   assert.equal(

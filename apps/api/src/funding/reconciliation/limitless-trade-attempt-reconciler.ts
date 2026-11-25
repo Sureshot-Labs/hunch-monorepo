@@ -1172,14 +1172,16 @@ async function observeScopedDirectSettlements(
   rows: readonly DirectJournalStatusIdentity[],
   statuses: Map<string, LimitlessExactClientOrderStatus>,
   lookup: ExactStatusLookup,
-): Promise<void> {
+  requireRetainedProviderId: boolean,
+): Promise<Set<string>> {
+  const deferred = new Set<string>();
   const owners = new Map<number, DirectJournalStatusIdentity[]>();
   for (const row of rows) {
-    if (statuses.get(row.client_order_id)?.kind !== "not_found") continue;
+    if (statuses.get(row.client_order_id)?.kind === "found") continue;
     const locator = readLimitlessObservedLocator(
       row.order_payload._hunchLimitlessDirectLocator,
     );
-    if (!locator.providerOrderId) continue;
+    if (requireRetainedProviderId && !locator.providerOrderId) continue;
     // The submit route persists the verified Limitless profile here, not a
     // client-supplied owner or the user's current primary wallet.
     const ownerId = row.order_payload.ownerId;
@@ -1193,6 +1195,7 @@ async function observeScopedDirectSettlements(
     if (group) group.push(row);
     else if (owners.size < MAX_DIRECT_SCOPED_STATUS_OWNERS)
       owners.set(ownerId, [row]);
+    else deferred.add(row.client_order_id);
   }
   await Promise.all(
     Array.from(owners, async ([ownerId, group]) => {
@@ -1210,7 +1213,11 @@ async function observeScopedDirectSettlements(
         const locator = readLimitlessObservedLocator(
           row.order_payload._hunchLimitlessDirectLocator,
         );
-        if (status.item.providerOrderId !== locator.providerOrderId) continue;
+        if (
+          locator.providerOrderId &&
+          status.item.providerOrderId !== locator.providerOrderId
+        )
+          continue;
         const parsed = parseLimitlessOrderResult(status.item.payload);
         const { order } = parsed;
         const expected = limitlessClobSubmittedOrder(row.order_payload);
@@ -1219,7 +1226,7 @@ async function observeScopedDirectSettlements(
           classifyFrozenLimitlessFokResult(parsed) !== "settled" ||
           !order ||
           !expected ||
-          order.id !== locator.providerOrderId ||
+          order.id !== status.item.providerOrderId ||
           typeof order.maker !== "string" ||
           order.maker.toLowerCase() !== String(expected.maker).toLowerCase() ||
           typeof order.signer !== "string" ||
@@ -1230,19 +1237,21 @@ async function observeScopedDirectSettlements(
           String(order.salt) !== String(expected.salt) ||
           !hash ||
           locator.overflow ||
-          (locator.hashes.length > 0 && !locator.hashes.includes(hash))
+          locator.hashes.some((known) => known !== hash)
         )
           continue;
         statuses.set(row.client_order_id, status);
       }
     }),
   );
+  return deferred;
 }
 
 export async function reconcileLimitlessDirectOrderJournals(
   pool: Pool,
   input: {
     config: LimitlessFundingReconciliationConfig;
+    freshOnly?: boolean;
     now?: Date;
     lookup?: ExactStatusLookup;
     lookupScoped?: ExactStatusLookup;
@@ -1259,6 +1268,14 @@ export async function reconcileLimitlessDirectOrderJournals(
   // original submission time until the worker records its first observation.
   const observationTime =
     "coalesce((order_payload->>'_hunchLimitlessDirectObservedAt')::timestamptz,posted_at)";
+  const due = (clock: "$1" | "$2") =>
+    input.freshOnly
+      ? `posted_at > ${clock}::timestamptz - interval '16 seconds'
+         and posted_at <= ${clock}::timestamptz - interval '3 seconds'
+         and ${observationTime} <= ${clock}::timestamptz - interval '3 seconds'`
+      : `${clock}::timestamptz >=
+         case when ${observationTime} < posted_at + interval '16 seconds'
+           then posted_at else ${observationTime} end + interval '30 seconds'`;
   const { rows } = await pool.query<{
     id: string;
     user_id: string;
@@ -1275,19 +1292,28 @@ export async function reconcileLimitlessDirectOrderJournals(
         where venue='limitless' and venue_order_id like 'client:hunch-direct-%'
           and order_type='FOK' and status='submitted' and side in ('BUY','SELL')
           and ${limitlessFrozenCollateralSql()}
-          and ${observationTime} <= $1::timestamptz - interval '30 seconds'
+          and ${due("$1")}
         order by ${observationTime},id limit 10`,
     [now],
   );
   if (!rows.length) return 0;
   const lookup = input.lookup ?? createLimitlessExactStatusLookup(input.config);
-  const statuses = await lookup(rows.map((row) => row.client_order_id)).catch(
-    () => new Map<string, LimitlessExactClientOrderStatus>(),
-  );
+  const statuses = input.freshOnly
+    ? new Map<string, LimitlessExactClientOrderStatus>()
+    : await lookup(rows.map((row) => row.client_order_id)).catch(
+        () => new Map<string, LimitlessExactClientOrderStatus>(),
+      );
   const lookupScoped =
-    input.lookupScoped ?? (input.lookup ? undefined : lookup);
-  if (lookupScoped)
-    await observeScopedDirectSettlements(rows, statuses, lookupScoped);
+    input.lookupScoped ??
+    (input.freshOnly || !input.lookup ? lookup : undefined);
+  const scopedDeferred = lookupScoped
+    ? await observeScopedDirectSettlements(
+        rows,
+        statuses,
+        lookupScoped,
+        !input.freshOnly,
+      )
+    : new Set<string>();
   const readHistoryReceipt =
     input.readHistoryReceipt ?? createLimitlessHistoryReceiptReader();
   const readFreshHistory =
@@ -1296,6 +1322,10 @@ export async function reconcileLimitlessDirectOrderJournals(
   let historyRequestsLeft = 2;
   let repaired = 0;
   for (const row of rows) {
+    // The short window only looks for positive exact status. It must not
+    // spend history/receipt budget or conclude absence.
+    const early = input.freshOnly === true;
+    if (early && scopedDeferred.has(row.client_order_id)) continue;
     const status = statuses.get(row.client_order_id);
     const parsed =
       status?.kind === "found"
@@ -1304,6 +1334,7 @@ export async function reconcileLimitlessDirectOrderJournals(
     // Leave deferred rows at the front for the next bounded pass. Advancing
     // every due row would keep giving the same sorted IDs the history slots.
     if (
+      !early &&
       historyRequestsLeft <= 0 &&
       !(parsed && classifyFrozenLimitlessFokResult(parsed) === "settled")
     )
@@ -1316,7 +1347,7 @@ export async function reconcileLimitlessDirectOrderJournals(
     const rotated = await pool.query(
       `update orders set order_payload=order_payload||jsonb_build_object('_hunchLimitlessDirectObservedAt',$2::text)
          where id=$1 and venue_order_id=concat('client:',$3::text)
-         and status='submitted' and ${observationTime} <= $2::timestamptz-interval '30 seconds'`,
+         and status='submitted' and ${due("$2")}`,
       [row.id, now.toISOString(), row.client_order_id],
     );
     if (!rotated.rowCount) continue;
@@ -1358,8 +1389,9 @@ export async function reconcileLimitlessDirectOrderJournals(
         if (observedHash) knownHashes.add(observedHash);
       }
       if (
-        (!initialProviderId && knownProviderId) ||
-        (observedHash && !storedLocator.hashes.includes(observedHash))
+        !early &&
+        ((!initialProviderId && knownProviderId) ||
+          (observedHash && !storedLocator.hashes.includes(observedHash)))
       )
         await noteLimitlessDirectOrderLocator(pool, {
           ...identity,
@@ -1377,12 +1409,19 @@ export async function reconcileLimitlessDirectOrderJournals(
             price: fill?.averagePrice,
             size: fill?.shares,
             filledAt: now,
+            ...(early
+              ? {
+                  expectedDirectLocator:
+                    row.order_payload._hunchLimitlessDirectLocator ?? null,
+                }
+              : {}),
           })
         )
           repaired++;
         continue;
       }
     }
+    if (early) continue;
     const unboundAssessment = new Map<string, "matched" | "unmatched">();
     const observeHistory = (
       extraLocators?: DirectHistoryPage["locators"],

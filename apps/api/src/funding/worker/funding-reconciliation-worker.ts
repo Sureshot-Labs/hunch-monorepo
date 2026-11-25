@@ -63,6 +63,15 @@ import {
 // The funding loop itself can run every second. Limit the separate
 // pre-dispatch journal poll on the same worker without changing that loop.
 const nextLimitlessDirectJournalPoll = new WeakMap<Pool, number>();
+export function runFreshLimitlessOrderObservation(
+  pool: Pool,
+  config: LimitlessFundingReconciliationConfig,
+): Promise<number> {
+  return reconcileLimitlessDirectOrderJournals(pool, {
+    config,
+    freshOnly: true,
+  });
+}
 
 // Channel composition belongs at the worker edge. The receipt router itself
 // only executes a provider-neutral disposition, so a new Telegram venue is a

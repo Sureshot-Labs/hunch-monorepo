@@ -197,6 +197,9 @@ export const positionActionReconcileResponseSchema = z
         ]),
         submissionFingerprint: z.string().nullable(),
         reasonCodes: z.array(fundingReasonCodeSchema).max(32),
+        confirmationStage: z
+          .literal("payout_seen_awaiting_finality")
+          .optional(),
       })
       .strict(),
   })
