@@ -33,6 +33,7 @@ import {
   markFundingTradeAttemptSubmissionStarted,
   noteFundingLimitlessClobLocator,
   recordFundingTradeAttemptOutcome,
+  yieldLimitlessHistoryObservationLease,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -300,6 +301,7 @@ type LimitlessRouteLogger = {
 };
 
 type LimitlessClientOrderBody = {
+  pendingResponseVersion?: 1;
   sourceRef?: SocialSourceRef;
   copyIdempotencyKey?: string;
   requireStandardFeeReserve?: boolean;
@@ -498,8 +500,12 @@ export type LimitlessClientSignedOrderResult =
     }
   | {
       ok: true;
+      statusCode?: 202;
       payload: {
         ok: boolean;
+        clientOrderId?: string;
+        recoveryId?: string;
+        recoveryState?: "pending";
         orderId?: string;
         status?: string;
         referralFirstTrade?: unknown;
@@ -4810,6 +4816,13 @@ export async function submitLimitlessClientSignedOrder(input: {
   const parsedResult = parseLimitlessOrderResult(upstream.payload);
   const responseTxHash = canonicalLimitlessTransactionHash(parsedResult.txHash);
   const frozenFokResult = classifyFrozenLimitlessFokResult(parsedResult);
+  const acceptedDelayed =
+    upstream.ok &&
+    parsedResult.settlementStatus === "delayed" &&
+    parsedResult.venueOrderId !== null &&
+    !parsedResult.hasConflictingMatch &&
+    !parsedResult.explicitNoFill &&
+    !isLimitlessTerminalRejectedStatus(parsedResult.status);
   const mustReconcileFrozenFok =
     isFrozenCollateralFok &&
     (upstream.ok
@@ -4836,7 +4849,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       })
         .then(() => true)
         .catch(keepDirectPendingOnPersistenceError);
-      if (!retained) return pendingOrder();
+      if (!retained && !acceptedDelayed) return pendingOrder();
     }
     if (hasLocator && fundingReservation && fundingTradeAttemptId)
       await noteFundingLimitlessClobLocator(input.pool, {
@@ -4845,6 +4858,13 @@ export async function submitLimitlessClientSignedOrder(input: {
         operationId: fundingReservation.operationId,
         attemptId: fundingTradeAttemptId,
         clientOrderId,
+      }).catch((error: unknown) => {
+        if (!acceptedDelayed || directHandoffBinding || copyAttempt)
+          throw error;
+        input.log?.warn?.(
+          { clientOrderId },
+          "Limitless funded delayed order locator could not be saved",
+        );
       });
     if (hasLocator && directHandoffBinding && !fundingReservation)
       await noteTelegramAppHandoffLimitlessLocator(input.pool, {
@@ -4884,6 +4904,52 @@ export async function submitLimitlessClientSignedOrder(input: {
       },
       "Limitless FOK placement requires status observation",
     );
+    if (acceptedDelayed && fundingTradeAttemptId && fundingTradeClaimToken) {
+      try {
+        const observed = await recordFundingTradeAttemptOutcome(input.pool, {
+          userId: input.userId,
+          attemptId: fundingTradeAttemptId,
+          outcome: "ambiguous",
+          externalReference: clientOrderId,
+          broadcastMayHaveOccurred: true,
+        });
+        if (observed.claimToken === fundingTradeClaimToken)
+          await yieldLimitlessHistoryObservationLease(
+            input.pool,
+            observed,
+            new Date(),
+          );
+      } catch {
+        // The pre-dispatch record remains recoverable on its original lease.
+        input.log?.warn?.(
+          { clientOrderId },
+          "Limitless delayed order observation could not be accelerated",
+        );
+      }
+    }
+    if (
+      acceptedDelayed &&
+      !copyKey &&
+      !directHandoffBinding &&
+      (journalId || (fundingReservation && fundingTradeAttemptId)) &&
+      input.body.pendingResponseVersion === 1
+    ) {
+      return {
+        ok: true,
+        statusCode: 202,
+        payload: {
+          ok: true,
+          status: "pending",
+          recoveryState: "pending",
+          clientOrderId,
+          recoveryId: journalId
+            ? (directJournalClientOrderId ?? clientOrderId)
+            : `hunch-funded-${fundingTradeAttemptId}`,
+          executionStatus: "DELAYED",
+          payload: null,
+        },
+      };
+    }
     return pendingOrder();
   }
 

@@ -402,6 +402,7 @@ export async function runLimitlessTradeAttemptReconciliationBatch(
     config: LimitlessFundingReconciliationConfig;
     leaseSeconds: number;
     lookup?: ExactStatusLookup;
+    lookupScoped?: ExactStatusLookup;
     minimumAbsenceAgeMs?: number;
     now?: Date;
     readHistoryReceipt?: Parameters<
@@ -425,13 +426,45 @@ export async function runLimitlessTradeAttemptReconciliationBatch(
     return { claimed: 0, found: 0, provenAbsent: 0, requeued: 0, failed: 0 };
   }
   const lookup = input.lookup ?? createLimitlessExactStatusLookup(input.config);
-  let statuses: Map<string, LimitlessExactClientOrderStatus>;
-  try {
-    statuses = await lookup(
-      attempts.map((attempt) => attempt.externalReference as string),
+  const submissions = await Promise.all(
+    attempts.map((attempt) =>
+      fetchFundingLimitlessClobSubmission(pool, attempt).catch(() => null),
+    ),
+  );
+  const scopedStatuses = new Map<string, LimitlessExactClientOrderStatus>();
+  const lookupScoped =
+    input.lookupScoped ?? (input.lookup ? undefined : lookup);
+  if (lookupScoped)
+    await observeScopedSettlements(
+      attempts.flatMap((attempt, index) => {
+        const submission = submissions[index];
+        return isRecord(submission) &&
+          isRecord(submission.order) &&
+          attempt.externalReference
+          ? [
+              {
+                clientOrderId: attempt.externalReference,
+                ownerId: submission.providerOwnerId,
+                locator: submission.locator,
+                expected: submission.order,
+              },
+            ]
+          : [];
+      }),
+      scopedStatuses,
+      lookupScoped,
+      false,
     );
-  } catch {
-    statuses = new Map();
+  // An exact positive scoped result is authoritative. Only fall back to
+  // unscoped status for attempts still without that proof.
+  const statuses = scopedStatuses;
+  const unresolved = attempts
+    .map((attempt) => attempt.externalReference as string)
+    .filter((id) => !scopedStatuses.has(id));
+  if (unresolved.length > 0) {
+    const remaining = await lookup(unresolved).catch(() => null);
+    for (const [id, status] of remaining ?? [])
+      if (!statuses.has(id)) statuses.set(id, status);
   }
   const readHistoryReceipt =
     input.readHistoryReceipt ?? createLimitlessHistoryReceiptReader();
@@ -440,7 +473,7 @@ export async function runLimitlessTradeAttemptReconciliationBatch(
   let provenAbsent = 0;
   let requeued = 0;
   let failed = 0;
-  for (const attempt of attempts) {
+  for (const [index, attempt] of attempts.entries()) {
     const clientOrderId = attempt.externalReference as string;
     const status = statuses.get(clientOrderId);
     try {
@@ -448,10 +481,7 @@ export async function runLimitlessTradeAttemptReconciliationBatch(
         status?.kind === "found"
           ? parseLimitlessOrderResult(status.item.payload)
           : null;
-      const submission = await fetchFundingLimitlessClobSubmission(
-        pool,
-        attempt,
-      );
+      const submission = submissions[index];
       const savedLocator = readLimitlessObservedLocator(
         isRecord(submission) ? submission.locator : null,
       );
@@ -1162,29 +1192,29 @@ export async function inspectLimitlessFreshCollateralHistory(input: {
   };
 }
 
-type DirectJournalStatusIdentity = {
-  client_order_id: string;
-  order_payload: Record<string, unknown>;
+type ScopedStatusIdentity = {
+  clientOrderId: string;
+  ownerId: unknown;
+  locator: unknown;
+  expected: Record<string, unknown> | null;
 };
 
 /** A profile-scoped lookup is positive evidence only, never proof of absence. */
-async function observeScopedDirectSettlements(
-  rows: readonly DirectJournalStatusIdentity[],
+async function observeScopedSettlements(
+  rows: readonly ScopedStatusIdentity[],
   statuses: Map<string, LimitlessExactClientOrderStatus>,
   lookup: ExactStatusLookup,
   requireRetainedProviderId: boolean,
 ): Promise<Set<string>> {
   const deferred = new Set<string>();
-  const owners = new Map<number, DirectJournalStatusIdentity[]>();
+  const owners = new Map<number, ScopedStatusIdentity[]>();
   for (const row of rows) {
-    if (statuses.get(row.client_order_id)?.kind === "found") continue;
-    const locator = readLimitlessObservedLocator(
-      row.order_payload._hunchLimitlessDirectLocator,
-    );
+    if (statuses.get(row.clientOrderId)?.kind === "found") continue;
+    const locator = readLimitlessObservedLocator(row.locator);
     if (requireRetainedProviderId && !locator.providerOrderId) continue;
     // The submit route persists the verified Limitless profile here, not a
     // client-supplied owner or the user's current primary wallet.
-    const ownerId = row.order_payload.ownerId;
+    const ownerId = row.ownerId;
     if (
       typeof ownerId !== "number" ||
       !Number.isSafeInteger(ownerId) ||
@@ -1195,24 +1225,22 @@ async function observeScopedDirectSettlements(
     if (group) group.push(row);
     else if (owners.size < MAX_DIRECT_SCOPED_STATUS_OWNERS)
       owners.set(ownerId, [row]);
-    else deferred.add(row.client_order_id);
+    else deferred.add(row.clientOrderId);
   }
   await Promise.all(
     Array.from(owners, async ([ownerId, group]) => {
       const observed = await lookup(
-        group.map((row) => row.client_order_id),
+        group.map((row) => row.clientOrderId),
         ownerId,
       ).catch(() => null);
       for (const row of group) {
-        const status = observed?.get(row.client_order_id);
+        const status = observed?.get(row.clientOrderId);
         if (
           status?.kind !== "found" ||
-          status.item.clientOrderId !== row.client_order_id
+          status.item.clientOrderId !== row.clientOrderId
         )
           continue;
-        const locator = readLimitlessObservedLocator(
-          row.order_payload._hunchLimitlessDirectLocator,
-        );
+        const locator = readLimitlessObservedLocator(row.locator);
         if (
           locator.providerOrderId &&
           status.item.providerOrderId !== locator.providerOrderId
@@ -1220,7 +1248,7 @@ async function observeScopedDirectSettlements(
           continue;
         const parsed = parseLimitlessOrderResult(status.item.payload);
         const { order } = parsed;
-        const expected = limitlessClobSubmittedOrder(row.order_payload);
+        const expected = row.expected;
         const hash = canonicalLimitlessTransactionHash(parsed.txHash);
         if (
           classifyFrozenLimitlessFokResult(parsed) !== "settled" ||
@@ -1240,7 +1268,7 @@ async function observeScopedDirectSettlements(
           locator.hashes.some((known) => known !== hash)
         )
           continue;
-        statuses.set(row.client_order_id, status);
+        statuses.set(row.clientOrderId, status);
       }
     }),
   );
@@ -1307,8 +1335,13 @@ export async function reconcileLimitlessDirectOrderJournals(
     input.lookupScoped ??
     (input.freshOnly || !input.lookup ? lookup : undefined);
   const scopedDeferred = lookupScoped
-    ? await observeScopedDirectSettlements(
-        rows,
+    ? await observeScopedSettlements(
+        rows.map((row) => ({
+          clientOrderId: row.client_order_id,
+          ownerId: row.order_payload.ownerId,
+          locator: row.order_payload._hunchLimitlessDirectLocator,
+          expected: limitlessClobSubmittedOrder(row.order_payload),
+        })),
         statuses,
         lookupScoped,
         !input.freshOnly,

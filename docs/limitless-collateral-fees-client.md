@@ -132,6 +132,16 @@ $100 funding projection says nothing about the edited $2 draft.
 
 ## iOS: direct FOK order status is not a second order
 
+Opt in with `pendingResponseVersion: 1` on direct and funded FOK submissions
+when the client handles HTTP 202. On an acknowledged venue `DELAYED` result,
+the response is `ok: true`, `status: "pending"`, `recoveryState: "pending"`,
+`executionStatus: "DELAYED"`, and includes an opaque `recoveryId`. This is not
+a fill and not an error: show “Order accepted”, then poll
+`GET /trade/limitless/orders/{recoveryId}` with the original wallet. Only
+`recoveryState: "filled"` and an order ID mean the order filled. Keep the
+funding reservation while polling; never re-POST the order to check status.
+Requests without the opt-in still use the legacy response contract.
+
 `POST /trade/limitless/order` still returns the existing filled/no-fill
 responses. For a tracked direct FOK with an uncertain result it can return
 the backward-compatible HTTP 409 with this additive body:
