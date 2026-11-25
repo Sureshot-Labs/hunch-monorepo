@@ -1434,6 +1434,99 @@ try {
     await claimLimitlessDirectOrderJournal(db, directClientId, directInput),
     null,
   );
+  await db.query("SAVEPOINT direct_scoped_status");
+  const scopedClaim = await claimLimitlessDirectOrderJournal(
+    db,
+    secondId,
+    secondInput,
+  );
+  assert.ok(scopedClaim?.kind === "stored");
+  const scopedProviderId = randomUUID();
+  const scopedTxHash = `0x${"5".repeat(64)}`;
+  await noteLimitlessDirectOrderLocator(db, {
+    userId,
+    journalId: scopedClaim.order.id,
+    clientOrderId: secondId,
+    providerOrderId: scopedProviderId,
+    txHash: scopedTxHash,
+  });
+  for (const [index, scenario] of [
+    "wrong-provider-id",
+    "wrong-salt",
+    "wrong-hash",
+    "delayed",
+    "not-found",
+    "settled",
+  ].entries()) {
+    let scopedCalls = 0;
+    const repaired = await reconcileLimitlessDirectOrderJournals(db, {
+      config: fixtureConfig,
+      now: new Date(pollTime.getTime() + (70 + index * 31) * 1_000),
+      lookup: async (ids) => {
+        assert.deepEqual(ids, [secondId]);
+        return new Map([[secondId, { kind: "not_found" }]]);
+      },
+      lookupScoped: async (ids, ownerId) => {
+        scopedCalls++;
+        assert.deepEqual(ids, [secondId]);
+        assert.equal(ownerId, 7);
+        if (scenario === "not-found")
+          return new Map([[secondId, { kind: "not_found" }]]);
+        const orderId =
+          scenario === "wrong-provider-id" ? randomUUID() : scopedProviderId;
+        return new Map([
+          [
+            secondId,
+            {
+              kind: "found",
+              item: {
+                clientOrderId: secondId,
+                providerOrderId: orderId,
+                orderId,
+                payload: {
+                  status: "found",
+                  orderId,
+                  clientOrderId: secondId,
+                  data: {
+                    order: {
+                      id: orderId,
+                      maker: secondOrder.maker,
+                      signer: secondOrder.signer,
+                      tokenId: secondOrder.tokenId,
+                      side: Number(secondOrder.side),
+                      salt: scenario === "wrong-salt" ? "17" : secondOrder.salt,
+                    },
+                    execution: {
+                      matched: true,
+                      settlementStatus:
+                        scenario === "delayed" ? "DELAYED" : "MINED",
+                      txHash: scenario === "wrong-hash" ? txHash : scopedTxHash,
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        ]);
+      },
+      readFreshHistory: async () => null,
+      readHistoryReceipt: async () => null,
+    });
+    const settled = scenario === "settled";
+    assert.equal(scopedCalls, 1, scenario);
+    assert.equal(repaired, settled ? 1 : 0, scenario);
+    assert.equal(
+      (await readLimitlessDirectOrderJournal(db, userId, secondId))?.status,
+      settled ? "filled" : "submitted",
+      scenario,
+    );
+  }
+  assert.equal(
+    (await readOrder(scopedClaim.order.id)).order_hash,
+    scopedTxHash,
+  );
+  await db.query("ROLLBACK TO SAVEPOINT direct_scoped_status");
+  await db.query("RELEASE SAVEPOINT direct_scoped_status");
   const secondClaim = await claimLimitlessDirectOrderJournal(
     db,
     secondId,
