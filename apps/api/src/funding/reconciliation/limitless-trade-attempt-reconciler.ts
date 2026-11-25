@@ -65,6 +65,8 @@ import {
 const STATUS_PATH = "/orders/status/batch";
 const STATUS_BATCH_MAX_ITEMS = 50;
 const MAX_STATUS_RESPONSE_BYTES = 256 * 1_024;
+const MAX_DIRECT_SCOPED_STATUS_OWNERS = 2;
+const DIRECT_SCOPED_STATUS_TIMEOUT_MS = 3_000;
 export const LIMITLESS_TRADE_ABSENCE_MIN_AGE_MS = 5 * 60_000;
 
 export type LimitlessFundingReconciliationConfig = Readonly<{
@@ -85,6 +87,7 @@ export type LimitlessTradeAttemptReconciliationResult = Readonly<{
 
 type ExactStatusLookup = (
   clientOrderIds: readonly string[],
+  ownerId?: number,
 ) => Promise<Map<string, LimitlessExactClientOrderStatus>>;
 
 function normalizeBaseUrl(value: string): string {
@@ -124,13 +127,18 @@ export function createLimitlessExactStatusLookup(
   config: LimitlessFundingReconciliationConfig,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): ExactStatusLookup {
-  return async (clientOrderIds) => {
+  return async (clientOrderIds, ownerId) => {
     if (
       clientOrderIds.length < 1 ||
       clientOrderIds.length > STATUS_BATCH_MAX_ITEMS
     ) {
       throw new Error("Limitless exact status batch must contain 1-50 items");
     }
+    if (
+      ownerId !== undefined &&
+      (!Number.isSafeInteger(ownerId) || ownerId < 1)
+    )
+      throw new Error("Invalid Limitless status profile ID");
     const items = clientOrderIds.map((clientOrderId) => ({ clientOrderId }));
     const body = JSON.stringify({ items });
     const authHeaders = buildLimitlessPartnerHmacHeaders({
@@ -150,8 +158,18 @@ export function createLimitlessExactStatusLookup(
           "content-type": "application/json; charset=utf-8",
           ...authHeaders,
           ...(config.apiVersion ? { "x-api-version": config.apiVersion } : {}),
+          ...(ownerId === undefined
+            ? {}
+            : { "x-on-behalf-of": String(ownerId) }),
         },
-        signal: AbortSignal.timeout(config.timeoutMs ?? 15_000),
+        signal: AbortSignal.timeout(
+          ownerId === undefined
+            ? (config.timeoutMs ?? 15_000)
+            : Math.min(
+                config.timeoutMs ?? 15_000,
+                DIRECT_SCOPED_STATUS_TIMEOUT_MS,
+              ),
+        ),
       },
     );
     const payload = await readBoundedResponse(response);
@@ -1144,12 +1162,90 @@ export async function inspectLimitlessFreshCollateralHistory(input: {
   };
 }
 
+type DirectJournalStatusIdentity = {
+  client_order_id: string;
+  order_payload: Record<string, unknown>;
+};
+
+/** A profile-scoped lookup is positive evidence only, never proof of absence. */
+async function observeScopedDirectSettlements(
+  rows: readonly DirectJournalStatusIdentity[],
+  statuses: Map<string, LimitlessExactClientOrderStatus>,
+  lookup: ExactStatusLookup,
+): Promise<void> {
+  const owners = new Map<number, DirectJournalStatusIdentity[]>();
+  for (const row of rows) {
+    if (statuses.get(row.client_order_id)?.kind !== "not_found") continue;
+    const locator = readLimitlessObservedLocator(
+      row.order_payload._hunchLimitlessDirectLocator,
+    );
+    if (!locator.providerOrderId) continue;
+    // The submit route persists the verified Limitless profile here, not a
+    // client-supplied owner or the user's current primary wallet.
+    const ownerId = row.order_payload.ownerId;
+    if (
+      typeof ownerId !== "number" ||
+      !Number.isSafeInteger(ownerId) ||
+      ownerId < 1
+    )
+      continue;
+    const group = owners.get(ownerId);
+    if (group) group.push(row);
+    else if (owners.size < MAX_DIRECT_SCOPED_STATUS_OWNERS)
+      owners.set(ownerId, [row]);
+  }
+  await Promise.all(
+    Array.from(owners, async ([ownerId, group]) => {
+      const observed = await lookup(
+        group.map((row) => row.client_order_id),
+        ownerId,
+      ).catch(() => null);
+      for (const row of group) {
+        const status = observed?.get(row.client_order_id);
+        if (
+          status?.kind !== "found" ||
+          status.item.clientOrderId !== row.client_order_id
+        )
+          continue;
+        const locator = readLimitlessObservedLocator(
+          row.order_payload._hunchLimitlessDirectLocator,
+        );
+        if (status.item.providerOrderId !== locator.providerOrderId) continue;
+        const parsed = parseLimitlessOrderResult(status.item.payload);
+        const { order } = parsed;
+        const expected = limitlessClobSubmittedOrder(row.order_payload);
+        const hash = canonicalLimitlessTransactionHash(parsed.txHash);
+        if (
+          classifyFrozenLimitlessFokResult(parsed) !== "settled" ||
+          !order ||
+          !expected ||
+          order.id !== locator.providerOrderId ||
+          typeof order.maker !== "string" ||
+          order.maker.toLowerCase() !== String(expected.maker).toLowerCase() ||
+          typeof order.signer !== "string" ||
+          order.signer.toLowerCase() !==
+            String(expected.signer).toLowerCase() ||
+          order.tokenId !== String(expected.tokenId) ||
+          String(order.side) !== String(expected.side) ||
+          String(order.salt) !== String(expected.salt) ||
+          !hash ||
+          locator.overflow ||
+          (locator.hashes.length > 0 && !locator.hashes.includes(hash))
+        )
+          continue;
+        statuses.set(row.client_order_id, status);
+      }
+    }),
+  );
+}
+
 export async function reconcileLimitlessDirectOrderJournals(
   pool: Pool,
   input: {
     config: LimitlessFundingReconciliationConfig;
     now?: Date;
     lookup?: ExactStatusLookup;
+    lookupScoped?: ExactStatusLookup;
     readFreshHistory?: (
       input: DirectHistoryScope,
     ) => Promise<DirectHistoryPage | null>;
@@ -1188,6 +1284,10 @@ export async function reconcileLimitlessDirectOrderJournals(
   const statuses = await lookup(rows.map((row) => row.client_order_id)).catch(
     () => new Map<string, LimitlessExactClientOrderStatus>(),
   );
+  const lookupScoped =
+    input.lookupScoped ?? (input.lookup ? undefined : lookup);
+  if (lookupScoped)
+    await observeScopedDirectSettlements(rows, statuses, lookupScoped);
   const readHistoryReceipt =
     input.readHistoryReceipt ?? createLimitlessHistoryReceiptReader();
   const readFreshHistory =

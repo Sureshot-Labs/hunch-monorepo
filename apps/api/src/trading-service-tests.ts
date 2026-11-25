@@ -1197,7 +1197,7 @@ const tests: TestCase[] = [
         env.limitlessHmacSecret = originalSecret;
       }
 
-      const requests: Array<{ body: string; url: string }> = [];
+      const requests: Array<{ url: string; ownerId: string | null }> = [];
       const lookup = createLimitlessExactStatusLookup(
         {
           apiBase: "https://limitless.worker.test/",
@@ -1206,7 +1206,10 @@ const tests: TestCase[] = [
           hmacTokenId: "worker-token",
         },
         (async (url, init) => {
-          requests.push({ body: String(init?.body), url: String(url) });
+          requests.push({
+            url: String(url),
+            ownerId: new Headers(init?.headers).get("x-on-behalf-of"),
+          });
           return new Response(
             JSON.stringify({
               results: [
@@ -1234,6 +1237,17 @@ const tests: TestCase[] = [
       assert.doesNotMatch(requests[0]?.url ?? "", /\/orders$/u);
       assert.equal(workerStatuses.get(clientOrderId)?.kind, "not_found");
       assert.equal(workerStatuses.get("second-client-order")?.kind, "found");
+      assert.equal(requests[0]?.ownerId, null);
+      assert.equal(
+        (await lookup([clientOrderId], 7)).get(clientOrderId)?.kind,
+        "not_found",
+      );
+      assert.equal(requests[1]?.ownerId, "7");
+      await assert.rejects(
+        () => lookup([clientOrderId], 0),
+        /invalid limitless status profile/i,
+      );
+      assert.equal(requests.length, 2);
     },
   },
   {
