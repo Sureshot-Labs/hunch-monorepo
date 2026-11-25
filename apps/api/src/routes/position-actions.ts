@@ -263,7 +263,10 @@ export function registerPositionActionRoutes(
         return reply.send(
           positionActionOperationResponseSchema.parse({
             ok: true,
-            operation: publicOperation(operation),
+            operation: {
+              ...publicOperation(operation),
+              confirmationStage: operation.confirmationStage,
+            },
           }),
         );
       }),

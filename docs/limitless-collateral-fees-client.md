@@ -179,22 +179,26 @@ be converted into a direct order.
 
 ## iOS: redeem payout seen vs finalized
 
-After reporting the wallet submission, follow the original
-`/position-actions/{id}` operation. The existing
-`POST /position-actions/{id}/reconcile` can return
-`result.status: "in_progress"` with optional
-`result.confirmationStage: "payout_seen_awaiting_finality"` when the exact
-Base redemption and USDC credit are visible in a canonical block. This
-applies to direct Conditional Tokens redemptions; adapter redemptions
-continue to wait for finalized evidence before reporting completion.
+After reporting the wallet submission, follow the original operation with
+`GET /position-actions/{id}`. For Limitless redeem, the response exposes
+`operation.confirmationStage` independently of the final receipt ledger:
 
-This is a non-terminal hint, not a persisted completion or a promise of
-finality. The screen can say “Payout detected; waiting for network
-confirmation” and can be closed. An absent hint on a later check is not a
-failure or permission to redeem again. Continue tracking the same operation
-at a bounded cadence; only show completion after final receipt and position
-verification. Never prepare or broadcast another redeem just because the UI
-timed out.
+- `payout_seen_awaiting_finality`: the exact redemption and USDC credit
+  were observed in a canonical Base block. `receiptStatus: "pending"`
+  still means the receipt has not reached finality, not that it was missing.
+- `checking_in_background`: keep tracking without assuming current
+  provisional evidence or completion. The previous observation may no
+  longer be canonical, or the finalized position update may still be pending.
+- `null` or absent: no background/payout information from this read. Older
+  servers can still return `result.confirmationStage: "payout_seen_awaiting_finality"`
+  on `POST /position-actions/{id}/reconcile`.
+
+Neither stage is completion. Once either stage is present, routine status
+checks can use slow read-only GETs while the screen is open; the finance
+worker continues after close. An explicit Check status action can still
+call reconcile on the same operation. Consider showing “Payout detected”
+and a Close action. Show completion only at `operation.status: "completed"`.
+Never prepare or broadcast another redeem just because the UI timed out.
 
 ## Checking an existing Copy
 

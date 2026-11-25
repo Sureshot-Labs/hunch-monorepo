@@ -143,6 +143,10 @@ export const positionActionPublicSchema = z
       "failed",
       "unavailable",
     ]),
+    confirmationStage: z
+      .enum(["payout_seen_awaiting_finality", "checking_in_background"])
+      .nullable()
+      .optional(),
     lastErrorCode: z.string().nullable(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),

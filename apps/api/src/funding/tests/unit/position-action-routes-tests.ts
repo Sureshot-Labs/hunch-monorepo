@@ -167,6 +167,38 @@ async function test(name: string, run: () => Promise<void>) {
   console.log(`[position-action-routes-tests] ok ${name}`);
 }
 
+await test("GET exposes provisional payout without marking the receipt finalized", async () => {
+  const app = await buildApp({
+    operation: async (userId, operationId) => {
+      assert.equal(userId, USER_ID);
+      assert.equal(operationId, OPERATION_ID);
+      return operation({
+        venueId: "limitless",
+        status: "submitted",
+        submissionFingerprint: TX_HASH,
+        broadcastMayHaveOccurred: true,
+        receiptStatus: "pending",
+        confirmationStage: "payout_seen_awaiting_finality",
+      });
+    },
+    reconcile: async () => assert.fail("GET must not reconcile"),
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: `/position-actions/${OPERATION_ID}`,
+    });
+    assert.equal(response.statusCode, 200);
+    const result = response.json().operation;
+    assert.equal(result.confirmationStage, "payout_seen_awaiting_finality");
+    assert.equal(result.status, "submitted");
+    assert.equal(result.receiptStatus, "pending");
+    assert.equal(result.postconditionStatus, "pending");
+  } finally {
+    await app.close();
+  }
+});
+
 await test("optional durable submission protocol reaches the claim; legacy empty body is unchanged", async () => {
   const protocols: Array<string | undefined> = [];
   const app = await buildApp({

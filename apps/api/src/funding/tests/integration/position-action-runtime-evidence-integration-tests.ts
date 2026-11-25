@@ -5,10 +5,12 @@ import { ethers } from "ethers";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
 import { PositionActionRuntimeService } from "../../position-actions/runtime-service.js";
 import {
+  bindPositionActionSubmissionTransactionHash,
   claimPositionActionSubmission,
   createOrReplayPositionAction,
   fetchPositionActionForUser,
   recordPositionActionSubmission,
+  recordPositionActionPayoutObservation,
   type StoredPositionAction,
 } from "../../position-actions/position-action-repository.js";
 import { CANONICAL_CTF_ABI } from "../../position-actions/canonical-redemption-evidence.js";
@@ -142,15 +144,26 @@ try {
       executorId: "privy-authorization-evm-v1",
       embeddedDispatchProtocol: "privy_position_v1",
     });
+    const reference =
+      token === "17" ? `privy-transaction-v1:${randomUUID()}` : hash;
     await recordPositionActionSubmission(pool, {
       userId,
       operationId: created.operation.id,
       attemptNumber: 1,
       outcome: "submitted",
-      submissionFingerprint: hash,
+      submissionFingerprint: reference,
     });
+    if (reference !== hash) {
+      await bindPositionActionSubmissionTransactionHash(pool, {
+        userId,
+        operationId: created.operation.id,
+        expectedSubmissionReference: reference,
+        transactionHash: hash,
+      });
+    }
   }
   let finalizedBlock = "0x63";
+  let canonicalHash = blockHash;
   globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     assert.equal(
@@ -164,7 +177,7 @@ try {
         id: body.id,
         result: {
           number: body.params[0] === "finalized" ? finalizedBlock : "0x64",
-          hash: blockHash,
+          hash: canonicalHash,
           timestamp: ethers.toBeHex(Math.floor(Date.now() / 1000) + 1),
         },
       }),
@@ -195,8 +208,40 @@ try {
   assert.equal(notFinalized?.status, "submitted");
   assert.equal(notFinalized?.receiptStatus, "pending");
   assert.equal(notFinalized?.postconditionStatus, "pending");
+  assert.equal(
+    (await runtime.operation(userId, first.id))?.confirmationStage,
+    "payout_seen_awaiting_finality",
+    "an authenticated GET sees the payout without another RPC observation",
+  );
+  assert.equal(
+    (await runtime.operation(userId, second.id))?.confirmationStage,
+    null,
+  );
+  assert.equal(await runtime.operation(randomUUID(), first.id), null);
+  canonicalHash = ethers.id("reorged-canonical-block");
+  assert.equal(
+    (await runtime.reconcile(userId, first.id)).confirmationStage,
+    undefined,
+  );
+  await recordPositionActionPayoutObservation(pool, {
+    userId,
+    operationId: first.id,
+    submissionFingerprint: hash,
+    checkedAtMs: 1,
+    seen: true,
+  });
+  assert.equal(
+    (await runtime.operation(userId, first.id))?.confirmationStage,
+    "checking_in_background",
+    "a stale positive cannot undo a new negative; GET retains background handoff",
+  );
+  canonicalHash = blockHash;
   finalizedBlock = "0x64";
   assert.equal((await runtime.reconcile(userId, first.id)).status, "completed");
+  assert.equal(
+    (await runtime.operation(userId, first.id))?.confirmationStage,
+    null,
+  );
   assert.equal(
     (await runtime.reconcile(userId, second.id)).status,
     "reconcile_required",
