@@ -442,6 +442,46 @@ function limitlessSubmissionKey(attemptId: string): string {
   return `limitlessClobSubmissionV1:${attemptId}`;
 }
 
+/** Status-only view of the exact attempt even after acceptance replaces its
+ * external reference with the venue order ID. Never expose the frozen order. */
+export async function readLimitlessFundedOrderStatus(
+  db: Pick<Pool, "query">,
+  input: { userId: string; signer: string; attemptId: string },
+): Promise<{
+  recoveryState: "pending" | "filled" | "no_fill" | "failed" | "missing";
+  orderId?: string;
+}> {
+  const { rows } = await db.query<{
+    state: FundingTradeAttemptState;
+    error_code: string | null;
+    filled_order_id: string | null;
+  }>(
+    `select attempt_row.state, attempt_row.error_code, order_row.venue_order_id as filled_order_id
+       from funding_trade_attempts attempt_row
+       join funding_operations operation_row on operation_row.id=attempt_row.operation_id and operation_row.user_id=attempt_row.user_id
+       left join orders order_row on order_row.funding_trade_attempt_id=attempt_row.id
+         and order_row.user_id=attempt_row.user_id and order_row.venue='limitless' and order_row.status='filled'
+       where attempt_row.id=$1 and attempt_row.user_id=$2 and attempt_row.execution_path='limitless_clob'
+         and lower(operation_row.support_metadata #>> array[$3::text,'submission','order','signer'])=lower($4::text)
+       limit 2`,
+    [
+      input.attemptId,
+      input.userId,
+      limitlessSubmissionKey(input.attemptId),
+      input.signer,
+    ],
+  );
+  const [row] = rows;
+  if (!row) return { recoveryState: "missing" };
+  if (rows.length === 1 && row.state === "accepted" && row.filled_order_id)
+    return { recoveryState: "filled", orderId: row.filled_order_id };
+  if (row.state === "definitive_failure")
+    return {
+      recoveryState: row.error_code === "trade_no_fill" ? "no_fill" : "failed",
+    };
+  return { recoveryState: "pending" };
+}
+
 /** Load the frozen pre-dispatch proof for this exact attempt, never current
  * market configuration or signed fields echoed by the provider. */
 export async function fetchFundingLimitlessClobSubmission(

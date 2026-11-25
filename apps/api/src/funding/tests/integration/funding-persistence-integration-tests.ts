@@ -93,6 +93,7 @@ import {
   fetchFundingLimitlessClobSubmission,
   FundingTradeAttemptError,
   markFundingTradeAttemptSubmissionStartedInTransaction,
+  readLimitlessFundedOrderStatus,
   noteFundingLimitlessClobLocator,
   proveAmbiguousLimitlessTradeAttemptAbsentInTransaction,
   proveAmbiguousLimitlessTerminalRejectionInTransaction,
@@ -8488,6 +8489,22 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
       assert.equal(replay.attempt.id, claim.attempt.id);
       assert.equal(replay.attempt.state, "submission_started");
       assert.equal(replay.attempt.externalReference, clientOrderId);
+      assert.deepEqual(
+        await readLimitlessFundedOrderStatus(setup, {
+          userId,
+          attemptId,
+          signer: signedFields.signer,
+        }),
+        { recoveryState: "pending" },
+      );
+      assert.deepEqual(
+        await readLimitlessFundedOrderStatus(setup, {
+          userId,
+          attemptId,
+          signer: `0x${"f".repeat(40)}`,
+        }),
+        { recoveryState: "missing" },
+      );
       assert.equal(
         await recoverFundingTradeAttemptForOrderInTransaction(setup, {
           userId,
@@ -8712,6 +8729,14 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
       assert.equal(merged?.status, "filled");
       assert.equal(merged?.order_hash, filledTx);
       assert.ok(merged?.filled_at);
+      assert.deepEqual(
+        await readLimitlessFundedOrderStatus(mergeClient, {
+          userId,
+          attemptId,
+          signer: retainedSubmission.order.signer,
+        }),
+        { recoveryState: "filled", orderId: clientOrderId },
+      );
       assert.deepEqual(
         limitlessClobFrozenContext(merged.order_payload),
         retainedSubmission?.context,

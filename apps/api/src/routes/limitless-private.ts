@@ -7,6 +7,7 @@ import { getRedis } from "../redis.js";
 import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 import { readLimitlessDirectOrderJournal } from "../repos/orders-repo.js";
+import { readLimitlessFundedOrderStatus } from "../funding/persistence/funding-trade-attempt-repository.js";
 import {
   isLimitlessPartnerHmacConfigured,
   type LimitlessRequestAuthInputs,
@@ -1140,6 +1141,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(result.payload);
       }
 
+      if (result.statusCode) reply.code(result.statusCode);
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(result.payload);
     },
@@ -1474,6 +1476,19 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const { orderId } = request.params;
+      const fundedAttempt =
+        /^hunch-funded-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(
+          orderId,
+        );
+      if (fundedAttempt?.[1]) {
+        const status = await readLimitlessFundedOrderStatus(pool, {
+          userId: user.id,
+          signer,
+          attemptId: fundedAttempt[1],
+        });
+        reply.header("Cache-Control", "private, no-store");
+        return reply.send({ ok: true, ...status });
+      }
       if (/^hunch-direct-[0-9a-f]{32}$/.test(orderId)) {
         const journal = await readLimitlessDirectOrderJournal(
           pool,
