@@ -112,6 +112,7 @@ export type DestinationOptionsInput = Readonly<{
   positionActionRef?: string | null;
   compatibleVenueBindingOptionIds: readonly string[] | null;
   controllerWalletRef?: string | null;
+  limitlessMarketBuyRaw?: string;
 }>;
 
 export type DestinationInput = Readonly<{
@@ -142,6 +143,7 @@ export type PreparationInspectionInput = Readonly<{
   purpose: PreparationPurpose;
   marketClass: string | null;
   marketContextId: string | null;
+  limitlessMarketBuyRaw?: string;
 }>;
 
 export type PreparationPostcondition = Readonly<{

@@ -832,6 +832,7 @@ export type EvmTransactionAction = Readonly<{
   data: string;
   valueRaw: RawAmount;
   gasLimitRaw: RawAmount | null;
+  limitlessFeeMarketSlug?: string;
 }>;
 
 export type EvmTransactionBatchCall = Readonly<{

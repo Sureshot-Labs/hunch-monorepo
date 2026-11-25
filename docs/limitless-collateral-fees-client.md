@@ -96,6 +96,19 @@ reserve in the funding budget.
 
 See [Limitless balance and approval checks](https://docs.limitless.exchange/developers/migrate-to-new-trading-venues#balance-and-approval-checks).
 
+### Prepare the fee approval with the trading wallet
+
+For a COLLATERAL FOK BUY, pass the exact order principal in micro-USDC as
+`limitlessMarketBuyRaw` to both `POST /funding/preparation/inspect` and
+`POST /funding/preparation/prepare`. Use the same owned binding on both calls
+and send `admissionProtocolVersion: 1` when preparing. Inspect even if the
+unscoped destination says it is ready. The server verifies the market and fee
+spender, and requests a bounded approval only when the observed allowance is
+zero. The embedded executor must forward the admitted action's
+`limitlessFeeMarketSlug` unchanged. Continue an existing run through its
+status and admission endpoints instead of recreating an uncertain action.
+This opt-in does not replace the balance/fee-reserve check before signing.
+
 ## Checking an existing Copy
 
 For a client-signed collateral FOK Copy, generate and persist a UUID locally

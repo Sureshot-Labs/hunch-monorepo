@@ -132,6 +132,40 @@ function materializerInput(
   };
 }
 
+await test("Limitless fee preparation emits only the sealed, bounded Base approve", async () => {
+  const exactBinding = binding("limitless");
+  const spender = "0x0000000000000000000000000000000000000012";
+  const materializer = createLimitlessRuntimeActionMaterializer({
+    wallet: wallet(true),
+    adapterAddress: null,
+    ammAddress: null,
+    feeApproval: {
+      amountRaw: "1000000",
+      token: exactBinding.settlementLocation.asset.assetId,
+      spender,
+      marketSlug: "test-market",
+    },
+  });
+  const [template] = await materializer(
+    materializerInput(exactBinding, [
+      requirement("approve-limitless_fee_module_allowance", "evm_transaction"),
+    ]),
+  );
+  const action = template?.action;
+  assert.ok(action?.kind === "evm_transaction");
+  assert.equal(action.networkId, "evm:8453");
+  assert.equal(action.senderWalletId, exactBinding.executionWalletId);
+  assert.equal(action.to, exactBinding.settlementLocation.asset.assetId);
+  assert.equal(action.valueRaw, "0");
+  assert.equal(action.limitlessFeeMarketSlug, "test-market");
+  const [actualSpender, amount] = erc20Interface.decodeFunctionData(
+    "approve",
+    action.data,
+  );
+  assert.equal(actualSpender, spender);
+  assert.equal(amount, 1_000_000n);
+});
+
 await test("Polymarket connect preparation is deterministic and contains no secret", async () => {
   const exactBinding = binding("polymarket");
   const materialize = createPolymarketRuntimeActionMaterializer({

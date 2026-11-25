@@ -943,4 +943,55 @@ await test("unknown venue cash still fails closed", async () => {
   assert.ok(result.reasonCodes.includes("cash_availability_unknown"));
 });
 
+await test("Limitless CLOB market buy preparation owns the separate fee allowance", async () => {
+  const exactBinding = binding("limitless");
+  const request = {
+    ...input(exactBinding, "buy", "clob"),
+    limitlessMarketBuyRaw: "1000000",
+  };
+  const approval = {
+    amountRaw: "1000000",
+    marketSlug: "test-market",
+    token: exactBinding.settlementLocation.asset.assetId,
+    spender: "0x0000000000000000000000000000000000000012",
+  };
+  const inspect = (
+    feeModuleAllowance: LimitlessRuntimeEvidence["feeModuleAllowance"],
+    internal = true,
+    scoped = true,
+  ) => {
+    const evidence = limitlessEvidence({
+      binding: exactBinding,
+      feeModuleAllowance,
+    });
+    const adapter = new LimitlessWalletPreparationAdapter(
+      async (requested) =>
+        buildLimitlessRuntimeFacts(requested, {
+          ...evidence,
+          wallet: { ...evidence.wallet, internal },
+          topology: internal ? "internal_eoa" : "external_eoa",
+          executionMode: internal ? "privy_authorization" : "web_client",
+        }),
+      () => NOW,
+    );
+    return adapter.inspect(
+      scoped ? request : input(exactBinding, "buy", "clob"),
+    );
+  };
+  const required = await inspect({ state: "required", approval });
+  assert.equal(required.status, "setup_required");
+  assert.equal(required.requiredActions.length, 1);
+  assert.equal(required.requiredActions[0]?.sponsorship, "requested");
+  assert.equal(required.requiredActions[0]?.valueMoving, false);
+  const external = await inspect({ state: "required", approval }, false);
+  assert.equal(external.status, "user_action_required");
+  assert.equal(external.requiredActions[0]?.sponsorship, "none");
+  assert.equal((await inspect({ state: "ready" })).status, "ready");
+  assert.equal((await inspect({ state: "not_required" })).status, "ready");
+  const unavailable = await inspect({ state: "unavailable" });
+  assert.equal(unavailable.status, "unavailable");
+  assert.equal(unavailable.requiredActions.length, 0);
+  assert.equal((await inspect(undefined, true, false)).status, "ready");
+});
+
 console.log("[funding-runtime-facts-tests] complete");

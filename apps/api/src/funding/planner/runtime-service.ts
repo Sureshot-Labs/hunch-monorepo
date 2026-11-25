@@ -436,6 +436,7 @@ export class FundingPlanningRuntime {
       marketClass: string | null;
       positionActionRef?: string | null;
       controllerWalletRef?: string | null;
+      limitlessMarketBuyRaw?: string;
     }>,
     options: Readonly<{ forceFresh?: boolean }> = {},
   ): Promise<PreparationResult> {
@@ -449,6 +450,7 @@ export class FundingPlanningRuntime {
         positionActionRef: request.positionActionRef ?? null,
         compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
         controllerWalletRef: request.controllerWalletRef ?? null,
+        limitlessMarketBuyRaw: request.limitlessMarketBuyRaw,
       },
       options,
     );
@@ -466,6 +468,7 @@ export class FundingPlanningRuntime {
       operationId?: string;
       expectedInspectionRevision: string;
       admissionProtocolVersion?: 1;
+      limitlessMarketBuyRaw?: string;
     }>,
   ): Promise<FundingPreparationRun> {
     const resolvedMarket = request.marketContextId
@@ -479,6 +482,9 @@ export class FundingPlanningRuntime {
       positionActionRef: request.positionActionRef ?? null,
       controllerWalletRef: request.controllerWalletRef ?? null,
       expectedInspectionRevision: request.expectedInspectionRevision,
+      ...(request.limitlessMarketBuyRaw === undefined
+        ? {}
+        : { limitlessMarketBuyRaw: request.limitlessMarketBuyRaw }),
     };
     const run = await createOrReplayFundingPreparationRun(this.db, {
       userId,
@@ -499,6 +505,7 @@ export class FundingPlanningRuntime {
               renewal?.controllerWalletRef ?? snapshot.controllerWalletRef,
             operationId: runId,
             expectedInspectionRevision: snapshot.expectedInspectionRevision,
+            limitlessMarketBuyRaw: snapshot.limitlessMarketBuyRaw,
           },
           renewal,
         ),

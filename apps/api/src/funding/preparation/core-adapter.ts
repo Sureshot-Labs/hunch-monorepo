@@ -107,7 +107,10 @@ export type PreparationActionMaterializer = (
 ) => Promise<readonly PreparationActionTemplate[]>;
 
 export type PreparationRequirementResolver = (
-  input: Pick<PreparationInspectionInput, "purpose" | "marketClass">,
+  input: Pick<
+    PreparationInspectionInput,
+    "purpose" | "marketClass" | "limitlessMarketBuyRaw"
+  >,
 ) => readonly string[] | null;
 
 export type PreparationContractErrorCode =

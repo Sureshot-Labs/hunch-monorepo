@@ -14,6 +14,7 @@ import type {
   PreparationFactCheck,
   VenuePreparationFacts,
 } from "./core-adapter.js";
+import type { LimitlessFeeApprovalEvidence } from "./limitless-fee-approval.js";
 
 export type RuntimeWalletAuthority = Readonly<{
   source: "embedded" | "smart" | "external" | "unknown";
@@ -140,6 +141,7 @@ export type LimitlessRuntimeEvidence = Readonly<{
   cashLockedRaw: string | null;
   clobAllowance: boolean;
   negRiskClobAllowance: boolean;
+  feeModuleAllowance?: LimitlessFeeApprovalEvidence;
   ammAllowance: boolean;
   clobApproval: boolean;
   negRiskClobApproval: boolean;
@@ -967,6 +969,22 @@ export function buildLimitlessRuntimeFacts(
       internal,
       safeLabel: "Approve USDC for the Limitless neg-risk exchange",
     }),
+    ...(evidence.feeModuleAllowance
+      ? [
+          evidence.feeModuleAllowance.state === "unavailable"
+            ? unavailable(
+                "limitless_fee_module_allowance",
+                "Limitless fee allowance could not be verified",
+                "market_evidence_unavailable",
+              )
+            : approvalCheck({
+                checkId: "limitless_fee_module_allowance",
+                approved: evidence.feeModuleAllowance.state !== "required",
+                internal,
+                safeLabel: "Approve Base USDC for Limitless fees",
+              }),
+        ]
+      : []),
     approvalCheck({
       checkId: "amm_usdc_allowance",
       approved: evidence.ammAllowance,

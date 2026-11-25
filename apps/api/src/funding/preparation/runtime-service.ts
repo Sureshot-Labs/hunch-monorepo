@@ -30,6 +30,7 @@ import {
   resolveLimitlessMarketAdapter,
 } from "../../services/limitless-market-contracts.js";
 import { fetchLimitlessOnchainSnapshot } from "../../services/limitless-onchain.js";
+import { inspectLimitlessFeeApproval } from "./limitless-fee-approval.js";
 import {
   fetchOpenOrderCollateralLocks,
   fetchPolymarketOpenOrderPositionLocks,
@@ -184,6 +185,7 @@ export type RuntimeVenueInspectionInput = Readonly<{
   /** Exact canonical position owner for owner-bound actions such as redeem. */
   requiredOwnerAccountRef?: string;
   resolvedMarketContext?: RuntimeMarketContext;
+  limitlessMarketBuyRaw?: string;
 }>;
 
 export interface WalletPreparationRuntimeDriver {
@@ -1353,6 +1355,7 @@ export class WalletPreparationRuntimeService {
         input.canonicalMarketContextId ?? input.request.marketContextId,
       marketClass: input.request.marketClass,
       positionActionRef: input.request.positionActionRef ?? null,
+      limitlessMarketBuyRaw: input.request.limitlessMarketBuyRaw ?? null,
       assetContext: input.resolvedMarketContext?.assetContext ?? null,
       requiredOwnerAccountRef: input.requiredOwnerAccountRef ?? null,
     });
@@ -1390,6 +1393,7 @@ export class WalletPreparationRuntimeService {
         resolvedMarketContext: input.resolvedMarketContext,
         requiredOwnerAccountRef: input.requiredOwnerAccountRef,
         forceFresh: input.forceFresh,
+        limitlessMarketBuyRaw: input.request.limitlessMarketBuyRaw,
       })
       .then((value) => {
         const completedAt = this.clock().getTime();
@@ -1929,6 +1933,21 @@ export class WalletPreparationRuntimeService {
       marketClass: effectiveMarketClass,
       marketExchangeAddress: marketContext.exchangeAddress,
     });
+    const feeModuleAllowancePromise =
+      input.limitlessMarketBuyRaw !== undefined &&
+      input.purpose === "buy" &&
+      (effectiveMarketClass === "clob" ||
+        effectiveMarketClass === "clob_neg_risk")
+        ? inspectLimitlessFeeApproval({
+            owner: input.wallet.walletAddress,
+            principalRaw: input.limitlessMarketBuyRaw,
+            marketSlug: marketContext.market?.slug ?? null,
+            exchangeAddress:
+              effectiveMarketClass === "clob_neg_risk"
+                ? contracts.negRiskAddress
+                : contracts.clobAddress,
+          })
+        : Promise.resolve(undefined);
     const snapshotPromise = fetchLimitlessOnchainSnapshot({
       rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
       timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
@@ -1950,11 +1969,13 @@ export class WalletPreparationRuntimeService {
           limitlessWallets: [input.wallet.walletAddress],
         })
       : Promise.resolve(null);
-    const [authContext, snapshot, venueLockedCollateral] = await Promise.all([
-      authContextPromise,
-      snapshotPromise,
-      venueLockedCollateralPromise,
-    ]);
+    const [authContext, snapshot, venueLockedCollateral, feeModuleAllowance] =
+      await Promise.all([
+        authContextPromise,
+        snapshotPromise,
+        venueLockedCollateralPromise,
+        feeModuleAllowancePromise,
+      ]);
     const credentialsInfo = authContext?.creds ?? null;
     const profile = credentialsInfo
       ? extractLimitlessPartnerAccountProfile(
@@ -2039,6 +2060,7 @@ export class WalletPreparationRuntimeService {
         snapshot != null && snapshot.allowanceNegRisk != null
           ? snapshot.allowanceNegRisk > 0n
           : false,
+      feeModuleAllowance,
       ammAllowance:
         snapshot != null && snapshot.allowanceAmm != null
           ? snapshot.allowanceAmm > 0n
@@ -2070,6 +2092,9 @@ export class WalletPreparationRuntimeService {
             ? snapshot?.allowanceNegRisk
             : snapshot?.allowanceClob
           )?.toString() ?? null,
+        ...(feeModuleAllowance?.state === "required"
+          ? { limitlessFeeApproval: { ...feeModuleAllowance.approval } }
+          : {}),
       },
     };
     const inspectionInput: PreparationInspectionInput = {
@@ -2078,6 +2103,7 @@ export class WalletPreparationRuntimeService {
       purpose: input.purpose,
       marketClass: effectiveMarketClass,
       marketContextId: input.marketContextId,
+      limitlessMarketBuyRaw: input.limitlessMarketBuyRaw,
     };
     const adapter = new LimitlessWalletPreparationAdapter(
       async (requested) => buildLimitlessRuntimeFacts(requested, evidence),
@@ -2088,6 +2114,10 @@ export class WalletPreparationRuntimeService {
         ammAddress: marketContext.ammAddress,
         clobAddress: contracts.clobAddress,
         negRiskAddress: contracts.negRiskAddress,
+        feeApproval:
+          feeModuleAllowance?.state === "required"
+            ? feeModuleAllowance.approval
+            : undefined,
       }),
     );
     const preparation = await adapter.inspect(inspectionInput);
@@ -2156,6 +2186,18 @@ export class WalletPreparationRuntimeService {
       targetVenueId === "polymarket" || targetVenueId === "limitless"
         ? targetVenueId
         : null;
+    if (
+      input.limitlessMarketBuyRaw !== undefined &&
+      (input.purpose !== "buy" ||
+        targetRuntimeVenue !== "limitless" ||
+        !targetMarket ||
+        !classForMarket("limitless", targetMarket).startsWith("clob"))
+    ) {
+      throw new PreparationContractError(
+        "unsupported_market_class",
+        "Limitless fee preparation requires an exact CLOB market buy",
+      );
+    }
     // SELL preparation follows the authenticated holding, not the replaceable
     // current market generation. BUY continues to prepare the current market.
     let sellAssetContext: PolymarketAssetContext | undefined;
