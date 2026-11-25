@@ -28,8 +28,10 @@ import {
 import {
   fetchLimitlessClobMarket,
   marketLimitlessFeePolicy,
+  verifyLimitlessExchangeAllowance,
   verifyLimitlessFeeModuleAllowance,
 } from "../../services/limitless-clob-fee-runtime.js";
+import { extractLimitlessMarketExchangeAddress } from "../../services/limitless-market-contracts.js";
 import { assertLimitlessTradeFundingFeeAllowance } from "./limitless-fee-preflight.js";
 import {
   canonicalJsonHash,
@@ -1021,9 +1023,15 @@ export class FundingPlanningRuntime {
   ) {
     return assertLimitlessTradeFundingFeeAllowance(operation, {
       loadMarket: (id) => findTradeMarketById(this.db, id),
-      loadFeePolicy: async (slug) =>
-        marketLimitlessFeePolicy(await fetchLimitlessClobMarket(slug)),
+      loadFeePolicy: async (slug) => {
+        const payload = await fetchLimitlessClobMarket(slug);
+        return {
+          policy: marketLimitlessFeePolicy(payload),
+          exchangeAddress: extractLimitlessMarketExchangeAddress(payload),
+        };
+      },
       verifyAllowance: verifyLimitlessFeeModuleAllowance,
+      verifyExchangeAllowance: verifyLimitlessExchangeAllowance,
     });
   }
 

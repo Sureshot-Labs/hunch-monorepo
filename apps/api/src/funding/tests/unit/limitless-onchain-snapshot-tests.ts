@@ -19,6 +19,7 @@ const erc1155Interface = new Interface([
 
 const originalFetch = globalThis.fetch;
 let rpcRequests = 0;
+let partialFailure = false;
 
 try {
   globalThis.fetch = (async (_input, init) => {
@@ -39,7 +40,9 @@ try {
     const returnData = [
       erc20Interface.encodeFunctionResult("balanceOf", [100n]),
       erc20Interface.encodeFunctionResult("allowance", [101n]),
-      erc20Interface.encodeFunctionResult("allowance", [102n]),
+      erc20Interface.encodeFunctionResult("allowance", [
+        partialFailure ? 0n : 102n,
+      ]),
       erc20Interface.encodeFunctionResult("allowance", [103n]),
       erc1155Interface.encodeFunctionResult("isApprovedForAll", [true]),
       erc1155Interface.encodeFunctionResult("isApprovedForAll", [false]),
@@ -47,14 +50,18 @@ try {
       erc1155Interface.encodeFunctionResult("isApprovedForAll", [false]),
     ];
     const result = multicallInterface.encodeFunctionResult("aggregate3", [
-      returnData.map((data) => ({ success: true, returnData: data })),
+      returnData.map((data, index) =>
+        partialFailure && index === 1
+          ? { success: false, returnData: "0x" }
+          : { success: true, returnData: data },
+      ),
     ]);
     return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), {
       status: 200,
     });
   }) as typeof fetch;
 
-  const snapshot = await fetchLimitlessOnchainSnapshot({
+  const request = {
     rpcUrl: "https://rpc.invalid/limitless-snapshot-test",
     timeoutMs: 1_000,
     owner: "0x0000000000000000000000000000000000000001",
@@ -63,7 +70,8 @@ try {
     ammAddress: "0x0000000000000000000000000000000000000004",
     adapterAddress: "0x0000000000000000000000000000000000000005",
     conditionalTokensAddress: "0x0000000000000000000000000000000000000006",
-  });
+  };
+  const snapshot = await fetchLimitlessOnchainSnapshot(request);
 
   assert.equal(rpcRequests, 1);
   assert.deepEqual(snapshot, {
@@ -76,6 +84,22 @@ try {
     approvedAdapter: true,
     approvedAmm: false,
   });
+  partialFailure = true;
+  const partial = await fetchLimitlessOnchainSnapshot({
+    ...request,
+    forceFresh: true,
+  });
+  assert.equal(rpcRequests, 2);
+  assert.equal(
+    partial.allowanceClob,
+    null,
+    "RPC failure must not look like missing approval",
+  );
+  assert.equal(
+    partial.allowanceNegRisk,
+    0n,
+    "an observed zero still requests approval",
+  );
   console.log(
     "[limitless-onchain-snapshot-tests] account balance, allowances, and approvals use one multicall",
   );

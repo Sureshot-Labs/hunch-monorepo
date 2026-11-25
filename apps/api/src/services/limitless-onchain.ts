@@ -256,7 +256,7 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
           clobAddress,
         ]),
         decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
-        fallback: 0n,
+        fallback: null,
       });
     }
 
@@ -268,7 +268,7 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
           negRiskAddress,
         ]),
         decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
-        fallback: 0n,
+        fallback: null,
       });
     }
 
@@ -332,9 +332,11 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
 
     let cursor = 0;
     const usdcBalance = decoded[cursor++] as bigint;
-    const allowanceClob = clobAddress ? (decoded[cursor++] as bigint) : null;
+    const allowanceClob = clobAddress
+      ? (decoded[cursor++] as bigint | null)
+      : null;
     const allowanceNegRisk = negRiskAddress
-      ? (decoded[cursor++] as bigint)
+      ? (decoded[cursor++] as bigint | null)
       : null;
     const allowanceAmm = ammAddress ? (decoded[cursor++] as bigint) : null;
     const approvedClob =

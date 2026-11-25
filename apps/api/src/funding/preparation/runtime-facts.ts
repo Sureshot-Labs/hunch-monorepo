@@ -139,8 +139,8 @@ export type LimitlessRuntimeEvidence = Readonly<{
   cashObserved: boolean;
   cashRaw: string | null;
   cashLockedRaw: string | null;
-  clobAllowance: boolean;
-  negRiskClobAllowance: boolean;
+  clobAllowance: bigint | null;
+  negRiskClobAllowance: bigint | null;
   feeModuleAllowance?: LimitlessFeeApprovalEvidence;
   ammAllowance: boolean;
   clobApproval: boolean;
@@ -868,6 +868,27 @@ export function buildLimitlessRuntimeFacts(
     internal,
   );
   const market = marketChecks(evidence.market);
+  const principal =
+    input.purpose === "buy" && input.limitlessMarketBuyRaw !== undefined
+      ? BigInt(input.limitlessMarketBuyRaw)
+      : null;
+  const exchangeAllowanceCheck = (
+    checkId: string,
+    allowance: bigint | null,
+    safeLabel: string,
+  ) =>
+    principal !== null && allowance === null
+      ? unavailable(
+          checkId,
+          "Limitless exchange allowance could not be verified",
+          "rpc_unavailable",
+        )
+      : approvalCheck({
+          checkId,
+          approved: allowance !== null && allowance >= (principal ?? 1n),
+          internal,
+          safeLabel,
+        });
   const cashAvailabilityObserved = observedAvailableRaw(
     evidence.cashObserved,
     evidence.cashRaw,
@@ -957,18 +978,16 @@ export function buildLimitlessRuntimeFacts(
             ? "locked_funds"
             : "cash_availability_unknown",
         ),
-    approvalCheck({
-      checkId: "clob_usdc_allowance",
-      approved: evidence.clobAllowance,
-      internal,
-      safeLabel: "Approve USDC for the Limitless CLOB exchange",
-    }),
-    approvalCheck({
-      checkId: "clob_neg_risk_usdc_allowance",
-      approved: evidence.negRiskClobAllowance,
-      internal,
-      safeLabel: "Approve USDC for the Limitless neg-risk exchange",
-    }),
+    exchangeAllowanceCheck(
+      "clob_usdc_allowance",
+      evidence.clobAllowance,
+      "Approve USDC for the Limitless CLOB exchange",
+    ),
+    exchangeAllowanceCheck(
+      "clob_neg_risk_usdc_allowance",
+      evidence.negRiskClobAllowance,
+      "Approve USDC for the Limitless neg-risk exchange",
+    ),
     ...(evidence.feeModuleAllowance
       ? [
           evidence.feeModuleAllowance.state === "unavailable"
@@ -1064,7 +1083,13 @@ export function buildLimitlessRuntimeFacts(
     topology: evidence.topology,
     observedAt: evidence.observedAt,
     expiresAt: evidence.expiresAt,
-    evidence: evidence.safeEvidence,
+    evidence:
+      principal === null
+        ? evidence.safeEvidence
+        : {
+            ...evidence.safeEvidence,
+            exchangeAllowanceRequiredRaw: principal.toString(),
+          },
     checks: mapChecks(checks),
   };
 }

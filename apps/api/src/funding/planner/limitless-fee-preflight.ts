@@ -2,7 +2,9 @@ import { ethers } from "ethers";
 
 import { isRecord } from "../../lib/type-guards.js";
 import { isLimitlessAmmMarketMetadata } from "../../services/limitless-market-mode.js";
+import { extractLimitlessMarketExchangeAddress } from "../../services/limitless-market-contracts.js";
 import {
+  assertLimitlessExchangeAllowance,
   assertLimitlessFeeModuleAllowance,
   assertLimitlessMarketPayloadSlug,
   readLimitlessClobFeePolicy,
@@ -31,10 +33,19 @@ export async function assertLimitlessTradeFundingFeeAllowance(
       slug: string | null;
       metadata: unknown;
     } | null>;
-    loadFeePolicy: (slug: string) => Promise<LimitlessClobFeePolicy>;
+    loadFeePolicy: (slug: string) => Promise<{
+      policy: LimitlessClobFeePolicy;
+      exchangeAddress: string | null;
+    }>;
     verifyAllowance: (
       policy: LimitlessClobFeePolicy,
       owner: string,
+    ) => Promise<void>;
+    verifyExchangeAllowance: (
+      input: Omit<
+        Parameters<typeof assertLimitlessExchangeAllowance>[0],
+        "readAllowance"
+      >,
     ) => Promise<void>;
   },
 ): Promise<void> {
@@ -53,15 +64,32 @@ export async function assertLimitlessTradeFundingFeeAllowance(
   }
   if (isLimitlessAmmMarketMetadata(market.metadata)) return;
   if (!market.slug) throw unavailableLimitlessFeePolicy();
-  const policy = await dependencies.loadFeePolicy(market.slug);
-  if (policy.mode === "legacy") return;
-  await dependencies.verifyAllowance(
-    policy,
-    requireLimitlessFeeFundingWallet(
-      operation.destinationTargetSnapshot,
-      policy,
-    ),
+  const { policy, exchangeAddress } = await dependencies.loadFeePolicy(
+    market.slug,
   );
+  if (policy.mode === "legacy") return;
+  const owner = requireLimitlessFeeFundingWallet(
+    operation.destinationTargetSnapshot,
+    policy,
+  );
+  const principalRaw = operation.supportMetadata?.limitlessClobBuyPrincipalRaw;
+  // Only new sealed quotes carry the exact consumer principal. The transfer
+  // amount may be just the shortfall, with a fee reserve, and is not authority.
+  if (principalRaw !== undefined) {
+    if (
+      typeof principalRaw !== "string" ||
+      !/^[1-9]\d{0,77}$/.test(principalRaw) ||
+      !exchangeAddress
+    )
+      throw unavailableLimitlessFeePolicy();
+    await dependencies.verifyExchangeAllowance({
+      policy,
+      owner,
+      exchangeAddress,
+      principal: BigInt(principalRaw),
+    });
+  }
+  await dependencies.verifyAllowance(policy, owner);
 }
 
 export function requireLimitlessFeeFundingWallet(
@@ -97,8 +125,16 @@ export function requireLimitlessFeeFundingWallet(
 export function delegatedLimitlessFeeDependencies(
   config: LimitlessFundingReconciliationConfig,
 ) {
+  const readAllowance: Parameters<
+    typeof assertLimitlessExchangeAllowance
+  >[0]["readAllowance"] = (request) =>
+    fetchErc20Allowance({
+      ...request,
+      rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
+      timeoutMs: Math.min(3_000, fundingSidecarRuntimeConfig.baseRpcTimeoutMs),
+    });
   return {
-    loadFeePolicy: async (slug: string): Promise<LimitlessClobFeePolicy> => {
+    loadFeePolicy: async (slug: string) => {
       const requestPath = `/markets/${encodeURIComponent(slug)}`;
       const response = await fetch(
         `${config.apiBase.replace(/\/$/, "")}${requestPath}`,
@@ -122,24 +158,25 @@ export function delegatedLimitlessFeeDependencies(
       if (!response?.ok) throw unavailableLimitlessFeePolicy();
       const payload: unknown = await response.json().catch(() => null);
       assertLimitlessMarketPayloadSlug(payload, slug);
-      return readLimitlessClobFeePolicy(
-        payload,
-        fundingSidecarRuntimeConfig.limitlessUsdcAddress,
-      );
+      return {
+        policy: readLimitlessClobFeePolicy(
+          payload,
+          fundingSidecarRuntimeConfig.limitlessUsdcAddress,
+        ),
+        exchangeAddress: extractLimitlessMarketExchangeAddress(payload),
+      };
     },
     verifyAllowance: (policy: LimitlessClobFeePolicy, owner: string) =>
       assertLimitlessFeeModuleAllowance({
         policy,
         owner,
-        readAllowance: (request) =>
-          fetchErc20Allowance({
-            ...request,
-            rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
-            timeoutMs: Math.min(
-              3_000,
-              fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
-            ),
-          }),
+        readAllowance,
       }),
+    verifyExchangeAllowance: (
+      input: Omit<
+        Parameters<typeof assertLimitlessExchangeAllowance>[0],
+        "readAllowance"
+      >,
+    ) => assertLimitlessExchangeAllowance({ ...input, readAllowance }),
   };
 }

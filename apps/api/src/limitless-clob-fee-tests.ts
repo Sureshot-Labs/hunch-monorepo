@@ -15,6 +15,7 @@ import {
 } from "./services/limitless-order-rejection.js";
 import {
   assertLimitlessMarketPayloadSlug,
+  assertLimitlessExchangeAllowance,
   assertLimitlessFeeModuleAllowance,
   assertLimitlessSigningFee,
   LimitlessClobFeeError,
@@ -203,6 +204,8 @@ test("funding checks the exact market and sealed destination wallet, not the sou
     },
   } as unknown as FundingCommitPlan["operation"];
   let verifies = 0;
+  let exchangeChecks = 0;
+  let remaining = 800_000n;
   const dependencies = {
     loadMarket: async (id: string) => {
       assert.equal(id, "market-key");
@@ -210,12 +213,30 @@ test("funding checks the exact market and sealed destination wallet, not the sou
     },
     loadFeePolicy: async (slug: string) => {
       assert.equal(slug, "exact-market");
-      return collateral;
+      return { policy: collateral, exchangeAddress: exchange };
     },
     verifyAllowance: async (policy: typeof collateral, wallet: string) => {
       verifies += 1;
       assert.equal(policy, collateral);
       assert.equal(wallet, owner);
+    },
+    verifyExchangeAllowance: async (
+      input: Omit<
+        Parameters<typeof assertLimitlessExchangeAllowance>[0],
+        "readAllowance"
+      >,
+    ) => {
+      await assertLimitlessExchangeAllowance({
+        ...input,
+        readAllowance: async ({ spender, owner: wallet, tokenAddress }) => {
+          exchangeChecks++;
+          assert.equal(wallet, owner);
+          assert.equal(spender, exchange);
+          assert.equal(tokenAddress, usdc);
+          assert.equal(input.principal, 1_000_000n);
+          return remaining;
+        },
+      });
     },
   };
   await assertLimitlessTradeFundingFeeAllowance(operation, dependencies);
@@ -234,7 +255,7 @@ test("funding checks the exact market and sealed destination wallet, not the sou
   );
   await assertLimitlessTradeFundingFeeAllowance(operation, {
     ...dependencies,
-    loadFeePolicy: async () => legacy,
+    loadFeePolicy: async () => ({ policy: legacy, exchangeAddress: exchange }),
   });
   await assertLimitlessTradeFundingFeeAllowance(operation, {
     ...dependencies,
@@ -252,6 +273,24 @@ test("funding checks the exact market and sealed destination wallet, not the sou
     hasCode("limitless_fee_policy_unavailable"),
   );
   assert.equal(verifies, 1);
+  assert.equal(
+    exchangeChecks,
+    0,
+    "old funding operations retain their original contract",
+  );
+  const scoped = {
+    ...operation,
+    requestedDestinationAmount: { raw: "704482" },
+    supportMetadata: { limitlessClobBuyPrincipalRaw: "1000000" },
+  };
+  await assert.rejects(
+    assertLimitlessTradeFundingFeeAllowance(scoped, dependencies),
+    hasCode("limitless_trade_validation_rejected"),
+  );
+  remaining = 1_000_000n;
+  await assertLimitlessTradeFundingFeeAllowance(scoped, dependencies);
+  assert.equal(exchangeChecks, 2);
+  assert.equal(verifies, 2);
 });
 
 test("open or contradictory FOK evidence does not release a reserve", () => {

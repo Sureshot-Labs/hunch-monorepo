@@ -3,6 +3,8 @@ import test from "node:test";
 import type { Pool } from "@hunch/infra";
 
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
+import { verifyLimitlessExchangeAllowance } from "./services/limitless-clob-fee-runtime.js";
+import { LimitlessClobFeeError } from "./services/limitless-clob-fees.js";
 import {
   limitlessClobQuoteQuerySchema,
   limitlessEmbeddedSignOrderPrepareBodySchema,
@@ -61,6 +63,66 @@ test("the observed wallet covers the principal but not the venue's standard rese
   assert.equal(
     enforceLimitlessCollateralBuyCheck(check, true)?.statusCode,
     409,
+  );
+});
+
+test("pre-dispatch guard requires the signed principal against the exchange, not the fee module", async () => {
+  const check = {
+    principal: 1_000_000n,
+    exchangeAddress: exchange,
+    owner: wallet,
+    policy: {
+      mode: "collateral" as const,
+      signingFeeRateBps: 0 as const,
+      feeModule,
+      collateralToken: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
+    },
+  };
+  let observed = 800_000n;
+  const read = async (
+    target: Parameters<
+      NonNullable<Parameters<typeof verifyLimitlessExchangeAllowance>[1]>
+    >[0],
+  ) => {
+    assert.equal(target.spender, exchange);
+    assert.equal(target.owner, wallet);
+    assert.equal(target.tokenAddress, check.policy.collateralToken);
+    assert.ok(target.timeoutMs !== undefined && target.timeoutMs <= 3_000);
+    return observed;
+  };
+  await assert.rejects(
+    () => verifyLimitlessExchangeAllowance(check, read),
+    (error) => {
+      assert.ok(error instanceof LimitlessClobFeeError);
+      assert.equal(error.responseStatus, 409);
+      assert.equal(error.code, "limitless_trade_validation_rejected");
+      assert.deepEqual(error.exchangeAllowance, {
+        exchangeAddress: exchange,
+        requiredRaw: "1000000",
+        availableRaw: "800000",
+      });
+      return true;
+    },
+  );
+  observed = 1_000_000n;
+  await verifyLimitlessExchangeAllowance(check, read);
+  await assert.rejects(
+    () =>
+      verifyLimitlessExchangeAllowance(check, async () => {
+        throw Error("rpc");
+      }),
+    (error) => {
+      assert.ok(error instanceof LimitlessClobFeeError);
+      assert.equal(error.responseStatus, 503);
+      assert.equal(error.exchangeAllowance?.availableRaw, null);
+      return true;
+    },
+  );
+  await verifyLimitlessExchangeAllowance(
+    { ...check, policy: { mode: "legacy", signingFeeRateBps: 300 } },
+    async () => {
+      throw Error("Legacy must not add an RPC read");
+    },
   );
 });
 

@@ -361,6 +361,12 @@ export class FundingQuoteService {
         `selected source plan differs from frozen facts: ${frozenFactMismatches.join(",")}`,
       );
     }
+    const limitlessBuyPrincipalRaw =
+      storedPlan.operation.purpose === "trade_shortfall" &&
+      storedPlan.operation.venueId === "limitless" &&
+      input.request.limitlessOrderType !== "GTC"
+        ? planning.plannerSnapshot.marketContext?.requestedCollateralRaw
+        : undefined;
     const plan = {
       ...storedPlan,
       operation: {
@@ -369,6 +375,9 @@ export class FundingQuoteService {
           ...(storedPlan.operation.supportMetadata ?? {}),
           discoveryProjectionId: planning.id,
           ownershipRevision: planning.ownershipRevision,
+          ...(limitlessBuyPrincipalRaw === undefined
+            ? {}
+            : { limitlessClobBuyPrincipalRaw: limitlessBuyPrincipalRaw }),
           ...(input.request.limitlessOrderType === "GTC" &&
           storedPlan.operation.purpose === "trade_shortfall" &&
           storedPlan.operation.venueId === "limitless"

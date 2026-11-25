@@ -1,11 +1,14 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { Interface } from "ethers";
 
 import type { PreparationInspectionInput } from "../../domain/contracts.js";
 import type { VenueAccountBinding } from "../../domain/types.js";
 import { LimitlessWalletPreparationAdapter } from "../../preparation/limitless-adapter.js";
 import { PolymarketWalletPreparationAdapter } from "../../preparation/polymarket-adapter.js";
+import { createLimitlessRuntimeActionMaterializer } from "../../preparation/runtime-actions.js";
+import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 import {
   buildLimitlessRuntimeFacts,
   buildPolymarketRuntimeFacts,
@@ -406,8 +409,8 @@ function limitlessEvidence(
     cashObserved: true,
     cashRaw: "1000000",
     cashLockedRaw: "0",
-    clobAllowance: true,
-    negRiskClobAllowance: true,
+    clobAllowance: 1_000_000n,
+    negRiskClobAllowance: 1_000_000n,
     ammAllowance: true,
     clobApproval: true,
     negRiskClobApproval: true,
@@ -751,7 +754,7 @@ await test("Limitless fund readiness does not imply CLOB or AMM readiness", asyn
       observedAt: null,
       stale: false,
     },
-    clobAllowance: false,
+    clobAllowance: 0n,
     ammAllowance: false,
   });
   const adapter = new LimitlessWalletPreparationAdapter(
@@ -773,7 +776,7 @@ await test("Limitless CLOB and AMM approval evidence is not interchangeable", as
   const exactBinding = binding("limitless");
   const evidence = limitlessEvidence({
     binding: exactBinding,
-    clobAllowance: true,
+    clobAllowance: 1n,
     ammAllowance: false,
   });
   const adapter = new LimitlessWalletPreparationAdapter(
@@ -941,6 +944,127 @@ await test("unknown venue cash still fails closed", async () => {
   const result = await adapter.inspect(input(exactBinding, "buy", "amm"));
   assert.equal(result.status, "unavailable");
   assert.ok(result.reasonCodes.includes("cash_availability_unknown"));
+});
+
+await test("Limitless CLOB BUY prepares the exact exchange again when previous trades consumed its allowance", async () => {
+  const exactBinding = binding("limitless");
+  const clobAddress = "0x0000000000000000000000000000000000000011";
+  const negRiskAddress = "0x0000000000000000000000000000000000000012";
+  const erc20 = new Interface([
+    "function approve(address spender,uint256 amount)",
+  ]);
+  const materializer = createLimitlessRuntimeActionMaterializer({
+    wallet: {
+      id: exactBinding.executionWalletId,
+      userId: exactBinding.settlementLocation.accountId,
+      walletAddress: exactBinding.accountRef,
+      walletType: "ethereum",
+      name: null,
+      isPrimary: true,
+      isVerified: true,
+      privyWalletId: "privy-exact-limitless-fixture",
+      walletSource: "embedded",
+      isInternalWallet: true,
+      privyProfileUpdatedAt: NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+    adapterAddress: null,
+    ammAddress: null,
+    clobAddress,
+    negRiskAddress,
+  });
+  for (const [marketClass, expected] of [
+    ["clob", "clob_usdc_allowance"],
+    ["clob_neg_risk", "clob_neg_risk_usdc_allowance"],
+  ] as const) {
+    const request = {
+      ...input(exactBinding, "buy", marketClass),
+      limitlessMarketBuyRaw: "1000000",
+    };
+    let remaining: bigint | null = 800_000n;
+    const adapter = new LimitlessWalletPreparationAdapter(
+      async (requested) =>
+        buildLimitlessRuntimeFacts(
+          requested,
+          limitlessEvidence({
+            binding: exactBinding,
+            clobAllowance: marketClass === "clob" ? remaining : 99_000_000n,
+            negRiskClobAllowance:
+              marketClass === "clob_neg_risk" ? remaining : 99_000_000n,
+            feeModuleAllowance: { state: "ready" },
+          }),
+        ),
+      () => NOW,
+      materializer,
+    );
+    const needsApproval = await adapter.inspect(request);
+    assert.equal(needsApproval.status, "setup_required");
+    assert.equal(
+      needsApproval.evidence.facts.exchangeAllowanceRequiredRaw,
+      "1000000",
+    );
+    const larger = await adapter.inspect({
+      ...request,
+      limitlessMarketBuyRaw: "2000000",
+    });
+    assert.notEqual(
+      larger.inspectionRevision,
+      needsApproval.inspectionRevision,
+    );
+    assert.equal(needsApproval.requiredActions.length, 1);
+    assert.equal(
+      needsApproval.requiredActions[0]?.safeLabel.includes("fees"),
+      false,
+    );
+    assert.equal(needsApproval.requiredActions[0]?.sponsorship, "requested");
+    assert.equal(needsApproval.requiredActions[0]?.valueMoving, false);
+    assert.ok(
+      needsApproval.evidence.checks.some(
+        (check) =>
+          check.checkId === expected && check.status === "action_required",
+      ),
+    );
+    const actions = await adapter.prepare({
+      ...request,
+      operationId: "operation_limitless_exchange_fixture",
+      expectedInspectionRevision: needsApproval.inspectionRevision,
+    });
+    assert.equal(actions.length, 1);
+    const approve = actions[0];
+    assert.ok(approve?.kind === "evm_transaction");
+    assert.equal(approve.networkId, "evm:8453");
+    assert.equal(approve.senderWalletId, exactBinding.executionWalletId);
+    assert.equal(approve.to, fundingSidecarRuntimeConfig.limitlessUsdcAddress);
+    assert.equal(approve.valueRaw, "0");
+    const [spender, allowance] = erc20.decodeFunctionData(
+      "approve",
+      approve.data,
+    );
+    assert.equal(
+      spender,
+      marketClass === "clob" ? clobAddress : negRiskAddress,
+    );
+    assert.equal(
+      allowance,
+      (1n << 256n) - 1n,
+      "reuse the existing exchange approval policy",
+    );
+    assert.equal(
+      (await adapter.inspect(input(exactBinding, "buy", marketClass))).status,
+      "ready",
+    );
+    remaining = 1_000_000n;
+    const ready = await adapter.inspect(request);
+    assert.equal(ready.status, "ready");
+    assert.notEqual(ready.inspectionRevision, needsApproval.inspectionRevision);
+    remaining = 999_999n;
+    assert.equal((await adapter.inspect(request)).status, "setup_required");
+    remaining = null;
+    const unavailable = await adapter.inspect(request);
+    assert.equal(unavailable.status, "unavailable");
+    assert.equal(unavailable.requiredActions.length, 0);
+  }
 });
 
 await test("Limitless CLOB market buy preparation owns the separate fee allowance", async () => {
