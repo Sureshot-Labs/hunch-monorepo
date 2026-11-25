@@ -57,6 +57,7 @@ import {
   markStalePositionActionClaimForRecovery,
   POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS,
   quarantinePreClaimPositionActionReference,
+  recordPositionActionPayoutObservation,
   recordPositionActionPostconditions,
   recordPositionActionReceipt,
   recordPositionActionSubmission,
@@ -563,7 +564,7 @@ export class PositionActionRuntimeService {
     userId: string,
     operationId: string,
   ): Promise<StoredPositionAction | null> {
-    return fetchPositionActionForUser(this.db, { userId, operationId });
+    return fetchPositionActionForUser(this.db, { userId, operationId }, true);
   }
 
   async claimSubmission(
@@ -741,10 +742,7 @@ export class PositionActionRuntimeService {
     userId: string,
     operationId: string,
   ): Promise<PositionActionResult> {
-    let operation = await fetchPositionActionForUser(this.db, {
-      userId,
-      operationId,
-    });
+    let operation = await this.operation(userId, operationId);
     if (!operation) {
       throw new PositionActionRuntimeError(
         "position_not_found",
@@ -838,6 +836,7 @@ export class PositionActionRuntimeService {
         reasonCodes: ["operation_reconcile_required"],
       };
     }
+    const checkedAtMs = this.clock().getTime();
     const receipt = await driver.observeReceipt({
       ownerAddress: operation.ownerAddress,
       plan,
@@ -851,12 +850,34 @@ export class PositionActionRuntimeService {
       conditionalTokensAddress:
         plan.positionContract ?? driver.conditionalTokensAddress(),
     });
+    const payoutSeen =
+      receipt?.evidence.finality === "mined" &&
+      receipt.succeeded &&
+      receipt.actualPayoutRaw !== null &&
+      receipt.expectedPayoutRaw !== null &&
+      BigInt(receipt.actualPayoutRaw) > 0n &&
+      BigInt(receipt.actualPayoutRaw) >= BigInt(receipt.expectedPayoutRaw);
+    if (
+      operation.venueId === "limitless" &&
+      operation.action === "redeem" &&
+      (operation.status === "submitted" ||
+        operation.status === "reconcile_required") &&
+      operation.submissionFingerprint &&
+      (!receipt || receipt.evidence.finality === "mined")
+    ) {
+      await recordPositionActionPayoutObservation(this.db, {
+        userId,
+        operationId,
+        submissionFingerprint: operation.submissionFingerprint,
+        checkedAtMs,
+        seen: payoutSeen,
+      });
+    }
     if (!receipt) return publicResult(operation);
     if (receipt.evidence.finality === "mined") {
-      // The exact CTF payout is visible, but may still be reorged. This hint
-      // does not change the journal, effects, retry rules, or payout state.
+      // Provisional evidence does not authorize the ledger effects.
       const current = publicResult(operation);
-      return receipt.succeeded && receipt.actualPayoutRaw !== null
+      return payoutSeen
         ? { ...current, confirmationStage: "payout_seen_awaiting_finality" }
         : current;
     }

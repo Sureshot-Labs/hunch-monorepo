@@ -45,6 +45,10 @@ export type StoredPositionAction = Readonly<{
   broadcastMayHaveOccurred: boolean;
   receiptStatus: "unobserved" | "pending" | "success" | "reverted" | "unknown";
   receiptObservedAt: Date | null;
+  confirmationStage?:
+    | "payout_seen_awaiting_finality"
+    | "checking_in_background"
+    | null;
   postconditionStatus: "pending" | "satisfied" | "failed" | "unavailable";
   lastErrorCode: string | null;
   submittedAt: Date | null;
@@ -54,6 +58,7 @@ export type StoredPositionAction = Readonly<{
 }>;
 
 type PositionActionRow = Readonly<{
+  payout_stage?: StoredPositionAction["confirmationStage"];
   id: string;
   user_id: string;
   market_id: string | null;
@@ -120,6 +125,9 @@ function mapRow(row: PositionActionRow): StoredPositionAction {
     broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
     receiptStatus: row.receipt_status,
     receiptObservedAt: row.receipt_observed_at,
+    ...(row.payout_stage === undefined
+      ? {}
+      : { confirmationStage: row.payout_stage }),
     postconditionStatus: row.postcondition_status,
     lastErrorCode: row.last_error_code,
     submittedAt: row.submitted_at,
@@ -1406,16 +1414,109 @@ export async function failPositionActionEffect(
 export async function fetchPositionActionForUser(
   db: Pick<Pool, "query">,
   input: Readonly<{ userId: string; operationId: string }>,
+  includePayoutObservation = false,
 ): Promise<StoredPositionAction | null> {
   const { rows } = await db.query<PositionActionRow>(
     `
-      select ${COLUMNS}
-      from position_action_operations
+      select ${COLUMNS}${
+        includePayoutObservation
+          ? `,
+        case when operation_row.venue_id = 'limitless'
+            and operation_row.action = 'redeem'
+            and operation_row.status in ('confirmed', 'reconcile_required')
+            and operation_row.receipt_status = 'success'
+          then 'checking_in_background'
+          when operation_row.venue_id = 'limitless'
+            and operation_row.action = 'redeem'
+            and operation_row.status in ('submitted', 'reconcile_required')
+            and operation_row.receipt_status = 'pending'
+          then (
+            select case
+              when attempt_row.receipt_evidence #>> '{provisionalPayout,submissionFingerprint}'
+                is distinct from operation_row.submission_fingerprint then null
+              when attempt_row.receipt_evidence #>> '{provisionalPayout,seen}' = 'true'
+                then 'payout_seen_awaiting_finality'
+              when attempt_row.receipt_evidence #>> '{provisionalPayout,everSeen}' = 'true'
+                then 'checking_in_background'
+            end
+            from position_action_attempts attempt_row
+            where attempt_row.action_operation_id = operation_row.id
+              and attempt_row.broadcast_may_have_occurred
+            order by attempt_row.attempt_number desc
+            limit 1
+          )
+        end as payout_stage`
+          : ""
+      }
+      from position_action_operations operation_row
       where user_id = $1 and id = $2
     `,
     [input.userId, input.operationId],
   );
   return rows[0] ? mapRow(rows[0]) : null;
+}
+
+// Provisional UI evidence only. Never change the operation, receipt ledger,
+// effects, or attempt outcome. Serialize with final receipt writes, after RPC.
+export async function recordPositionActionPayoutObservation(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    submissionFingerprint: string;
+    checkedAtMs: number;
+    seen: boolean;
+  }>,
+): Promise<void> {
+  await tx(pool, async (client) => {
+    const operation = await fetchForUpdate(
+      client,
+      input.userId,
+      input.operationId,
+    );
+    if (
+      operation.venueId !== "limitless" ||
+      operation.action !== "redeem" ||
+      (operation.status !== "submitted" &&
+        operation.status !== "reconcile_required") ||
+      operation.receiptStatus !== "pending" ||
+      operation.submissionFingerprint !== input.submissionFingerprint
+    )
+      return;
+    await client.query(
+      `
+        update position_action_attempts
+        set receipt_evidence = jsonb_set(
+          receipt_evidence, '{provisionalPayout}',
+          jsonb_build_object(
+            'submissionFingerprint', $2::text,
+            'seen', $3::boolean,
+            'everSeen', $3::boolean or coalesce(
+              receipt_evidence #>> '{provisionalPayout,submissionFingerprint}' = $2
+                and receipt_evidence #>> '{provisionalPayout,everSeen}' = 'true',
+              false
+            ),
+            'checkedAtMs', $4::bigint
+          )
+        )
+        where id = (
+          select id from position_action_attempts
+          where action_operation_id = $1 and broadcast_may_have_occurred
+          order by attempt_number desc limit 1
+        )
+        and (
+          receipt_evidence #>> '{provisionalPayout,submissionFingerprint}' is distinct from $2
+          or (receipt_evidence #>> '{provisionalPayout,checkedAtMs}')::bigint <= $4
+        )
+      `,
+      [
+        operation.id,
+        input.submissionFingerprint,
+        input.seen,
+        input.checkedAtMs,
+      ],
+    );
+  });
 }
 
 /**
