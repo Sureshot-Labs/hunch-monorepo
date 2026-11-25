@@ -1072,6 +1072,8 @@ try {
   const simulatedHistory: typeof fetch = async (url) => {
     const search = new URL(String(url)).search;
     historyCalls.push(search);
+    if (new URL(String(url)).searchParams.has("page"))
+      return Response.json({ message: "Bad Request" }, { status: 400 });
     return Response.json(
       search.includes("cursor=")
         ? {
@@ -1108,10 +1110,7 @@ try {
     { ...portfolioScope, historyScan: firstHistoryPage?.nextScan },
     simulatedHistory,
   );
-  assert.deepEqual(historyCalls, [
-    "?limit=25&page=1",
-    "?limit=25&cursor=opaque_tail",
-  ]);
+  assert.deepEqual(historyCalls, ["?limit=25", "?limit=25&cursor=opaque_tail"]);
   assert.equal(
     nextHistoryPage?.coversSubmission,
     false,
@@ -1121,6 +1120,48 @@ try {
     { tx_hash: txHash, provider_order_id: actualDirectVenueId },
   ]);
   assert.equal(nextHistoryPage?.nextScan, null);
+  const fullHistory = Array.from({ length: 25 }, (_, index) => ({
+    type: "split",
+    createdAt: new Date(
+      pollTime.getTime() + 10_000 - index * 1_000,
+    ).toISOString(),
+  }));
+  const headCoverage = (data: unknown[], totalCount: number) =>
+    parseLimitlessDirectHistoryPage(
+      { data, totalCount, nextCursor: "later" },
+      portfolioScope,
+    )?.coversSubmission;
+  assert.equal(headCoverage(fullHistory, 30), true);
+  assert.equal(headCoverage(fullHistory.slice(-1), 30), false);
+  assert.equal(headCoverage([...fullHistory].reverse(), 30), false);
+  assert.equal(
+    headCoverage([...fullHistory.slice(0, -1), { createdAt: true }], 30),
+    false,
+  );
+  assert.equal(headCoverage(fullHistory, 25), false);
+  for (const payload of [
+    { data: [{ ...fullHistory[0], clientOrderId: [] }], totalCount: 1 },
+    {
+      data: [{ ...fullHistory[0], clientOrderId: "x", client_order_id: "y" }],
+      totalCount: 1,
+    },
+    { data: [{ ...fullHistory[0] }], hasMore: true },
+    { data: [{ ...fullHistory[0] }] },
+    { data: [], totalCount: 0, hasMore: false, has_more: true },
+    { data: [], totalCount: 0, nextCursor: "", next_cursor: "more" },
+    { data: fullHistory, totalCount: 30, hasMore: false },
+    {
+      data: [],
+      totalCount: 0,
+      history: [{ clientOrderId: portfolioScope.clientOrderId }],
+    },
+  ]) {
+    assert.equal(
+      parseLimitlessDirectHistoryPage(payload, portfolioScope)
+        ?.coversSubmission,
+      false,
+    );
+  }
   for (const data of [
     [],
     [{ createdAt: new Date(pollTime.getTime() + 1_000).toISOString() }],

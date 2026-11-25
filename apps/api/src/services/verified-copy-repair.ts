@@ -468,8 +468,8 @@ export async function repairUnrecordedCopies(
                     (status.status === "found" &&
                       isLimitlessFokNegativeCandidate(parsedStatus))) &&
                   (status.status !== "not_found" ||
-                    !providerOrderId ||
-                    knownHashes.length > 0)
+                    (!retainedLocator.exactIdentityUnresolved &&
+                      (!providerOrderId || knownHashes.length > 0)))
                 ) {
                   provenAbsent =
                     (

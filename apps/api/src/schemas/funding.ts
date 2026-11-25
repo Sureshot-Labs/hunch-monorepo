@@ -407,6 +407,10 @@ export const fundingReceiveReceiptPublicSchema = z
     handling: z.enum(["direct", "automatic_conversion", "review_required"]),
     childFundingOperationId: z.string().uuid().nullable(),
     sourceUnavailable: z.literal(true).optional(),
+    recoveryReason: z
+      .enum(["source_spent_after_receipt", "source_balance_insufficient"])
+      .optional(),
+    automationReason: z.literal("receive_automation_not_consented").optional(),
     reviewContinuation: z
       .object({
         version: z.literal(1),
@@ -436,6 +440,12 @@ export const fundingReceiveSessionResponseSchema = z
     replayed: z.boolean(),
   })
   .strict();
+
+export const fundingReceiveSessionWithDepositStatusResponseSchema =
+  fundingReceiveSessionResponseSchema.extend({
+    // Independent of the session lifetime. Observed does not mean ready.
+    depositStatus: z.enum(["observed", "not_observed"]),
+  });
 
 const sourceOptionLegSchema = z
   .object({

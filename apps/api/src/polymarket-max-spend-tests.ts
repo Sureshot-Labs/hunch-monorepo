@@ -368,6 +368,10 @@ const tests: TestCase[] = [
         Parameters<typeof checkLimitlessBuyBudget>[2]
       > = {
         findMarket: async () => market,
+        fetchMarket: async () => ({
+          slug: "market",
+          venue: { exchange: DEPOSIT },
+        }),
         quoteClob: async (quoteInput) => {
           calls++;
           assert.equal(quoteInput.amountUsd, 1.9);
@@ -422,6 +426,60 @@ const tests: TestCase[] = [
         },
       );
       assert.equal(executableBelowRestingMinimum?.amountRaw, 1_900_000n);
+      const collateralDeps = {
+        ...dependencies,
+        fetchMarket: async () => ({
+          slug: "market",
+          venue: {
+            exchange: DEPOSIT,
+            feeModule: "0x0000000000000000000000000000000000000044",
+            feeModuleType: "COLLATERAL",
+          },
+          metadata: { fee: true },
+        }),
+        quoteClob: (
+          quoteInput: Parameters<typeof quoteLimitlessClobMarket>[0],
+        ) =>
+          quoteLimitlessClobMarket(quoteInput, {
+            requestOrderbook: async () => ({
+              ok: true,
+              payload: {
+                tokenId: "101",
+                minSize: "1000000",
+                asks: [{ price: 0.5, size: 100_000_000 }],
+                bids: [],
+              },
+            }),
+          }),
+      };
+      const fullBudget = { ...input, budgetRaw: 2_019_319n };
+      const collateralMax = await checkLimitlessBuyBudget(
+        {} as Pool,
+        fullBudget,
+        {
+          ...collateralDeps,
+          quoteClob: async (quoteInput) => {
+            assert.equal(quoteInput.amountUsd, 1.92);
+            return collateralDeps.quoteClob(quoteInput);
+          },
+        },
+      );
+      assert.equal(collateralMax?.amountRaw, 1_920_000n);
+      assert.equal(collateralMax?.requiredRaw, 2_016_000n);
+      assert.equal(
+        (
+          await checkLimitlessBuyBudget(
+            {} as Pool,
+            {
+              ...fullBudget,
+              maxPrincipalRaw: 1_900_000n,
+            },
+            collateralDeps,
+          )
+        )?.amountRaw,
+        1_900_000n,
+        "do not subtract the reserve from a principal cap",
+      );
       const before = calls;
       assert.equal(
         await checkLimitlessBuyBudget(
@@ -790,11 +848,15 @@ const tests: TestCase[] = [
           limitlessChecks++;
           assert.equal(input.marketId, "limitless:market-test");
           assert.equal(input.budgetRaw, 4_860_000n);
-          return { amountRaw: 4_860_000n, expiresAtMs: Date.now() + 2_000 };
+          return {
+            amountRaw: 4_620_000n,
+            requiredRaw: 4_851_000n,
+            expiresAtMs: Date.now() + 2_000,
+          };
         },
       );
       assert.equal(limitlessChecks, 1);
-      assert.equal(smallerLimitless?.amountUsdCents, 486);
+      assert.equal(smallerLimitless?.amountUsdCents, 462);
       assert.ok(smallerLimitless);
       assert.ok(Date.parse(smallerLimitless.expiresAt) < Date.now() + 3_000);
       const mismatchedVenue = await suggestSmallerMarketBuy(

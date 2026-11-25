@@ -1,4 +1,9 @@
 import { isRecord } from "../lib/type-guards.js";
+import {
+  canonicalLimitlessTransactionHash,
+  isLimitlessFokNegativeCandidate,
+  parseLimitlessOrderResult,
+} from "./limitless-order-result.js";
 
 export type LimitlessOrderStatusItem = Readonly<{
   clientOrderId?: string | null;
@@ -69,7 +74,11 @@ export function interpretLimitlessVerifiedBuyOrderStatus(
     )
       selected = result;
   }
-  if (selected) return selected;
+  if (
+    selected &&
+    !isLimitlessFokNegativeCandidate(parseLimitlessOrderResult(selected))
+  )
+    return selected;
   if (rawResults.length !== items.length || !rawResults.every(isRecord))
     return null;
   const results = rawResults as Record<string, unknown>[];
@@ -95,6 +104,31 @@ export function interpretLimitlessVerifiedBuyOrderStatus(
     })
   )
     return null;
+  if (selected) {
+    // Found is normally only a locator. A terminal rejection is different:
+    // a duplicate, incomplete or contradictory batch must not close a Copy.
+    const providerId = textOrNull(selected.orderId);
+    if (!providerId || (orderId && providerId !== orderId)) return null;
+    const selectedHash = canonicalLimitlessTransactionHash(
+      parseLimitlessOrderResult(selected).txHash,
+    );
+    return checked.every((result) => {
+      const parsed = parseLimitlessOrderResult(result);
+      const hash = canonicalLimitlessTransactionHash(parsed.txHash);
+      return (
+        result.status === "found" &&
+        textOrNull(result.orderId) === providerId &&
+        (!parsed.venueOrderId || parsed.venueOrderId === providerId) &&
+        (!clientOrderId ||
+          textOrNull(result.clientOrderId) === clientOrderId) &&
+        (!parsed.txHash || hash !== null) &&
+        hash === selectedHash &&
+        isLimitlessFokNegativeCandidate(parsed)
+      );
+    })
+      ? selected
+      : null;
+  }
   // Neither a conflict nor an unknown/error response becomes absence.
   if (!checked.every((result) => result.status === "not_found")) return null;
   if (

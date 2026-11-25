@@ -51,13 +51,73 @@ with the **selected trading wallet**. The response retains
   Address-only consumers can omit `checkFeeAllowance`; they may see a null
   policy for non-CLOB or unavailable venue data.
 
-`0` is a signing value, **not** a fee estimate. Limitless charges the actual
-fee in USDC; a Buy may need USDC beyond its order principal. The preflight
-detects a missing approval; a nonzero allowance is not proof that it covers
-the fee. Do not display `0%`, reuse the profile fee as a collateral fee quote,
-or infer order acceptance from approval.
+`0` is a signing value, **not** a fee estimate. Limitless checks the Buy
+principal plus a fee reserve and charges the actual USDC fee on execution.
+Do not display `0%`, reuse the legacy profile fee for a collateral quote, or
+infer order acceptance from approval. A nonzero allowance alone does not
+prove it covers the actual fee. Hunch does not silently increase an existing
+approval or ask for approval to resolve a balance shortfall.
 
 [Limitless SDK documentation](https://github.com/limitless-labs-group/limitless-exchange-ts-sdk/blob/main/docs/orders/README.md#collateral-fee-venues)
+
+## Check a FOK BUY before signing
+
+With the same authenticated account and selected wallet, read
+`GET /trade/limitless/clob/quote?slug=...&tokenId=...&side=BUY&amountUsd=2&checkCollateral=true`.
+The original depth quote is unchanged. The optional `collateralBuy` object
+checks the wallet's Base USDC and subtracts Hunch-known open BUY locks. It is
+`null` on legacy venues. All amounts ending in `Raw` are integer micro-USDC
+strings or null when the value could not be verified.
+
+- `ready`: the observed available balance covers the documented standard
+  reserve for a new trade. This isn't a guarantee of matching or settlement.
+- `insufficient_principal`: even the on-chain balance cannot cover the order
+  amount. Review the amount or add funds; this is not an allowance issue.
+- `standard_reserve_shortfall`: compare `availableRaw` with
+  `standardRequiredRaw` and show `standardShortfallRaw` if useful.
+- `unavailable`: refresh the check instead of assuming a zero fee or a
+  missing approval.
+
+The published standard reserve is 500 bps on fee-enabled COLLATERAL markets,
+zero on fee-disabled markets. For a 2 USDC order, the standard requirement
+is 2.10 USDC, not the amount of the actual fee. A per-profile cap can lower
+the reserve; the Hunch partner lookup does not expose that cap. On the
+standard path, pass `requireStandardFeeReserve: true` to both embedded
+signature endpoints and to `POST /trade/limitless/order` to require the
+standard reserve instead of displaying it as advisory. This flag does not
+change the order, allowance or its signed `feeRateBps`. Without it, a known
+principal shortfall still blocks, while a standard-reserve warning does not
+block accounts that might have a lower rate. An already-submitted order
+keeps its existing recovery path regardless of live balance.
+`standardMaxBuyRaw` is the maximum principal under the same standard
+reserve and observed balance, before depth and size checks. Round down to the
+client's amount step. The server's smaller-Buy suggestion also leaves this
+reserve in the funding budget.
+
+See [Limitless balance and approval checks](https://docs.limitless.exchange/developers/migrate-to-new-trading-venues#balance-and-approval-checks).
+
+## Checking an existing Copy
+
+For a client-signed collateral FOK Copy, generate and persist a UUID locally
+as `copyIdempotencyKey` before the first POST; keep it if the entire HTTP
+response is lost. A `409 limitless_submit_reconciling` can include the retained
+`copyIdempotencyKey`, including a server-generated key for older callers.
+Treat the returned key as an opaque string. Check
+`GET /social/copies/{url-encoded-key}` with the original Hunch account.
+Use the original `copyIdempotencyKey` from the request if it was supplied and
+the response didn't return one. Do not retry `POST /trade/limitless/order` to
+obtain status. This route reads the original Copy and never sends an order.
+
+- `pending`: keep the existing attempt; do not make a replacement Buy.
+- `confirmed`: the purchase was verified. Use `purchaseRef` when present; a
+  worker-verified Copy can be confirmed without a local order or execution ID.
+- `failed` with `purchaseRef: null`: close this attempt without treating it
+  as a purchase. Any new order requires a fresh user confirmation.
+- `revoked`: the attribution was revoked; this is not proof of no purchase.
+  A 404 or a failed status request also isn't proof of no purchase.
+
+The same status route works for an existing Copy if the client kept its key.
+Non-Copy direct order recovery still uses `GET /trade/limitless/orders/:orderId`.
 
 ## Finance-worker
 

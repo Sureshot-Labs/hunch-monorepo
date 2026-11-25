@@ -13,6 +13,7 @@ import { FundingReceiveSessionObserver } from "../../receive/receive-session-obs
 import {
   claimExpiredFundingReceiveInventoryReviews,
   claimExpiredFundingReceiveSpentReviews,
+  listFundingReceiveReceiptsForUser,
   listFundingReceiveSpentReviewCandidates,
   markFundingReceiveSpentReviewCandidatesChecked,
   resolveFundingReceiveSpentReviewInTransaction as resolveSpentReviewWithProof,
@@ -803,6 +804,18 @@ try {
     { status: "recovery_required", routing_disposition: "recovery_required" },
     { status: "recovery_required", routing_disposition: "recovery_required" },
   ]);
+  const publicReceipts = await listFundingReceiveReceiptsForUser(client, {
+    userId,
+    receiveSessionId: sessionId,
+  });
+  assert.equal(publicReceipts.length, 2);
+  assert.ok(
+    publicReceipts.every(
+      (receipt) =>
+        receipt.sourceUnavailable &&
+        receipt.recoveryReason === "source_spent_after_receipt",
+    ),
+  );
   const session = await client.query<{ status: string }>(
     `select status from funding_receive_sessions where id=$1`,
     [sessionId],

@@ -104,7 +104,8 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
         response: { 200: schema.socialCopyStatusResponse, ...errors },
       },
     },
-    async (request) => {
+    async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
       const result = await getCopyAttributionStatus(
         pool,
         requireUserId(request),

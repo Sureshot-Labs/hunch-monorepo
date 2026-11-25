@@ -108,11 +108,13 @@ export const limitlessEmbeddedEnsureReadyExecuteBodySchema = z.object({
 
 export const limitlessEmbeddedSignOrderPrepareBodySchema = z.object({
   marketSlug: zLimitlessSlug,
+  requireStandardFeeReserve: z.boolean().optional(),
   order: limitlessOrderSchema.omit({ signature: true }),
 });
 
 export const limitlessEmbeddedSignOrderExecuteBodySchema = z.object({
   marketSlug: zLimitlessSlug,
+  requireStandardFeeReserve: z.boolean().optional(),
   order: limitlessOrderSchema.omit({ signature: true }),
   exchangeAddress: zEthAddressRequired,
   authorizationSignature: z.string().trim().min(1).optional(),
@@ -122,6 +124,7 @@ export const limitlessOrderBodySchema = z
   .object({
     sourceRef: socialSourceRefSchema.optional(),
     copyIdempotencyKey: z.string().uuid().optional(),
+    requireStandardFeeReserve: z.boolean().optional(),
     order: limitlessOrderSchema,
     orderType: zOrderType.default("GTC"),
     postOnly: z.boolean().optional(),
@@ -356,6 +359,7 @@ export const limitlessAmmQuoteQuerySchema = z.object({
 
 export const limitlessClobQuoteQuerySchema = z
   .object({
+    checkCollateral: zOptionalBool.optional(),
     slug: zLimitlessSlug,
     tokenId: zRequiredString("tokenId is required"),
     side: z.preprocess(
