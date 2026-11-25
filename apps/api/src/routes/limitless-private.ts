@@ -43,6 +43,13 @@ import {
 } from "../services/limitless-trading-execution-service.js";
 import { assertLimitlessSigningFee } from "../services/limitless-clob-fees.js";
 import {
+  enforceLimitlessCollateralBuyCheck,
+  inspectLimitlessCollateralBuy,
+  limitlessEmbeddedFokBuyPrincipal,
+  limitlessUsdToRaw,
+  type LimitlessCollateralBuyCheck,
+} from "../services/limitless-collateral-buy.js";
+import {
   buildEmbeddedLimitlessOrderTypedData,
   type LimitlessEmbeddedOrderPayload,
 } from "../services/limitless-trading-service.js";
@@ -137,14 +144,17 @@ function buildEmbeddedLimitlessOrderRequest(inputs: {
 }
 
 async function prepareEmbeddedLimitlessOrderSigningRequest(inputs: {
+  userId: string;
   context: Awaited<ReturnType<typeof resolveEmbeddedPrivyWalletContext>>;
   marketSlug: string;
   requestAuth: LimitlessRequestAuthInputs;
   payload: LimitlessEmbeddedOrderPayload;
   exchangeAddress?: string | null;
+  requireStandardFeeReserve?: boolean;
 }): Promise<{
   exchangeAddress: string;
   request: EmbeddedPrivyAuthorizationRequest;
+  collateralBuy: LimitlessCollateralBuyCheck | null;
 }> {
   const providedExchangeAddress = inputs.exchangeAddress?.trim() ?? "";
   const resolvedExchangeAddress = providedExchangeAddress
@@ -174,14 +184,37 @@ async function prepareEmbeddedLimitlessOrderSigningRequest(inputs: {
     }
   }
   const exchangeAddress = resolvedExchangeAddress ?? market.exchangeAddress;
+  const request = buildEmbeddedLimitlessOrderRequest({
+    context: inputs.context,
+    payload: inputs.payload,
+    exchangeAddress,
+  });
+  const principal = limitlessEmbeddedFokBuyPrincipal(inputs.payload);
+  const collateralBuy =
+    market.feePolicy.mode === "collateral" && principal !== null
+      ? await inspectLimitlessCollateralBuy({
+          db: pool,
+          userId: inputs.userId,
+          signer: inputs.context.signer,
+          principal,
+          marketSlug: inputs.marketSlug,
+          marketPayload: market.marketPayload,
+        })
+      : null;
+  const failure = enforceLimitlessCollateralBuyCheck(
+    collateralBuy,
+    inputs.requireStandardFeeReserve === true,
+  );
+  if (failure)
+    throw Object.assign(new Error(failure.payload.error), {
+      responseStatus: failure.statusCode,
+      responsePayload: failure.payload,
+    });
 
   return {
     exchangeAddress,
-    request: buildEmbeddedLimitlessOrderRequest({
-      context: inputs.context,
-      payload: inputs.payload,
-      exchangeAddress,
-    }),
+    request,
+    collateralBuy,
   };
 }
 
@@ -249,15 +282,48 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "tokenId does not belong to slug" });
       }
 
-      return reply.send(
-        await quoteLimitlessClobMarket({
+      const readCollateral =
+        query.checkCollateral === true &&
+        query.side === "BUY" &&
+        query.amountUsd !== undefined;
+      const signer = request.walletAddress;
+      const principal =
+        readCollateral && query.amountUsd !== undefined
+          ? limitlessUsdToRaw(query.amountUsd)
+          : null;
+      if (
+        readCollateral &&
+        (!signer || !isEvmWallet(signer) || principal === null)
+      )
+        return reply
+          .code(400)
+          .send({
+            error:
+              "Select a Limitless wallet and a USDC amount with up to 6 decimals.",
+          });
+      if (readCollateral) reply.header("Cache-Control", "private, no-store");
+      const [quote, collateralBuy] = await Promise.all([
+        quoteLimitlessClobMarket({
           amountShares: query.amountShares,
           amountUsd: query.amountUsd,
           side: query.side,
           slug: query.slug,
           tokenId: requestedTokenId,
         }),
-      );
+        principal !== null && signer
+          ? inspectLimitlessCollateralBuy({
+              db: pool,
+              userId: user.id,
+              signer,
+              principal,
+              marketSlug: query.slug,
+            })
+          : null,
+      ]);
+      return reply.send({
+        ...quote,
+        ...(readCollateral ? { collateralBuy } : {}),
+      });
     },
   );
 
@@ -715,16 +781,21 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           );
         }
         const prepared = await prepareEmbeddedLimitlessOrderSigningRequest({
+          userId: user.id,
           context,
           marketSlug: request.body.marketSlug,
           requestAuth: partnerAuth.requestAuth,
           payload: request.body.order as LimitlessEmbeddedOrderPayload,
+          requireStandardFeeReserve: request.body.requireStandardFeeReserve,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           ok: true,
           exchangeAddress: prepared.exchangeAddress,
           request: prepared.request,
+          ...(prepared.collateralBuy
+            ? { collateralBuy: prepared.collateralBuy }
+            : {}),
         });
       } catch (error) {
         const status =
@@ -785,18 +856,26 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           );
         }
         const prepared = await prepareEmbeddedLimitlessOrderSigningRequest({
+          userId: user.id,
           context,
           marketSlug: request.body.marketSlug,
           requestAuth: partnerAuth.requestAuth,
           payload: request.body.order as LimitlessEmbeddedOrderPayload,
           exchangeAddress: request.body.exchangeAddress,
+          requireStandardFeeReserve: request.body.requireStandardFeeReserve,
         });
         const signature = await executePreparedPrivySignatureRequest({
           request: prepared.request,
           authorizationSignature: request.body.authorizationSignature ?? "",
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ ok: true, signature });
+        return reply.send({
+          ok: true,
+          signature,
+          ...(prepared.collateralBuy
+            ? { collateralBuy: prepared.collateralBuy }
+            : {}),
+        });
       } catch (error) {
         const status =
           typeof (error as { responseStatus?: unknown })?.responseStatus ===

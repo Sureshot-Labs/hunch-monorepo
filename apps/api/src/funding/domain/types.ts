@@ -782,8 +782,9 @@ export type FundingReceiveReceipt = Readonly<{
     | "recovery_required";
   handling: FundingReceiveHandling;
   childFundingOperationId: string | null;
-  /** Finalized later spend made this exact unconverted source unavailable. */
+  /** Finalized evidence shows this exact unconverted source is unavailable. */
   sourceUnavailable?: true;
+  recoveryReason?: "source_spent_after_receipt" | "source_balance_insufficient";
   automationReason?: "receive_automation_not_consented";
   reviewContinuation?: FundingReceiveReviewContinuation;
   reviewQuotePlan?: FundingReceiveQuotePlan;

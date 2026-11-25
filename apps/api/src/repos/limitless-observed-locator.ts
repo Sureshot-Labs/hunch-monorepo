@@ -8,6 +8,7 @@ export type LimitlessHistoryScan = { page: number; cursor?: string };
 export type LimitlessHistoryObservation = {
   hashes: readonly string[];
   providerOrderId?: string;
+  exactIdentityUnresolved?: true;
   scan?: {
     previous: LimitlessHistoryScan | null;
     next: LimitlessHistoryScan | null;
@@ -51,6 +52,7 @@ export function readLimitlessObservedLocator(value: unknown) {
     hashes,
     overflow:
       saved?.overflow === true || hashes.length > MAX_EXACT_LOCATOR_HASHES,
+    exactIdentityUnresolved: saved?.exactIdentityUnresolved === true,
     historyScan: readHistoryScan(saved?.historyScan),
   };
 }
@@ -69,6 +71,9 @@ export function appendLimitlessObservedLocatorSql(
     'txHash',coalesce(${saved}->>'txHash',${txHashSql}),
     'txHashes',coalesce(to_jsonb((array_agg(locator_hash.tx_hash order by locator_hash.tx_hash))[1:${MAX_EXACT_LOCATOR_HASHES}]),'[]'::jsonb),
     'overflow',coalesce(${saved}->'overflow'='true'::jsonb,false) or count(*)>${MAX_EXACT_LOCATOR_HASHES})
+    || case when coalesce(${saved}->'exactIdentityUnresolved'='true'::jsonb,false)
+      or coalesce(${observation}->'exactIdentityUnresolved'='true'::jsonb,false)
+      then '{"exactIdentityUnresolved":true}'::jsonb else '{}'::jsonb end
     || case when ${observation} ? 'scan' and
         ${saved}->'historyScan' is not distinct from nullif(${observation} #> '{scan,previous}','null'::jsonb)
       then jsonb_strip_nulls(jsonb_build_object('historyScan',${observation} #> '{scan,next}'))

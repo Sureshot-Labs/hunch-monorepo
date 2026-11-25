@@ -181,11 +181,18 @@ function publicReceipt(row: ReceiveReceiptRow): FundingReceiveReceipt {
     !Array.isArray(reviewResolutionValue)
       ? (reviewResolutionValue as JsonRecord)
       : null;
-  const sourceUnavailable =
-    row.status === "recovery_required" &&
-    (reviewResolution?.reason ===
-      "finalized_source_debit_and_insufficient_balance" ||
-      reviewResolution?.reason === "finalized_source_balance_insufficient");
+  let recoveryReason: FundingReceiveReceipt["recoveryReason"];
+  if (row.status === "recovery_required") {
+    if (
+      reviewResolution?.reason ===
+      "finalized_source_debit_and_insufficient_balance"
+    )
+      recoveryReason = "source_spent_after_receipt";
+    else if (
+      reviewResolution?.reason === "finalized_source_balance_insufficient"
+    )
+      recoveryReason = "source_balance_insufficient";
+  }
   const reviewContinuation = parseFundingReceiveReviewContinuation(
     row.evidence.reviewContinuation,
   );
@@ -209,7 +216,9 @@ function publicReceipt(row: ReceiveReceiptRow): FundingReceiveReceipt {
     status: row.status,
     handling: row.handling,
     childFundingOperationId: row.child_funding_operation_id,
-    ...(sourceUnavailable ? { sourceUnavailable: true as const } : {}),
+    ...(recoveryReason
+      ? { sourceUnavailable: true as const, recoveryReason }
+      : {}),
     ...(row.status === "recovery_required" &&
     row.child_funding_operation_id === null &&
     row.evidence.receiveAutomationReason === "receive_automation_not_consented"

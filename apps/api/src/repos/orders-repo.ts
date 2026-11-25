@@ -1129,6 +1129,7 @@ export async function promoteLimitlessDirectOrderJournal(
     size?: number | null;
     filledAt?: Date | null;
     negativeCheckedHashes?: readonly string[];
+    rejectConcurrentOrderEvidence?: boolean;
   },
 ): Promise<boolean> {
   return tx(pool, async (db) => {
@@ -1161,6 +1162,9 @@ export async function promoteLimitlessDirectOrderJournal(
          ))
          and ($4::text is not null or (
            not coalesce(order_payload #>> '{_hunchLimitlessDirectLocator,overflow}'='true',false)
+           and (not $11::boolean or (
+             order_payload #>> '{_hunchLimitlessDirectLocator,providerOrderId}' is null
+             and not coalesce(order_payload #>> '{_hunchLimitlessDirectLocator,exactIdentityUnresolved}'='true',false)))
            and (order_payload #>> '{_hunchLimitlessDirectLocator,txHash}' is null
                 or lower(order_payload #>> '{_hunchLimitlessDirectLocator,txHash}')=any($10::text[]))
            and not exists(select 1 from jsonb_array_elements_text(coalesce(
@@ -1178,6 +1182,7 @@ export async function promoteLimitlessDirectOrderJournal(
         input.size ?? null,
         input.filledAt ?? null,
         input.negativeCheckedHashes ?? [],
+        input.rejectConcurrentOrderEvidence ?? false,
       ],
     );
     if (updated.rowCount === 1) return true;

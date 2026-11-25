@@ -121,11 +121,13 @@ export async function suggestSmallerMarketBuy(
             const checked = await checkExactInput(pool, {
               marketId: consumerIntent.marketId,
               tokenId,
-              budgetRaw:
-                budget < maximumSmallerRaw ? budget : maximumSmallerRaw,
+              budgetRaw: budget,
+              maxPrincipalRaw: maximumSmallerRaw,
             });
             if (checked == null) return checked;
-            const verifiedCapacity = capacityFor(checked.amountRaw.toString());
+            const verifiedCapacity = capacityFor(
+              checked.requiredRaw.toString(),
+            );
             const hintExpiry = Math.min(expiresAtMs, checked.expiresAtMs);
             if (
               verifiedCapacity == null ||
@@ -133,7 +135,7 @@ export async function suggestSmallerMarketBuy(
               Date.now() >= hintExpiry
             )
               return null;
-            if (available + verifiedCapacity >= checked.amountRaw) {
+            if (available + verifiedCapacity >= checked.requiredRaw) {
               return {
                 originalAmountUsdCents: original,
                 amountUsdCents: Number(checked.amountRaw / 10_000n),

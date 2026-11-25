@@ -523,6 +523,9 @@ async function assertNoLimitlessCollateralHistory(
   const knownProviderOrderId = observed.providerOrderId;
   if (
     observed.overflow ||
+    (!exactProviderOrderId &&
+      (observed.exactIdentityUnresolved ||
+        (knownProviderOrderId && observed.hashes.length === 0))) ||
     observed.hashes.some((hash) => !checkedHashes.includes(hash))
   )
     throw new FundingTradeAttemptError(

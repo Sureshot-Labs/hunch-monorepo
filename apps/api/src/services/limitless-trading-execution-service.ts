@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import type { Pool } from "@hunch/infra";
 import type { SocialSourceRef } from "../schemas/social-trade.js";
 import {
+  LimitlessCopyAlreadySubmittedError,
+  inspectDispatchedLimitlessCopy,
   retainClientCopyBeforeSubmission,
   linkPersistedCopy,
   markCopyDefinitiveProviderRejection,
@@ -107,6 +109,11 @@ import {
   readBaseUsdcAllowance,
   verifyLimitlessFeeModuleAllowance,
 } from "./limitless-clob-fee-runtime.js";
+import {
+  enforceLimitlessCollateralBuyCheck,
+  inspectLimitlessCollateralBuy,
+  type LimitlessCollateralBuyCheck,
+} from "./limitless-collateral-buy.js";
 import { isLimitlessAmmMarketMetadata } from "./limitless-market-mode.js";
 import { readLimitlessAmmMarketAddress } from "./limitless-amm-address.js";
 import {
@@ -293,6 +300,7 @@ type LimitlessRouteLogger = {
 type LimitlessClientOrderBody = {
   sourceRef?: SocialSourceRef;
   copyIdempotencyKey?: string;
+  requireStandardFeeReserve?: boolean;
   marketSlug: string;
   order: Record<string, unknown>;
   orderType: "FOK" | "GTC";
@@ -2440,7 +2448,11 @@ export async function resolveLimitlessEmbeddedOrderSigningContext(input: {
   pool: ApiTradingApplicationServiceInput["pool"];
   requestAuth: Record<string, unknown>;
   marketPayload?: unknown;
-}): Promise<{ exchangeAddress: string; feePolicy: LimitlessClobFeePolicy }> {
+}): Promise<{
+  exchangeAddress: string;
+  feePolicy: LimitlessClobFeePolicy;
+  marketPayload: unknown;
+}> {
   const marketSlug = input.marketSlug.trim();
   const marketPayload =
     input.marketPayload ??
@@ -2476,6 +2488,7 @@ export async function resolveLimitlessEmbeddedOrderSigningContext(input: {
   return {
     exchangeAddress,
     feePolicy: marketLimitlessFeePolicy(marketPayload),
+    marketPayload,
   };
 }
 
@@ -3342,6 +3355,12 @@ export async function submitLimitlessClientSignedOrder(input: {
       error: "Limitless order status is being reconciled.",
     },
   };
+  const copyPending = (
+    copyIdempotencyKey: string,
+  ): LimitlessClientSignedOrderResult => ({
+    ...directHandoffAlreadyClaimed,
+    payload: { ...directHandoffAlreadyClaimed.payload, copyIdempotencyKey },
+  });
   const priorDirectOrderPending = (
     clientOrderId: string,
   ): LimitlessClientSignedOrderResult => ({
@@ -3436,44 +3455,6 @@ export async function submitLimitlessClientSignedOrder(input: {
       payload: { error: "Funding reservations can only be linked to buys" },
     };
   }
-  if (
-    !(await venueLifecycleAllowsTradingAction(input.pool, "limitless", side))
-  ) {
-    return {
-      ok: false,
-      statusCode: 409,
-      payload: { error: "Limitless trading action is temporarily disabled" },
-    };
-  }
-
-  const partnerAuth = await resolveLimitlessRouteAuth({
-    userId: input.userId,
-    walletAddress: signer,
-  });
-  if (!partnerAuth.ok) return partnerAuth;
-  const { profile, requestAuth } = partnerAuth;
-  const ownerId = profile?.id;
-  if (!ownerId) {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: {
-        error: "Limitless profile mapping is missing for this wallet.",
-      },
-    };
-  }
-  if (input.body.ownerId != null && input.body.ownerId !== ownerId) {
-    input.log?.warn?.(
-      {
-        userId: input.userId,
-        walletAddress: signer,
-        requestedOwnerId: input.body.ownerId,
-        resolvedOwnerId: ownerId,
-      },
-      "Ignoring client-supplied Limitless ownerId; using resolved ownerId",
-    );
-  }
-
   const order = input.body.order;
   const orderSigner = typeof order.signer === "string" ? order.signer : "";
   if (normalizeAddress(orderSigner) !== normalizeAddress(signer)) {
@@ -3687,6 +3668,80 @@ export async function submitLimitlessClientSignedOrder(input: {
       statusCode: 400,
       payload: { error: "Order tokenId is invalid." },
     };
+  }
+  const orderFingerprint = canonicalJsonHash(orderForUpstream);
+  const copyClientOrderId = input.body.sourceRef
+    ? directHandoffBinding
+      ? deterministicLimitlessDirectHandoffClientOrderId(
+          directHandoffBinding.handoffId,
+        )
+      : deterministicLimitlessClientOrderId(
+          `social-copy:${input.userId}:${input.body.copyIdempotencyKey ?? orderFingerprint}`,
+        )
+    : null;
+  if (
+    copyClientOrderId &&
+    input.body.sourceRef &&
+    input.body.orderType === "FOK" &&
+    side === "BUY"
+  ) {
+    const providerReference = `limitless:clob:8453:${copyClientOrderId}`;
+    const key = input.body.copyIdempotencyKey ?? providerReference;
+    const replay = await inspectDispatchedLimitlessCopy(input.pool, {
+      userId: input.userId,
+      key,
+      providerReference,
+      preparedFingerprint: orderFingerprint,
+      walletAddress: signer,
+      marketSlug: input.body.marketSlug,
+      sourceRef: input.body.sourceRef,
+    });
+    if (replay === "matching") return copyPending(key);
+    if (replay === "conflict")
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          code: "copy_idempotency_conflict",
+          error: "Copy request does not match the original attempt",
+        },
+      };
+  }
+  if (
+    !(await venueLifecycleAllowsTradingAction(input.pool, "limitless", side))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless trading action is temporarily disabled" },
+    };
+  }
+  const partnerAuth = await resolveLimitlessRouteAuth({
+    userId: input.userId,
+    walletAddress: signer,
+  });
+  if (!partnerAuth.ok) return partnerAuth;
+  const { profile, requestAuth } = partnerAuth;
+  const ownerId = profile?.id;
+  if (!ownerId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "Limitless profile mapping is missing for this wallet.",
+      },
+    };
+  }
+  if (input.body.ownerId != null && input.body.ownerId !== ownerId) {
+    input.log?.warn?.(
+      {
+        userId: input.userId,
+        walletAddress: signer,
+        requestedOwnerId: input.body.ownerId,
+        resolvedOwnerId: ownerId,
+      },
+      "Ignoring client-supplied Limitless ownerId; using resolved ownerId",
+    );
   }
   const directJournalClientOrderId =
     !fundingReservation &&
@@ -3946,11 +4001,8 @@ export async function submitLimitlessClientSignedOrder(input: {
   // Limitless identifies the request by clientOrderId, but a v2 handoff must
   // never treat that deterministic id as authority to resend changed signed
   // FOK bytes. Persist the canonical signed-order fingerprint with the claim.
-  const orderFingerprint = canonicalJsonHash(orderForUpstream);
-  if (input.body.sourceRef && !directHandoffBinding) {
-    clientOrderId = deterministicLimitlessClientOrderId(
-      `social-copy:${input.userId}:${input.body.copyIdempotencyKey ?? orderFingerprint}`,
-    );
+  if (copyClientOrderId && !directHandoffBinding) {
+    clientOrderId = copyClientOrderId;
     orderPayload = { ...orderPayload, clientOrderId };
   }
   const fundingMarketId = marketTokens?.marketId ?? null;
@@ -4075,11 +4127,27 @@ export async function submitLimitlessClientSignedOrder(input: {
     });
   };
 
+  let collateralBuy: LimitlessCollateralBuyCheck | null = null;
   if (
     input.body.orderType === "FOK" &&
     !priorSubmission &&
     !feePreflightError
   ) {
+    if (side === "BUY" && collateralFeeSubmissionContext) {
+      collateralBuy = await inspectLimitlessCollateralBuy({
+        db: input.pool,
+        userId: input.userId,
+        signer,
+        principal: BigInt(makerAmount),
+        marketSlug: input.body.marketSlug,
+        marketPayload,
+      });
+      const failure = enforceLimitlessCollateralBuyCheck(
+        collateralBuy,
+        input.body.requireStandardFeeReserve === true,
+      );
+      if (failure) return { ok: false, ...failure };
+    }
     const amount = normalizeLimitlessRawAmount(makerAmount);
     const depthQuote = await quoteLimitlessClobMarket({
       ...(side === "BUY" ? { amountUsd: amount } : { amountShares: amount }),
@@ -4470,6 +4538,29 @@ export async function submitLimitlessClientSignedOrder(input: {
   let upstream: Awaited<ReturnType<typeof submitLimitlessClobOrderToVenue>>;
   let copyKey: string | null = null;
   let copyAttempt: RetainedCopyAttempt | null = null;
+  const isFrozenCollateralFok = Boolean(
+    collateralFeeSubmissionContext && input.body.orderType === "FOK",
+  );
+  // Only advertise status for a Copy that crossed its durable submit fence.
+  // The key may be server-generated when the client did not supply one.
+  const copyRecovery = () =>
+    copyKey && isFrozenCollateralFok ? { copyIdempotencyKey: copyKey } : {};
+  const pendingOrder = (): LimitlessClientSignedOrderResult =>
+    copyKey && isFrozenCollateralFok
+      ? copyPending(copyKey)
+      : directHandoffAlreadyClaimed;
+  const keepCopyPendingOnPersistenceError = (error: unknown): false => {
+    if (!copyKey || !isFrozenCollateralFok) throw error;
+    input.log?.warn?.(
+      {
+        clientOrderId,
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        userId: input.userId,
+      },
+      "Limitless Copy persistence requires reconciliation",
+    );
+    return false;
+  };
   let copySubmissionContext =
     collateralFeeSubmissionContext ?? legacySubmissionContext;
   if (input.body.sourceRef && !reconciledExactStatus) {
@@ -4533,6 +4624,8 @@ export async function submitLimitlessClientSignedOrder(input: {
           errorCode: "copy_authorization_failed",
           broadcastMayHaveOccurred: false,
         });
+      if (error instanceof LimitlessCopyAlreadySubmittedError)
+        return copyPending(error.copyIdempotencyKey);
       if (
         error instanceof Error &&
         "code" in error &&
@@ -4661,16 +4754,13 @@ export async function submitLimitlessClientSignedOrder(input: {
     );
     // The provider may have accepted a request whose response was lost. Leave
     // a direct handoff executing for reconciliation; never reopen this trade.
-    if (journalId) return directHandoffAlreadyClaimed;
+    if (journalId || (copyKey && isFrozenCollateralFok)) return pendingOrder();
     throw error;
   }
 
   const parsedResult = parseLimitlessOrderResult(upstream.payload);
   const responseTxHash = canonicalLimitlessTransactionHash(parsedResult.txHash);
   const frozenFokResult = classifyFrozenLimitlessFokResult(parsedResult);
-  const isFrozenCollateralFok = Boolean(
-    collateralFeeSubmissionContext && input.body.orderType === "FOK",
-  );
   const mustReconcileFrozenFok =
     isFrozenCollateralFok &&
     (upstream.ok
@@ -4710,15 +4800,19 @@ export async function submitLimitlessClientSignedOrder(input: {
         handoffId: directHandoffBinding.handoffId,
         clientOrderId,
       });
-    if (hasLocator && copyAttempt)
-      await noteLimitlessCopyLocator(
+    if (hasLocator && copyAttempt) {
+      const retainedLocator = await noteLimitlessCopyLocator(
         input.pool,
         input.userId,
         copyAttempt,
         locator,
-      );
+      )
+        .then(() => true)
+        .catch(keepCopyPendingOnPersistenceError);
+      if (!retainedLocator) return pendingOrder();
+    }
   }
-  if (mustReconcileFrozenFok) return directHandoffAlreadyClaimed;
+  if (mustReconcileFrozenFok) return pendingOrder();
 
   if (!upstream.ok) {
     const evidence = parseLimitlessOrderRejection({
@@ -4732,6 +4826,10 @@ export async function submitLimitlessClientSignedOrder(input: {
       orderType: input.body.orderType,
       frozenCollateralFok: isFrozenCollateralFok,
     });
+    const collateralDiagnostic =
+      decision.kind === "transient_balance_or_indexing" && collateralBuy
+        ? { collateralBuy }
+        : {};
     if (copyAttempt && decision.disposition !== "ambiguous")
       await markCopyDefinitiveProviderRejection(
         input.pool,
@@ -4749,6 +4847,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         clientOrderId,
         decision,
         evidence,
+        ...collateralDiagnostic,
         funded: Boolean(fundingReservation),
         userId: input.userId,
       },
@@ -4858,6 +4957,8 @@ export async function submitLimitlessClientSignedOrder(input: {
           : {}),
         status: upstream.status,
         payload: evidence.payload,
+        ...(decision.disposition === "ambiguous" ? copyRecovery() : {}),
+        ...collateralDiagnostic,
       },
     };
   }
@@ -4967,6 +5068,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         broadcastMayHaveOccurred: true,
       });
     }
+    if (copyKey && isFrozenCollateralFok) return pendingOrder();
     return {
       ok: false,
       statusCode: 502,
@@ -5066,8 +5168,9 @@ export async function submitLimitlessClientSignedOrder(input: {
         broadcastMayHaveOccurred: true,
       }).catch(() => {});
     }
-    throw error;
+    return keepCopyPendingOnPersistenceError(error);
   });
+  if (!stored) return pendingOrder();
 
   if (copyKey)
     await linkPersistedCopy(input.pool, {
@@ -5087,7 +5190,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       ),
     );
   if (confirmedFillAt && confirmedImmediateFill) {
-    await updateOrderFromHistory(input.pool, {
+    const updated = await updateOrderFromHistory(input.pool, {
       id: stored.order.id,
       status: "filled",
       price: storedPrice,
@@ -5095,7 +5198,10 @@ export async function submitLimitlessClientSignedOrder(input: {
       filledAt: confirmedFillAt,
       lastUpdate: confirmedFillAt,
       orderHash: parsedResult.txHash,
-    });
+    })
+      .then(() => true)
+      .catch(keepCopyPendingOnPersistenceError);
+    if (!updated) return pendingOrder();
   }
 
   // Collateral fee rows are accrued and verified on the same reconciliation

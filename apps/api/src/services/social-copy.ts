@@ -34,6 +34,56 @@ export type RetainedCopyAttempt = {
   limitlessFokScope?: LimitlessFokScope;
 };
 
+/** An exact replay whose existing dispatch must only be observed. */
+export class LimitlessCopyAlreadySubmittedError extends SocialError {
+  constructor(public readonly copyIdempotencyKey: string) {
+    super("limitless_submit_reconciling", 409);
+  }
+}
+
+const frozenLimitlessFokCopySql = `source_snapshot #>> '{submission,orderType}'='FOK'
+  and (source_snapshot #> '{submission,limitlessClob,context}') ? 'collateralFeeModule'`;
+
+/** Read-only check before live depth/allowance checks can misreport a replay. */
+export async function inspectDispatchedLimitlessCopy(
+  db: Db,
+  input: {
+    userId: string;
+    key: string;
+    providerReference: string;
+    preparedFingerprint: string;
+    walletAddress: string;
+    marketSlug: string;
+    sourceRef: SocialSourceRef;
+  },
+): Promise<"none" | "matching" | "conflict"> {
+  const { rows } = await db.query<{
+    matches_replay: boolean;
+  }>(
+    `select coalesce(
+        provider_reference=$3 and prepared_fingerprint=$4
+        and lower(source_snapshot #>> '{submission,walletAddress}')=lower($5)
+        and coalesce(source_snapshot #>> '{submission,limitlessProviderMarketSlug}',$6)=$6
+        and coalesce(source_thesis_id::text,source_ai_note_id::text)=$7
+        and ($8='thesis')=(source_thesis_id is not null), false) as matches_replay
+      from copy_attributions
+      where copier_user_id=$1 and idempotency_key=$2 and submission_started_at is not null
+        and provider_reference like 'limitless:clob:8453:%' and ${frozenLimitlessFokCopySql}`,
+    [
+      input.userId,
+      input.key,
+      input.providerReference,
+      input.preparedFingerprint,
+      input.walletAddress,
+      input.marketSlug,
+      input.sourceRef.id,
+      input.sourceRef.kind,
+    ],
+  );
+  const row = rows[0];
+  return !row ? "none" : row.matches_replay ? "matching" : "conflict";
+}
+
 /** Adapts an already-validated venue request to the same Copy contract. */
 export async function retainClientCopyBeforeSubmission(
   pool: Pool,
@@ -398,8 +448,7 @@ export async function retainCopyBeforeSubmission(
     }>(
       `
       select id,payload_hash,provider_reference,prepared_fingerprint,state,submission_started_at,
-        (source_snapshot #>> '{submission,orderType}'='FOK' and
-          (source_snapshot #> '{submission,limitlessClob,context}') ? 'collateralFeeModule') as collateral_fee from copy_attributions
+        (${frozenLimitlessFokCopySql}) as collateral_fee from copy_attributions
       where copier_user_id=$1 and idempotency_key=$2 for update`,
       [userId, key],
     );
@@ -411,12 +460,10 @@ export async function retainCopyBeforeSubmission(
         saved.prepared_fingerprint !== input.preparedFingerprint
       )
         throw new SocialError("copy_idempotency_conflict", 409);
-      if (
-        saved.collateral_fee &&
-        saved.state !== "failed" &&
-        saved.submission_started_at
-      )
-        throw new SocialError("limitless_submit_reconciling", 409);
+      // The exact frozen Copy can only be observed after dispatch, even if a
+      // repair marked it failed. A new review must use a new request identity.
+      if (saved.collateral_fee && saved.submission_started_at)
+        throw new LimitlessCopyAlreadySubmittedError(key);
       const retried = await client.query<{ submission_attempt_token: string }>(
         `update copy_attributions
         set submission_attempt_token=gen_random_uuid(),state=case when state='failed' then 'pending' else state end,

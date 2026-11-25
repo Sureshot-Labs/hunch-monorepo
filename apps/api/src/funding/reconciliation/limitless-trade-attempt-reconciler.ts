@@ -592,8 +592,8 @@ export async function runLimitlessTradeAttemptReconciliationBatch(
             !savedLocator.overflow &&
             !(
               status?.kind === "not_found" &&
-              savedLocator.providerOrderId &&
-              knownHashes.length === 0
+              (savedLocator.exactIdentityUnresolved ||
+                (savedLocator.providerOrderId && knownHashes.length === 0))
             ) &&
             (!observedStatus ||
               isLimitlessFokNegativeCandidate(observedStatus)) &&
@@ -724,6 +724,8 @@ type DirectHistoryPage = {
   exactClientFound: boolean;
   coversSubmission: boolean;
   locators: { tx_hash: string; provider_order_id: string | null }[];
+  exactProviderOrderIds?: string[];
+  exactIdentityUnresolved?: true;
   unboundLocators?: { tx_hash: string; provider_order_id: string | null }[];
   unboundMissingTx?: boolean;
   nextCursor?: string;
@@ -742,6 +744,36 @@ type DirectHistoryScope = {
 };
 const DIRECT_HISTORY_PAGE_SIZE = 25;
 
+function historyTimestamp(value: unknown): number {
+  if (
+    typeof value === "number" ||
+    (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value))
+  ) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric > 0
+      ? numeric * (numeric < 1e12 ? 1000 : 1)
+      : NaN;
+  }
+  const parsed =
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value)
+      ? Date.parse(value)
+      : NaN;
+  return parsed > 0 ? parsed : NaN;
+}
+
+function historyIds(values: unknown[]) {
+  const present = values.filter((value) => value != null);
+  const ids = present.filter(
+    (value): value is string =>
+      typeof value === "string" && /^[\w-]{1,256}$/.test(value),
+  );
+  const distinct = [...new Set(ids)];
+  return {
+    ids: distinct,
+    ambiguous: present.length !== ids.length || distinct.length > 1,
+  };
+}
+
 export function parseLimitlessDirectHistoryPage(
   value: unknown,
   input: DirectHistoryScope,
@@ -758,11 +790,24 @@ export function parseLimitlessDirectHistoryPage(
   const cursor = isRecord(value)
     ? (value.nextCursor ?? value.next_cursor)
     : null;
-  const totalCount =
+  const hasMore = isRecord(value) ? (value.hasMore ?? value.has_more) : null;
+  const conflictingMetadata =
     isRecord(value) &&
-    typeof value.totalCount === "number" &&
-    Number.isSafeInteger(value.totalCount)
-      ? value.totalCount
+    ([value.data, value.history, value.items, value.results].filter(
+      (field) => field != null,
+    ).length > 1 ||
+      (value.nextCursor != null &&
+        value.next_cursor != null &&
+        value.nextCursor !== value.next_cursor) ||
+      (value.hasMore != null &&
+        value.has_more != null &&
+        value.hasMore !== value.has_more));
+  const declaredCount = isRecord(value) ? value.totalCount : undefined;
+  const totalCount =
+    typeof declaredCount === "number" &&
+    Number.isSafeInteger(declaredCount) &&
+    declaredCount >= 0
+      ? declaredCount
       : null;
   const nextCursor =
     typeof cursor === "string" && cursor.length > 0 && cursor.length <= 512
@@ -771,54 +816,72 @@ export function parseLimitlessDirectHistoryPage(
   const pageNumber = input.historyScan?.page ?? 1;
   const result: DirectHistoryPage = {
     exactClientFound: false,
-    coversSubmission:
-      !cursor &&
-      collection.length < DIRECT_HISTORY_PAGE_SIZE &&
-      (!isRecord(value) ||
-        value.totalCount === undefined ||
-        (totalCount !== null && totalCount === collection.length)),
+    coversSubmission: false,
     locators: [],
     nextCursor,
     hasLaterPage:
       Boolean(nextCursor) ||
+      hasMore === true ||
       (collection.length > 0 &&
         (totalCount === null
           ? collection.length === DIRECT_HISTORY_PAGE_SIZE
           : totalCount > pageNumber * DIRECT_HISTORY_PAGE_SIZE)),
   };
+  let orderedTimestamps = true;
+  let hasUnknownTimestamp = false;
+  let malformedTimestamp = false;
+  let malformedIdentity = false;
+  let oldestTimestamp = Infinity;
   for (const raw of collection) {
-    const entry = { ...(isRecord(raw.details) ? raw.details : {}), ...raw };
+    const details = isRecord(raw.details) ? raw.details : {};
+    const entry = { ...details, ...raw };
     const rawTimestamp =
       entry.blockTimestamp ??
       entry.block_timestamp ??
       entry.timestamp ??
       entry.createdAt;
-    const numericTimestamp = Number(rawTimestamp ?? NaN);
-    const timestamp = Number.isFinite(numericTimestamp)
-      ? numericTimestamp * (numericTimestamp < 1e12 ? 1000 : 1)
-      : typeof rawTimestamp === "string"
-        ? Date.parse(rawTimestamp)
-        : NaN;
-    if (
-      Number.isFinite(timestamp) &&
-      timestamp > 0 &&
-      timestamp <= input.postedAt.getTime()
-    )
-      result.coversSubmission = true;
+    const timestamp = historyTimestamp(rawTimestamp);
+    if (!Number.isFinite(timestamp)) {
+      hasUnknownTimestamp = true;
+      if (rawTimestamp != null) malformedTimestamp = true;
+    } else {
+      if (timestamp > oldestTimestamp) orderedTimestamps = false;
+      oldestTimestamp = Math.min(oldestTimestamp, timestamp);
+    }
     const order = isRecord(entry.order) ? entry.order : {};
-    const clientId =
-      entry.clientOrderId ??
-      entry.client_order_id ??
-      order.clientOrderId ??
-      order.client_order_id;
-    const providerId =
-      entry.orderId ??
-      entry.order_id ??
-      entry.venueOrderId ??
-      entry.venue_order_id ??
-      order.id ??
-      order.orderId ??
-      order.order_id;
+    const nested = [raw.order, details.order].filter(isRecord);
+    const client = historyIds(
+      [...nested, raw, details].flatMap((record) => [
+        record.clientOrderId,
+        record.client_order_id,
+      ]),
+    );
+    const provider = historyIds([
+      ...[raw, details].flatMap((record) => [
+        record.orderId,
+        record.order_id,
+        record.venueOrderId,
+        record.venue_order_id,
+      ]),
+      ...nested.flatMap((record) => [
+        record.id,
+        record.orderId,
+        record.order_id,
+      ]),
+    ]);
+    if (client.ambiguous || provider.ambiguous) {
+      malformedIdentity = true;
+      if (
+        client.ids.includes(input.clientOrderId) ||
+        (input.providerOrderId && provider.ids.includes(input.providerOrderId))
+      ) {
+        result.exactClientFound = true;
+        result.exactIdentityUnresolved = true;
+      }
+      continue;
+    }
+    const clientId = client.ids[0] ?? null;
+    const providerId = provider.ids[0] ?? null;
     const hash = entry.transactionHash ?? entry.txHash ?? entry.tx_hash;
     const locator =
       typeof hash === "string" && /^0x[0-9a-f]{64}$/i.test(hash)
@@ -881,10 +944,45 @@ export function parseLimitlessDirectHistoryPage(
       (input.providerOrderId &&
         providerId != null &&
         providerId !== input.providerOrderId)
-    )
+    ) {
+      result.exactIdentityUnresolved = true;
       continue;
+    }
+    if (typeof providerId === "string" && /^[\w-]{1,256}$/.test(providerId)) {
+      (result.exactProviderOrderIds ??= []).push(providerId);
+    } else if (!locator) {
+      result.exactIdentityUnresolved = true;
+    }
     if (locator) result.locators.push(locator);
   }
+  // Only a consistent head can prove absence. A full, newest-first head
+  // may cover the submit time even if there are older rows; a suspicious
+  // short page is only useful for positive locators and continuation.
+  const knownCursor =
+    cursor == null || cursor === "" || nextCursor !== undefined;
+  const knownContinuation =
+    (hasMore == null || typeof hasMore === "boolean") &&
+    (hasMore !== false ||
+      (!nextCursor &&
+        (totalCount === null || totalCount === collection.length)));
+  const countConsistent =
+    declaredCount === undefined ||
+    (totalCount !== null &&
+      totalCount >= collection.length &&
+      (!(nextCursor || hasMore) || totalCount > collection.length));
+  result.coversSubmission =
+    !input.historyScan &&
+    !conflictingMetadata &&
+    knownCursor &&
+    knownContinuation &&
+    countConsistent &&
+    !malformedTimestamp &&
+    !malformedIdentity &&
+    orderedTimestamps &&
+    ((!nextCursor && hasMore !== true && totalCount === collection.length) ||
+      (collection.length === DIRECT_HISTORY_PAGE_SIZE &&
+        !hasUnknownTimestamp &&
+        oldestTimestamp < input.postedAt.getTime()));
   return result;
 }
 
@@ -900,7 +998,9 @@ export async function readDirectLimitlessHistory(
     limit: String(DIRECT_HISTORY_PAGE_SIZE),
   });
   if (progress?.cursor) params.set("cursor", progress.cursor);
-  else params.set("page", String(progress?.page ?? 1));
+  // Limitless can reject an explicit page=1. The default head still covers
+  // the newest activity and is the only page that can prove absence.
+  else if (progress) params.set("page", String(progress.page));
   const path = `/portfolio/history?${params}`;
   try {
     const response = await fetchImpl(
@@ -950,8 +1050,6 @@ export async function readDirectLimitlessHistory(
             ...(result.nextCursor ? { cursor: result.nextCursor } : {}),
           }
         : null;
-    // Tail pages can recover positive receipts, never establish absence alone.
-    if (progress) result.coversSubmission = false;
     return result;
   } catch {
     return null;
@@ -964,19 +1062,30 @@ function describeHistoryObservation(
 ): LimitlessHistoryObservation | null {
   const hashes = [...new Set(page.locators.map(({ tx_hash }) => tx_hash))];
   const providerIds = [
-    ...new Set(
-      page.locators.flatMap(({ provider_order_id }) =>
+    ...new Set([
+      ...(page.exactProviderOrderIds ?? []),
+      ...page.locators.flatMap(({ provider_order_id }) =>
         provider_order_id ? [provider_order_id] : [],
       ),
-    ),
+    ]),
   ];
   const scanChanged =
     page.nextScan !== undefined &&
     (page.nextScan?.page !== previous?.page ||
       page.nextScan?.cursor !== previous?.cursor);
-  return hashes.length || scanChanged
+  const exactIdentityUnresolved =
+    page.exactIdentityUnresolved ||
+    (page.exactClientFound &&
+      (providerIds.length > 1 || (!hashes.length && !providerIds.length)));
+  return hashes.length ||
+    providerIds.length === 1 ||
+    exactIdentityUnresolved ||
+    scanChanged
     ? {
         hashes,
+        ...(exactIdentityUnresolved
+          ? { exactIdentityUnresolved: true as const }
+          : {}),
         ...(providerIds.length === 1
           ? { providerOrderId: providerIds[0] }
           : {}),
@@ -1263,7 +1372,9 @@ export async function reconcileLimitlessDirectOrderJournals(
     if (
       !conflictingStatus &&
       ((parsed && isLimitlessFokNegativeCandidate(parsed)) ||
-        (status?.kind === "not_found" && !knownProviderId)) &&
+        (status?.kind === "not_found" &&
+          !knownProviderId &&
+          !storedLocator.exactIdentityUnresolved)) &&
       now.getTime() - row.posted_at.getTime() >=
         LIMITLESS_TRADE_ABSENCE_MIN_AGE_MS &&
       fresh?.coversSubmission &&
@@ -1293,6 +1404,7 @@ export async function reconcileLimitlessDirectOrderJournals(
           ...identity,
           status: parsed?.explicitNoFill ? "no_fill" : "failed",
           negativeCheckedHashes: [...knownHashes],
+          rejectConcurrentOrderEvidence: status?.kind === "not_found",
         })
       )
         repaired++;

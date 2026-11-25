@@ -30,6 +30,7 @@ import {
 import {
   copyPayloadHash,
   getCopyAttributionStatus,
+  LimitlessCopyAlreadySubmittedError,
   linkPersistedCopy,
   reconcileCopyFacts,
   recoverCopyPurchaseLinks,
@@ -40,6 +41,10 @@ import {
 } from "./services/social-copy.js";
 import type { PreparedTrade } from "./services/trading-types.js";
 import { notifyPolymarketDefinitiveRejection } from "./services/polymarket-order-rejection.js";
+import { readDirectLimitlessHistory } from "./funding/reconciliation/limitless-trade-attempt-reconciler.js";
+import { canonicalJsonHash } from "./funding/persistence/canonical.js";
+import { deterministicLimitlessClientOrderId } from "./services/limitless-order-identity.js";
+import { submitLimitlessClientSignedOrder } from "./services/limitless-trading-execution-service.js";
 
 const pool = await createIntegrationTestPool({ max: 1 });
 const client = await pool.connect();
@@ -590,7 +595,9 @@ try {
   );
   await assert.rejects(
     () => retainCopyBeforeSubmission(db, collateralCopyInput),
-    /limitless_submit_reconciling/,
+    (error) =>
+      error instanceof LimitlessCopyAlreadySubmittedError &&
+      error.copyIdempotencyKey === collateralClientId,
   );
   await client.query(
     "update copy_attributions set repair_due_at=now()+interval '1 day' where copier_user_id=$1 and id<>$2",
@@ -600,6 +607,202 @@ try {
     "update copy_attributions set submission_started_at=now()-interval '6 minutes' where id=$1",
     [collateralCopy.id],
   );
+  await client.query("savepoint collateral_copy_negative_after_history");
+  let historyRequests = 0;
+  const historyConfig = {
+    apiBase: "https://unused.invalid",
+    hmacSecret: "unused",
+    hmacTokenId: "unused",
+  };
+  const completeHistory = (postedAt: Date) => ({
+    data: [
+      {
+        type: "split",
+        createdAt: new Date(postedAt.getTime() - 1).toISOString(),
+      },
+    ],
+    totalCount: 1,
+  });
+  const repairCollateralCopy = async (
+    observer: VerifiedBuyObserverDependencies,
+  ) => {
+    await client.query(
+      "update copy_attributions set repair_due_at=now() where id=$1",
+      [collateralCopy.id],
+    );
+    return repairUnrecordedCopies(db, observer, {
+      ...repairPolicy,
+      batchSize: 1,
+    });
+  };
+  const expectedKey = collateralCopyInput.prepared.intent.idempotencyKey;
+  assert.ok(collateralCopyInput.prepared.intent.sourceRef);
+  const replayBody = {
+    copyIdempotencyKey: expectedKey,
+    marketSlug: "copy-fixture",
+    orderType: "FOK" as const,
+    sourceRef: collateralCopyInput.prepared.intent.sourceRef,
+    order: {
+      ...collateralSigned,
+      nonce: 0,
+      side: 0,
+      signatureType: 0,
+      salt: 71,
+      makerAmount: 10000000,
+      takerAmount: 1,
+      feeRateBps: 0,
+    },
+  };
+  await client.query("savepoint frozen_copy_http_replay");
+  await client.query(
+    "update copy_attributions set prepared_fingerprint=$2,provider_reference=$3 where id=$1",
+    [
+      collateralCopy.id,
+      canonicalJsonHash(replayBody.order),
+      `limitless:clob:8453:${deterministicLimitlessClientOrderId(`social-copy:${copier}:${expectedKey}`)}`,
+    ],
+  );
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("Copy replay must never use live quote or submit");
+  };
+  try {
+    const request = {
+      pool: db,
+      signer: owner,
+      userId: copier,
+      body: replayBody,
+    };
+    const result = await submitLimitlessClientSignedOrder(request);
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.statusCode === 409);
+    assert.equal(result.payload.code, "limitless_submit_reconciling");
+    assert.equal(result.payload.copyIdempotencyKey, expectedKey);
+    const conflict = await submitLimitlessClientSignedOrder({
+      ...request,
+      body: {
+        ...replayBody,
+        order: { ...replayBody.order, makerAmount: 10000001 },
+      },
+    });
+    assert.ok(
+      !conflict.ok && conflict.payload.code === "copy_idempotency_conflict",
+    );
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+  await client.query("rollback to savepoint frozen_copy_http_replay");
+  const statusBefore = await getCopyAttributionStatus(db, copier, expectedKey);
+  assert.equal(statusBefore?.state, "pending");
+  const historyDeps: VerifiedBuyObserverDependencies = {
+    ...deps,
+    readLimitlessOrder: async (scope) => {
+      assert.equal(scope.clientOrderId, collateralClientId);
+      assert.equal(scope.providerOrderId, null);
+      return { status: "not_found", clientOrderId: collateralClientId };
+    },
+    readLimitlessHistoryPage: async (scope) => {
+      assert.equal(scope.ownerId, 42);
+      return readDirectLimitlessHistory(historyConfig, scope, async (url) => {
+        historyRequests++;
+        const query = new URL(String(url)).searchParams;
+        if (query.has("page") || historyRequests === 1)
+          return Response.json({ message: "Bad Request" }, { status: 400 });
+        assert.equal(query.toString(), "limit=25");
+        return Response.json(completeHistory(scope.postedAt));
+      });
+    },
+  };
+  assert.equal(
+    (await repairCollateralCopy(historyDeps)).pending,
+    1,
+    "exact not_found without a usable history response is not terminal",
+  );
+  await repairCollateralCopy(historyDeps);
+  assert.equal(historyRequests, 2);
+  assert.deepEqual(
+    await getCopyAttributionStatus(db, copier, expectedKey).then(
+      (status) =>
+        status && {
+          id: status.id,
+          state: status.state,
+          purchaseRef: status.purchaseRef,
+        },
+    ),
+    { id: statusBefore?.id, state: "failed", purchaseRef: null },
+    "the original Copy reaches a terminal result without submitting a new order",
+  );
+  assert.equal(await getCopyAttributionStatus(db, author, expectedKey), null);
+  await assert.rejects(
+    () => retainCopyBeforeSubmission(db, collateralCopyInput),
+    (error) =>
+      error instanceof LimitlessCopyAlreadySubmittedError &&
+      error.copyIdempotencyKey === expectedKey,
+    "a matching attempt cannot resubmit a terminal dispatched Copy",
+  );
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.state,
+    "failed",
+  );
+  await client.query(
+    "rollback to savepoint collateral_copy_negative_after_history",
+  );
+
+  for (const tailProviderId of [collateralVenueOrder, null]) {
+    await client.query("savepoint collateral_copy_hashless_tail");
+    let tailPass = 0;
+    const historyWithHashlessExactOrder: VerifiedBuyObserverDependencies = {
+      ...historyDeps,
+      readLimitlessOrder: async (scope) => {
+        assert.equal(scope.clientOrderId, collateralClientId);
+        assert.equal(
+          scope.providerOrderId,
+          tailPass >= 2 ? tailProviderId : null,
+        );
+        return {
+          status: "not_found",
+          clientOrderId: collateralClientId,
+          orderId: scope.providerOrderId,
+        };
+      },
+      readLimitlessHistoryPage: (scope) =>
+        readDirectLimitlessHistory(historyConfig, scope, async (url) => {
+          tailPass++;
+          const query = new URL(String(url)).searchParams;
+          if (tailPass === 1) {
+            assert.equal(query.toString(), "limit=25");
+            return Response.json({
+              data: [{ type: "split", createdAt: true }],
+              totalCount: 30,
+              nextCursor: "exact_order_tail",
+            });
+          }
+          if (tailPass === 2) {
+            assert.equal(query.get("cursor"), "exact_order_tail");
+            return Response.json({
+              data: [
+                {
+                  clientOrderId: collateralClientId,
+                  orderId: tailProviderId,
+                },
+              ],
+            });
+          }
+          assert.equal(query.toString(), "limit=25");
+          return Response.json(completeHistory(scope.postedAt));
+        }),
+    };
+    for (let pass = 1; pass <= 3; pass++) {
+      await repairCollateralCopy(historyWithHashlessExactOrder);
+      assert.equal(tailPass, pass);
+      assert.equal(
+        (await getCopyAttributionStatus(db, copier, expectedKey))?.state,
+        "pending",
+      );
+    }
+    await client.query("rollback to savepoint collateral_copy_hashless_tail");
+  }
+
   const delayedCopy = await repairUnrecordedCopies(
     db,
     {

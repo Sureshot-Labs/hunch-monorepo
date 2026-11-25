@@ -1424,8 +1424,9 @@ export async function reconcileTelegramVenueIntents(
                 !retainedLocator.overflow &&
                 !(
                   inspection.state === "limitless_clob_not_found" &&
-                  retainedLocator.providerOrderId &&
-                  knownHashes.length === 0
+                  (retainedLocator.exactIdentityUnresolved ||
+                    (retainedLocator.providerOrderId &&
+                      knownHashes.length === 0))
                 ) &&
                 knownHashes.every(
                   (hash) => assessments.get(hash) === "unmatched",

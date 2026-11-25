@@ -107,6 +107,7 @@ import {
   fundingReceiveReceiptReviewQuoteResponseSchema,
   fundingReceiveSessionParamsSchema,
   fundingReceiveSessionResponseSchema,
+  fundingReceiveSessionWithDepositStatusResponseSchema,
   fundingValidationErrorResponseSchema,
   fundingWithdrawalDestinationParamsSchema,
   fundingWithdrawalDestinationRequestSchema,
@@ -982,6 +983,13 @@ export function registerFundingRoutes(
     },
   );
 
+  const receiveSessionResponse = (result: FundingReceiveSessionResponse) =>
+    fundingReceiveSessionWithDepositStatusResponseSchema.parse({
+      ok: true,
+      ...result,
+      depositStatus: result.receipts.length ? "observed" : "not_observed",
+    });
+
   z.post(
     "/funding/receive-sessions",
     {
@@ -989,7 +997,7 @@ export function registerFundingRoutes(
       schema: {
         body: fundingReceiveSessionOpenRequestSchema,
         response: {
-          200: fundingReceiveSessionResponseSchema,
+          200: fundingReceiveSessionWithDepositStatusResponseSchema,
           ...receiveSessionOpenErrors,
         },
       },
@@ -1009,12 +1017,7 @@ export function registerFundingRoutes(
             userId,
             request.body,
           );
-          return reply.send(
-            fundingReceiveSessionResponseSchema.parse({
-              ok: true,
-              ...opened,
-            }),
-          );
+          return reply.send(receiveSessionResponse(opened));
         },
       ),
   );
@@ -1025,7 +1028,10 @@ export function registerFundingRoutes(
       preHandler: dependencies.authenticate,
       schema: {
         params: fundingReceiveSessionParamsSchema,
-        response: { 200: fundingReceiveSessionResponseSchema, ...errors },
+        response: {
+          200: fundingReceiveSessionWithDepositStatusResponseSchema,
+          ...errors,
+        },
       },
     },
     (request, reply) =>
@@ -1049,12 +1055,7 @@ export function registerFundingRoutes(
               code: "receive_session_not_found",
             });
           }
-          return reply.send(
-            fundingReceiveSessionResponseSchema.parse({
-              ok: true,
-              ...found,
-            }),
-          );
+          return reply.send(receiveSessionResponse(found));
         },
       ),
   );

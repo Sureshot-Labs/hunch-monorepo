@@ -470,7 +470,13 @@ try {
     receiveSessionId: sol.sessionId,
   });
   assert.equal(resolvedSol[0]?.sourceUnavailable, true);
+  assert.equal(resolvedSol[0]?.recoveryReason, "source_balance_insufficient");
   assert.equal(resolvedSol[0]?.childFundingOperationId, null);
+  const resolvedBase = await listFundingReceiveReceiptsForUser(client, {
+    userId,
+    receiveSessionId: base.sessionId,
+  });
+  assert.equal(resolvedBase[0]?.recoveryReason, "source_balance_insufficient");
   await client.query("rollback");
 } catch (error) {
   await client.query("rollback");

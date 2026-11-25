@@ -22,7 +22,10 @@ export function marketLimitlessFeePolicy(
 
 export async function fetchLimitlessClobMarket(
   slug: string,
-  auth?: Pick<Parameters<typeof limitlessRequest>[0], "auth" | "headers">,
+  auth?: Pick<
+    Parameters<typeof limitlessRequest>[0],
+    "auth" | "headers" | "timeoutMs"
+  >,
 ): Promise<unknown> {
   const result = await limitlessRequest({
     method: "GET",

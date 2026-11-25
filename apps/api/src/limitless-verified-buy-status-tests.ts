@@ -91,6 +91,36 @@ const wrongClient = {
   clientOrderId: "other-client",
 };
 assert.equal(interpret({ results: [wrongClient, absent[1]] }, lookup), null);
+const terminal = {
+  ...found,
+  data: { order: { order: { id: lookup.orderId, status: "cancelled" } } },
+};
+assert.equal(interpret({ results: [found, terminal] }, lookup), null);
+assert.equal(
+  interpret({ results: [{ ...found, index: 0 }, terminal] }, lookup),
+  null,
+);
+assert.deepEqual(
+  interpret({ results: [{ ...terminal, index: 0 }, terminal] }, lookup),
+  terminal,
+);
+for (const nestedOrder of [
+  { id: lookup.orderId, status: "cancelled", txHash: `0x${"1".repeat(64)}` },
+  { id: "another-provider", status: "cancelled" },
+]) {
+  assert.equal(
+    interpret(
+      {
+        results: [
+          { ...terminal, index: 0, data: { order: { order: nestedOrder } } },
+          terminal,
+        ],
+      },
+      lookup,
+    ),
+    null,
+  );
+}
 console.log(
   "ok - exact not_found requires complete, correctly echoed lookup results; found/conflicts are not absence",
 );

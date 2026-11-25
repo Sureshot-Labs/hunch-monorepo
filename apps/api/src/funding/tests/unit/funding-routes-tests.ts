@@ -1121,8 +1121,59 @@ await test("receive session read returns a ready receipt with ledger identity", 
       url: `/funding/receive-sessions/${receiveSession().receiveSessionId}`,
     });
     assert.equal(response.statusCode, 200);
+    assert.equal(response.json().depositStatus, "observed");
     assert.equal(response.json().receipts[0].status, "ready");
     assert.equal(response.json().receipts[0].ledgerHeight, "92814236");
+  } finally {
+    await app.close();
+  }
+});
+
+await test("receive read separates an expired address from an observed 12 USDC recovery", async () => {
+  const session: FundingReceiveSession = {
+    ...receiveSession(),
+    status: "expired",
+    closedAt: receiveSession().expiresAt,
+  };
+  const receipt = {
+    ...readyReceiveReceipt(),
+    asset: {
+      networkId: "solana:mainnet",
+      assetId: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      decimals: 6,
+    },
+    rawAmount: "12000000",
+    status: "recovery_required" as const,
+    handling: "automatic_conversion" as const,
+    childFundingOperationId: null,
+    sourceUnavailable: true as const,
+    recoveryReason: "source_spent_after_receipt" as const,
+  };
+  let observed = true;
+  const app = await buildApp({
+    receiveSession: async () => ({
+      session,
+      receipts: observed ? [receipt] : [],
+      replayed: true,
+    }),
+  });
+  try {
+    const read = () =>
+      app.inject({
+        method: "GET",
+        url: `/funding/receive-sessions/${session.receiveSessionId}`,
+      });
+    const funded = await read();
+    assert.equal(funded.statusCode, 200);
+    assert.equal(funded.json().session.status, "expired");
+    assert.equal(funded.json().depositStatus, "observed");
+    assert.deepEqual(funded.json().receipts, [receipt]);
+    observed = false;
+    const empty = await read();
+    assert.equal(empty.statusCode, 200);
+    assert.equal(empty.json().session.status, "expired");
+    assert.equal(empty.json().depositStatus, "not_observed");
+    assert.deepEqual(empty.json().receipts, []);
   } finally {
     await app.close();
   }
