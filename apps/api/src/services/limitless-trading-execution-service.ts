@@ -3714,7 +3714,10 @@ export async function submitLimitlessClientSignedOrder(input: {
     return {
       ok: false,
       statusCode: 409,
-      payload: { error: "Limitless trading action is temporarily disabled" },
+      payload: {
+        code: "limitless_trade_validation_rejected",
+        error: "Limitless trading action is temporarily disabled",
+      },
     };
   }
   const partnerAuth = await resolveLimitlessRouteAuth({
@@ -3951,6 +3954,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       ok: false,
       statusCode: 400,
       payload: {
+        code: "limitless_trade_validation_rejected",
         error:
           "Unable to validate market tokens for this marketSlug. Please refresh and retry.",
       },
@@ -3961,6 +3965,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       ok: false,
       statusCode: 400,
       payload: {
+        code: "limitless_trade_validation_rejected",
         error: "Order tokenId does not belong to marketSlug.",
         marketSlug: input.body.marketSlug,
         tokenId: requestedRawTokenId,
