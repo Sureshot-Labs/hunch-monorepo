@@ -852,6 +852,14 @@ export class PositionActionRuntimeService {
         plan.positionContract ?? driver.conditionalTokensAddress(),
     });
     if (!receipt) return publicResult(operation);
+    if (receipt.evidence.finality === "mined") {
+      // The exact CTF payout is visible, but may still be reorged. This hint
+      // does not change the journal, effects, retry rules, or payout state.
+      const current = publicResult(operation);
+      return receipt.succeeded && receipt.actualPayoutRaw !== null
+        ? { ...current, confirmationStage: "payout_seen_awaiting_finality" }
+        : current;
+    }
     if (receipt.evidence.receiptPrecedesClaim === true) {
       operation = await quarantinePreClaimPositionActionReference(this.db, {
         userId,

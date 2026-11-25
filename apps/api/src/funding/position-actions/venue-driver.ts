@@ -153,17 +153,23 @@ export function createEvmPositionActionReceiptObserver(
   chainId: number,
 ): PositionActionVenueDriver["observeReceipt"] {
   return async (input) => {
+    const canonicalCtf =
+      input.operation &&
+      input.conditionalTokensAddress &&
+      input.plan.targetAddress?.toLowerCase() ===
+        input.conditionalTokensAddress.toLowerCase();
     const receipt = await fetchEmbeddedEthereumTransactionReceipt({
       chainId,
       txHash: input.transactionHash,
       requireFinalized: true,
+      includeCanonicalUnfinalized: chainId === 8453 && Boolean(canonicalCtf),
     });
     if (!receipt) return null;
     const evidence: JsonObject = {
       blockNumber: receipt.blockNumber,
       blockHash: receipt.blockHash,
       blockTimestamp: receipt.blockTimestamp?.toString() ?? null,
-      finality: "finalized",
+      finality: receipt.finalityPending ? "mined" : "finalized",
       chainId,
       transactionHash: receipt.transactionHash,
     };

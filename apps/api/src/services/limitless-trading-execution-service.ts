@@ -295,6 +295,7 @@ type LimitlessPreparedPayload =
 type LimitlessRouteLogger = {
   debug?: (input: unknown, message?: string) => void;
   error?: (input: unknown, message?: string) => void;
+  info?: (input: unknown, message?: string) => void;
   warn?: (input: unknown, message?: string) => void;
 };
 
@@ -3356,6 +3357,17 @@ export async function submitLimitlessClientSignedOrder(input: {
       error: "Limitless order status is being reconciled.",
     },
   };
+  // Keep the legacy HTTP status/code for existing native and web clients.
+  const knownDirectPending = (
+    clientOrderId: string,
+  ): LimitlessClientSignedOrderResult => ({
+    ...directHandoffAlreadyClaimed,
+    payload: {
+      ...directHandoffAlreadyClaimed.payload,
+      recoveryState: "pending",
+      clientOrderId,
+    },
+  });
   const copyPending = (
     copyIdempotencyKey: string,
   ): LimitlessClientSignedOrderResult => ({
@@ -3793,7 +3805,7 @@ export async function submitLimitlessClientSignedOrder(input: {
             payload: { recovered: true },
           },
         };
-      return directHandoffAlreadyClaimed;
+      return knownDirectPending(directJournalClientOrderId);
     }
   }
   if (input.body.orderType === "FOK") {
@@ -4565,10 +4577,20 @@ export async function submitLimitlessClientSignedOrder(input: {
   // The key may be server-generated when the client did not supply one.
   const copyRecovery = () =>
     copyKey && isFrozenCollateralFok ? { copyIdempotencyKey: copyKey } : {};
+  let journalId: string | null = null;
   const pendingOrder = (): LimitlessClientSignedOrderResult =>
     copyKey && isFrozenCollateralFok
       ? copyPending(copyKey)
-      : directHandoffAlreadyClaimed;
+      : journalId && directJournalClientOrderId
+        ? knownDirectPending(directJournalClientOrderId)
+        : directHandoffAlreadyClaimed;
+  const keepDirectPendingOnPersistenceError = (): false => {
+    input.log?.warn?.(
+      { clientOrderId },
+      "Limitless direct order status persistence failed",
+    );
+    return false;
+  };
   const keepCopyPendingOnPersistenceError = (error: unknown): false => {
     if (!copyKey || !isFrozenCollateralFok) throw error;
     input.log?.warn?.(
@@ -4686,7 +4708,6 @@ export async function submitLimitlessClientSignedOrder(input: {
       };
     }
   }
-  let journalId: string | null = null;
   if (directJournalClientOrderId && retainedCollateralSubmission && tokenId) {
     const journal = await claimLimitlessDirectOrderJournal(
       input.pool,
@@ -4711,8 +4732,16 @@ export async function submitLimitlessClientSignedOrder(input: {
     );
     if (journal?.kind === "prior_pending")
       return priorDirectOrderPending(journal.clientOrderId);
-    if (!journal || journal.kind !== "stored")
-      return directHandoffAlreadyClaimed;
+    if (!journal || journal.kind !== "stored") {
+      const exact = await readLimitlessDirectOrderJournal(
+        input.pool,
+        input.userId,
+        directJournalClientOrderId,
+      );
+      return exact
+        ? knownDirectPending(directJournalClientOrderId)
+        : directHandoffAlreadyClaimed;
+    }
     journalId = journal.order.id;
   }
   const closeDirectJournal = async (status: "no_fill" | "failed") => {
@@ -4722,7 +4751,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         journalId,
         clientOrderId: directJournalClientOrderId,
         status,
-      });
+      }).catch(keepDirectPendingOnPersistenceError);
     return true;
   };
   try {
@@ -4798,13 +4827,17 @@ export async function submitLimitlessClientSignedOrder(input: {
     };
     const hasLocator =
       locator.providerOrderId !== null || locator.txHash !== null;
-    if (hasLocator && journalId && directJournalClientOrderId)
-      await noteLimitlessDirectOrderLocator(input.pool, {
+    if (hasLocator && journalId && directJournalClientOrderId) {
+      const retained = await noteLimitlessDirectOrderLocator(input.pool, {
         ...locator,
         userId: input.userId,
         journalId,
         clientOrderId: directJournalClientOrderId,
-      });
+      })
+        .then(() => true)
+        .catch(keepDirectPendingOnPersistenceError);
+      if (!retained) return pendingOrder();
+    }
     if (hasLocator && fundingReservation && fundingTradeAttemptId)
       await noteFundingLimitlessClobLocator(input.pool, {
         ...locator,
@@ -4832,7 +4865,27 @@ export async function submitLimitlessClientSignedOrder(input: {
       if (!retainedLocator) return pendingOrder();
     }
   }
-  if (mustReconcileFrozenFok) return pendingOrder();
+  if (mustReconcileFrozenFok) {
+    const safeStatus = (value: string | null) =>
+      value && /^[a-z_]{1,32}$/.test(value) ? value : null;
+    input.log?.info?.(
+      {
+        clientOrderId,
+        venueAccepted: upstream.ok,
+        venueHttpStatus: upstream.ok ? undefined : upstream.status,
+        result: frozenFokResult,
+        matched: parsedResult.matched,
+        conflictingMatch: parsedResult.hasConflictingMatch,
+        reportedStatus: safeStatus(parsedResult.reportedStatus),
+        executionStatus: safeStatus(parsedResult.executionStatus),
+        settlementStatus: safeStatus(parsedResult.settlementStatus),
+        hasProviderOrderId: parsedResult.venueOrderId !== null,
+        hasTransactionHash: responseTxHash !== null,
+      },
+      "Limitless FOK placement requires status observation",
+    );
+    return pendingOrder();
+  }
 
   if (!upstream.ok) {
     const evidence = parseLimitlessOrderRejection({
@@ -4874,13 +4927,16 @@ export async function submitLimitlessClientSignedOrder(input: {
       "Limitless order submission was rejected or requires reconciliation",
     );
     if (decision.disposition === "fok_no_fill") {
-      if (!(await closeDirectJournal("no_fill")))
-        return directHandoffAlreadyClaimed;
+      if (!(await closeDirectJournal("no_fill"))) return pendingOrder();
       const venueOrderId = extractLimitlessOrderIdFromMessage(upstreamMessage);
       const noFill = await finalizeCurrentFokNoFill(
         upstream.payload,
         venueOrderId,
-      );
+      ).catch((error: unknown) => {
+        if (!journalId) throw error;
+        return keepDirectPendingOnPersistenceError();
+      });
+      if (!noFill) return pendingOrder();
       return {
         ok: true,
         payload: noFill,
@@ -4890,7 +4946,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       decision.disposition === "definitive_failure" &&
       !(await closeDirectJournal("failed"))
     )
-      return directHandoffAlreadyClaimed;
+      return pendingOrder();
     if (fundingReservation && fundingTradeAttemptId) {
       if (decision.disposition === "ambiguous") {
         await recordFundingTradeAttemptOutcome(input.pool, {
@@ -4954,6 +5010,8 @@ export async function submitLimitlessClientSignedOrder(input: {
         };
       }
     }
+    if (decision.disposition === "ambiguous" && journalId)
+      return pendingOrder();
     // A timeout, conflict, throttle, 5xx, or a failed terminal write is not
     // proof that a CLOB request did not reach the venue. Those direct
     // handoffs remain executing until the exact clientOrderId has a result.
@@ -4989,8 +5047,7 @@ export async function submitLimitlessClientSignedOrder(input: {
   if (isLimitlessTerminalRejectedStatus(parsedResult.status)) {
     const errorCode = `limitless_exact_status_${parsedResult.status}`;
     try {
-      if (!(await closeDirectJournal("failed")))
-        return directHandoffAlreadyClaimed;
+      if (!(await closeDirectJournal("failed"))) return pendingOrder();
       if (fundingReservation && fundingTradeAttemptId) {
         if (reconciledExactStatus) {
           await releaseFundingReservationForProvenLimitlessTerminalRejection(
@@ -5058,8 +5115,7 @@ export async function submitLimitlessClientSignedOrder(input: {
   }
 
   if (input.body.orderType === "FOK" && parsedResult.explicitNoFill) {
-    if (!(await closeDirectJournal("no_fill")))
-      return directHandoffAlreadyClaimed;
+    if (!(await closeDirectJournal("no_fill"))) return pendingOrder();
     if (copyAttempt)
       await markCopyDefinitiveProviderRejection(
         input.pool,
@@ -5069,7 +5125,11 @@ export async function submitLimitlessClientSignedOrder(input: {
     const noFill = await finalizeCurrentFokNoFill(
       upstream.payload,
       venueOrderId,
-    );
+    ).catch((error: unknown) => {
+      if (!journalId) throw error;
+      return keepDirectPendingOnPersistenceError();
+    });
+    if (!noFill) return pendingOrder();
     return {
       ok: true,
       payload: noFill,
@@ -5077,7 +5137,7 @@ export async function submitLimitlessClientSignedOrder(input: {
   }
 
   if (!venueOrderId) {
-    if (journalId) return directHandoffAlreadyClaimed;
+    if (journalId) return pendingOrder();
     if (fundingTradeAttemptId) {
       await recordFundingTradeAttemptOutcome(input.pool, {
         userId: input.userId,
@@ -5130,16 +5190,15 @@ export async function submitLimitlessClientSignedOrder(input: {
           price: storedPrice,
           size: storedSize,
           filledAt: confirmedFillAt,
-        })
+        }).catch(keepDirectPendingOnPersistenceError)
       : false;
   if (journalId && directJournalClientOrderId && !promotedDirectJournal) {
     const journal = await readLimitlessDirectOrderJournal(
       input.pool,
       input.userId,
       directJournalClientOrderId,
-    );
-    if (journal?.venue_order_id !== venueOrderId)
-      return directHandoffAlreadyClaimed;
+    ).catch(() => null);
+    if (journal?.venue_order_id !== venueOrderId) return pendingOrder();
   }
   const storedOrderPayload = {
     ...orderPayload,
@@ -5188,7 +5247,9 @@ export async function submitLimitlessClientSignedOrder(input: {
         broadcastMayHaveOccurred: true,
       }).catch(() => {});
     }
-    return keepCopyPendingOnPersistenceError(error);
+    return journalId
+      ? keepDirectPendingOnPersistenceError()
+      : keepCopyPendingOnPersistenceError(error);
   });
   if (!stored) return pendingOrder();
 
@@ -5220,7 +5281,11 @@ export async function submitLimitlessClientSignedOrder(input: {
       orderHash: parsedResult.txHash,
     })
       .then(() => true)
-      .catch(keepCopyPendingOnPersistenceError);
+      .catch(
+        journalId
+          ? keepDirectPendingOnPersistenceError
+          : keepCopyPendingOnPersistenceError,
+      );
     if (!updated) return pendingOrder();
   }
 

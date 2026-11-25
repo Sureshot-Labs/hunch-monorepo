@@ -735,6 +735,7 @@ export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
   chainId: number;
   txHash: string;
   requireFinalized?: boolean;
+  includeCanonicalUnfinalized?: boolean;
 }): Promise<{
   blockNumber: number;
   blockHash: string;
@@ -742,11 +743,13 @@ export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
   logs: Array<{ address: string; data: string; topics: readonly string[] }>;
   succeeded: boolean;
   transactionHash: string;
+  finalityPending?: true;
 } | null> {
   const provider = evmProviderForChain(inputs.chainId);
   const receipt = await provider.getTransactionReceipt(inputs.txHash);
   if (!receipt) return null;
   let blockTimestamp: bigint | null = null;
+  let finalityPending = false;
   if (inputs.requireFinalized) {
     if (
       !Number.isSafeInteger(receipt.blockNumber) ||
@@ -770,7 +773,8 @@ export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
       maxAttempts: 1,
     };
     const finalized = await fetchEvmFinalizedBlockNumber(network);
-    if (BigInt(receipt.blockNumber) > finalized) return null;
+    finalityPending = BigInt(receipt.blockNumber) > finalized;
+    if (finalityPending && !inputs.includeCanonicalUnfinalized) return null;
     const [canonicalHash, timestamp] = await Promise.all([
       fetchEvmBlockHash({ ...network, blockNumber: receipt.blockNumber }),
       fetchEvmBlockTimestamp({
@@ -797,6 +801,7 @@ export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
     })),
     succeeded: receipt.status === 1,
     transactionHash: receipt.hash,
+    ...(finalityPending ? { finalityPending: true as const } : {}),
   };
 }
 

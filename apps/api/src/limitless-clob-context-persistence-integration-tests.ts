@@ -1450,13 +1450,88 @@ try {
     providerOrderId: scopedProviderId,
     txHash: scopedTxHash,
   });
+  // A fresh exact-positive lane may look up status, never walk history or
+  // close a negative result. Freeze the clock relative to the journal.
+  const { rows: freshClocks } = await client.query<{ posted_at: Date }>(
+    "select posted_at from orders where id=$1",
+    [scopedClaim.order.id],
+  );
+  const freshClock = freshClocks[0];
+  assert.ok(freshClock);
+  const freshAt = freshClock.posted_at.getTime();
+  await db.query("SAVEPOINT fresh_positive_observation");
+  await client.query(
+    "update orders set order_payload=order_payload-'_hunchLimitlessDirectLocator' where id=$1",
+    [scopedClaim.order.id],
+  );
+  let earlyReads = 0;
+  for (const elapsed of [2_000, 4_000, 5_000, 8_000, 12_000]) {
+    assert.equal(
+      await reconcileLimitlessDirectOrderJournals(db, {
+        config: fixtureConfig,
+        freshOnly: true,
+        now: new Date(freshAt + elapsed),
+        lookupScoped: async (ids, ownerId) => {
+          assert.deepEqual(ids, [secondId]);
+          assert.equal(ownerId, 7);
+          earlyReads++;
+          if (elapsed === 4_000)
+            return new Map([[secondId, { kind: "not_found" }]]);
+          if (elapsed === 8_000)
+            await noteLimitlessDirectOrderLocator(db, {
+              userId,
+              journalId: scopedClaim.order.id,
+              clientOrderId: secondId,
+              providerOrderId: scopedProviderId,
+              txHash,
+            });
+          return new Map([
+            [
+              secondId,
+              {
+                kind: "found",
+                item: {
+                  providerOrderId: scopedProviderId,
+                  clientOrderId: secondId,
+                  orderId: scopedProviderId,
+                  payload: {
+                    order: { id: scopedProviderId, ...secondOrder },
+                    execution: {
+                      matched: true,
+                      settlementStatus: "MINED",
+                      txHash: elapsed === 8_000 ? scopedTxHash : txHash,
+                    },
+                  },
+                },
+              },
+            ],
+          ]);
+        },
+        readFreshHistory: async () => assert.fail("fresh lane reads history"),
+        readHistoryReceipt: async () =>
+          assert.fail("fresh lane reads receipts"),
+      }),
+      elapsed === 12_000 ? 1 : 0,
+    );
+  }
+  assert.equal(earlyReads, 3);
+  assert.equal(
+    (await readLimitlessDirectOrderJournal(db, userId, secondId))?.status,
+    "filled",
+  );
+  await db.query("ROLLBACK TO SAVEPOINT fresh_positive_observation");
+  await db.query("RELEASE SAVEPOINT fresh_positive_observation");
   // An unrelated update just touched last_update, but the original
   // submission is already due and has never been observed.
   const { rows: clocks } = await client.query<{ last_update: Date }>(
-    `update orders set posted_at=now()-interval '31 seconds' where id=$1 returning last_update`,
+    `update orders set posted_at=now()-interval '31 seconds',
+       order_payload=order_payload-'_hunchLimitlessDirectObservedAt'
+       where id=$1 returning last_update`,
     [scopedClaim.order.id],
   );
-  const observationNow = clocks[0]!.last_update;
+  const observationClock = clocks[0];
+  assert.ok(observationClock);
+  const observationNow = observationClock.last_update;
   let firstPolls = 0;
   const observeClocked = (now: Date) =>
     reconcileLimitlessDirectOrderJournals(db, {
@@ -1499,7 +1574,9 @@ try {
       now: new Date(pollTime.getTime() + (70 + index * 31) * 1_000),
       lookup: async (ids) => {
         assert.deepEqual(ids, [secondId]);
-        return new Map([[secondId, { kind: "not_found" }]]);
+        return scenario === "settled"
+          ? new Map()
+          : new Map([[secondId, { kind: "not_found" }]]);
       },
       lookupScoped: async (ids, ownerId) => {
         scopedCalls++;
@@ -2280,6 +2357,29 @@ try {
   const planResult = explainedRead.rows[0]["QUERY PLAN"][0];
   assert.equal(planResult.Plan["Index Name"], "orders_pkey");
   assert.equal(planResult.Plan["Actual Rows"], 1);
+  const freshRead = calls.find(({ sql }) =>
+    sql.includes("posted_at > $1::timestamptz - interval '16 seconds'"),
+  );
+  assert.ok(freshRead && /^\s*select/i.test(freshRead.sql));
+  const freshExplain = await client.query(
+    `explain (analyze,buffers,format json) ${freshRead.sql}`,
+    freshRead.values,
+  );
+  const freshPlan = freshExplain.rows[0]["QUERY PLAN"][0];
+  assert.ok(
+    walkPlan(freshPlan.Plan).some(
+      (node) =>
+        typeof node["Index Cond"] === "string" &&
+        String(node["Index Cond"]).includes("posted_at"),
+    ),
+    JSON.stringify(freshPlan.Plan),
+  );
+  console.log(
+    JSON.stringify({
+      freshObservationMs: freshPlan["Execution Time"],
+      freshObservationHitBlocks: freshPlan.Plan["Shared Hit Blocks"],
+    }),
+  );
   console.log(
     JSON.stringify({
       sqlFormsExecutedAndPlanned: statements.size,
