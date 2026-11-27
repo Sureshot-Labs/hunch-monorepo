@@ -64,6 +64,7 @@ export async function findMaxPolymarketMarketBuyUsdForFunds(
   input: {
     tokenId: string;
     executableFundsRaw: bigint;
+    assetContext?: PolymarketAssetContext;
     context?: PolymarketQuoteContext;
     slippageBps?: number | null;
     logWarn?: PolymarketQuoteWarnLogger;
@@ -73,6 +74,8 @@ export async function findMaxPolymarketMarketBuyUsdForFunds(
     input.context ??
     (await loadPolymarketQuoteContext(pool, {
       tokenId: input.tokenId,
+      assetContext: input.assetContext,
+      freshBook: input.assetContext ? true : undefined,
       logWarn: input.logWarn,
     }));
   return findMaxPolymarketMarketBuyUsdDetailed({

@@ -13,6 +13,22 @@ import {
 } from "./common.js";
 
 const zNumberish = z.union([z.string(), z.number()]);
+export const polymarketDirectAttemptParams = z.object({ orderHash: zBytes32 });
+export const polymarketDirectAttemptAuthError = z.object({ error: z.string() });
+export const polymarketDirectAttemptResponse = z.object({
+  ok: z.literal(true),
+  orderHash: zBytes32,
+  orderId: z.string().nullable(),
+  state: z.enum([
+    "unknown",
+    "accepted",
+    "filled",
+    "no_fill",
+    "closed_unknown",
+    "not_submitted",
+  ]),
+  nextAction: z.enum(["check_original", "show_result", "new_review"]),
+});
 const zPolymarketAssetId = z
   .union([
     z
@@ -349,6 +365,7 @@ export const polymarketQuoteBodySchema = z
   );
 
 export const polymarketMaxSpendBodySchema = z.object({
+  assetContext: polymarketAssetContextSchema.optional(),
   limitPrice: z.coerce.number().gt(0).lt(1).optional(),
   verifyFunding: z.boolean().optional(),
   tokenId: zRequiredString("tokenId is required"),

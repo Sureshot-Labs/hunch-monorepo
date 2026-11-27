@@ -349,6 +349,8 @@ export function extractTokenId(order: unknown): string | null {
 
 export type PolymarketOpenOrder = {
   associateTrades: string[];
+  /** Missing/malformed history is not an explicit empty list. */
+  explicitEmptyTrades?: boolean;
   id: string | null;
   status: string | null;
   market: string | null;
@@ -452,6 +454,13 @@ export function normalizeOpenOrder(order: unknown): PolymarketOpenOrder | null {
 
   return {
     associateTrades,
+    explicitEmptyTrades:
+      (Array.isArray(order.associate_trades) ||
+        Array.isArray(order.associateTrades)) &&
+      [order.associate_trades, order.associateTrades].every(
+        (value) =>
+          value === undefined || (Array.isArray(value) && value.length === 0),
+      ),
     id: readString(order.id ?? order.order_id ?? order.orderId),
     status: readString(order.status),
     market: readString(order.market),
