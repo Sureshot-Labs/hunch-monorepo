@@ -30,6 +30,7 @@ import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-
 import {
   claimLimitlessTradeAttemptForReconciliation,
   fetchFundingLimitlessClobSubmission,
+  findLimitlessFundedRecoveryId,
   hasUnresolvedFundingTradeAttemptInTransaction,
   markFundingTradeAttemptSubmissionStarted,
   noteFundingLimitlessClobLocator,
@@ -207,6 +208,7 @@ import {
 import {
   buildLimitlessClobSubmissionContext,
   directLimitlessClobClientOrderId,
+  limitlessClobOrderStructHash,
   readRetainedLimitlessClobSubmission,
   withoutLimitlessRecoverySignatures,
   type LimitlessClobSubmissionContext,
@@ -3379,9 +3381,26 @@ export async function submitLimitlessClientSignedOrder(input: {
   });
   const copyPending = (
     copyIdempotencyKey: string,
+    recoveryId?: string,
   ): LimitlessClientSignedOrderResult => ({
     ...directHandoffAlreadyClaimed,
-    payload: { ...directHandoffAlreadyClaimed.payload, copyIdempotencyKey },
+    payload: {
+      ...directHandoffAlreadyClaimed.payload,
+      copyIdempotencyKey,
+      ...(recoveryId ? { recoveryId, recoveryState: "pending" } : {}),
+    },
+  });
+  const fundedRecovery = (attemptId: string) => ({
+    recoveryState: "pending" as const,
+    recoveryId: `hunch-funded-${attemptId}`,
+  });
+  const fundedPending = (attemptId: string) => ({
+    ok: false as const,
+    statusCode: 409,
+    payload: {
+      ...directHandoffAlreadyClaimed.payload,
+      ...fundedRecovery(attemptId),
+    },
   });
   const priorDirectOrderPending = (
     clientOrderId: string,
@@ -3719,7 +3738,21 @@ export async function submitLimitlessClientSignedOrder(input: {
       marketSlug: input.body.marketSlug,
       sourceRef: input.body.sourceRef,
     });
-    if (replay === "matching") return copyPending(key);
+    if (replay === "matching") {
+      const orderStructHash = fundingReservation
+        ? limitlessClobOrderStructHash(orderForUpstream)
+        : null;
+      const recoveryId =
+        fundingReservation && orderStructHash
+          ? await findLimitlessFundedRecoveryId(input.pool, {
+              userId: input.userId,
+              signer,
+              reservationId: fundingReservation.reservationId,
+              orderStructHash,
+            }).catch(() => null)
+          : null;
+      return copyPending(key, recoveryId ?? undefined);
+    }
     if (replay === "not_submitted")
       return {
         ok: false,
@@ -4179,6 +4212,15 @@ export async function submitLimitlessClientSignedOrder(input: {
       venueId: "limitless",
     });
   };
+  const pendingForRetainedFundedAttempt = async (
+    attempt: Awaited<
+      ReturnType<typeof claimCurrentFundingTradeAttempt>
+    >["attempt"],
+  ) =>
+    (await fetchFundingLimitlessClobSubmission(input.pool, attempt)) !==
+    undefined
+      ? fundedPending(attempt.id)
+      : null;
 
   let collateralBuy: LimitlessCollateralBuyCheck | null = null;
   if (
@@ -4223,14 +4265,16 @@ export async function submitLimitlessClientSignedOrder(input: {
         try {
           const claim = await claimCurrentFundingTradeAttempt();
           if (!claim.claimed) {
-            return {
-              ok: false,
-              statusCode: 409,
-              payload: {
-                error:
-                  "This funding reservation already has a trade attempt that must reconcile.",
-              },
-            };
+            return (
+              (await pendingForRetainedFundedAttempt(claim.attempt)) ?? {
+                ok: false,
+                statusCode: 409,
+                payload: {
+                  error:
+                    "This funding reservation already has a trade attempt that must reconcile.",
+                },
+              }
+            );
           }
           await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
             userId: input.userId,
@@ -4383,6 +4427,8 @@ export async function submitLimitlessClientSignedOrder(input: {
     try {
       const claim = await claimCurrentFundingTradeAttempt();
       if (!claim.claimed) {
+        const pending = await pendingForRetainedFundedAttempt(claim.attempt);
+        if (pending) return pending;
         const exactClientOrderId = claim.attempt.externalReference?.trim();
         if (
           !exactClientOrderId ||
@@ -4401,20 +4447,6 @@ export async function submitLimitlessClientSignedOrder(input: {
         // The worker alone reconciles frozen collateral submissions. The
         // foreground must not repeatedly take its lease or release on a
         // negative exact lookup without checking the wallet history.
-        const frozen = await fetchFundingLimitlessClobSubmission(
-          input.pool,
-          claim.attempt,
-        );
-        if (frozen !== undefined) {
-          return {
-            ok: false,
-            statusCode: 409,
-            payload: {
-              code: "limitless_submit_reconciling",
-              error: "Limitless order status is being reconciled.",
-            },
-          };
-        }
         const leasedAttempt = await claimLimitlessTradeAttemptForReconciliation(
           input.pool,
           {
@@ -4599,12 +4631,18 @@ export async function submitLimitlessClientSignedOrder(input: {
   const copyRecovery = () =>
     copyKey && isFrozenCollateralFok ? { copyIdempotencyKey: copyKey } : {};
   let journalId: string | null = null;
-  const pendingOrder = (): LimitlessClientSignedOrderResult =>
-    copyKey && isFrozenCollateralFok
+  let recoverableFundedAttemptId: string | null = null;
+  const pendingOrder = (): LimitlessClientSignedOrderResult => {
+    if (recoverableFundedAttemptId) {
+      const result = fundedPending(recoverableFundedAttemptId);
+      return { ...result, payload: { ...result.payload, ...copyRecovery() } };
+    }
+    return copyKey && isFrozenCollateralFok
       ? copyPending(copyKey)
       : journalId && directJournalClientOrderId
         ? knownDirectPending(directJournalClientOrderId)
         : directHandoffAlreadyClaimed;
+  };
   const keepDirectPendingOnPersistenceError = (): false => {
     input.log?.warn?.(
       { clientOrderId },
@@ -4623,6 +4661,20 @@ export async function submitLimitlessClientSignedOrder(input: {
       "Limitless Copy persistence requires reconciliation",
     );
     return false;
+  };
+  const keepFokPendingOnPersistenceError = (error: unknown): false => {
+    if (journalId) return keepDirectPendingOnPersistenceError();
+    if (!recoverableFundedAttemptId)
+      return keepCopyPendingOnPersistenceError(error);
+    input.log?.warn?.(
+      { clientOrderId },
+      "Limitless funded FOK persistence requires reconciliation",
+    );
+    return false;
+  };
+  const retainFundedPendingOnWriteError = (error: unknown): false => {
+    if (!recoverableFundedAttemptId) throw error;
+    return keepFokPendingOnPersistenceError(error);
   };
   let copySubmissionContext =
     collateralFeeSubmissionContext ?? legacySubmissionContext;
@@ -4726,6 +4778,8 @@ export async function submitLimitlessClientSignedOrder(input: {
             ? retainedCollateralSubmission
             : undefined,
       });
+      if (isFrozenCollateralFok && retainedCollateralSubmission)
+        recoverableFundedAttemptId = fundingTradeAttemptId;
     } catch (error) {
       // The Copy fence was persisted, but no provider placement was attempted.
       // Keep that fence on the old key and close only this exact retained row.
@@ -4835,7 +4889,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         errorCode: decision.errorCode,
         broadcastMayHaveOccurred: true,
         operationSupportMetadataPatch,
-      });
+      }).catch(retainFundedPendingOnWriteError);
     }
     input.log?.warn?.(
       {
@@ -4849,7 +4903,12 @@ export async function submitLimitlessClientSignedOrder(input: {
     );
     // The provider may have accepted a request whose response was lost. Leave
     // a direct handoff executing for reconciliation; never reopen this trade.
-    if (journalId || (copyKey && isFrozenCollateralFok)) return pendingOrder();
+    if (
+      recoverableFundedAttemptId ||
+      journalId ||
+      (copyKey && isFrozenCollateralFok)
+    )
+      return pendingOrder();
     throw error;
   }
 
@@ -4906,9 +4965,10 @@ export async function submitLimitlessClientSignedOrder(input: {
         clientOrderId,
       }).catch((error: unknown) => {
         if (
-          !acceptedDelayed ||
-          directHandoffBinding ||
-          (copyAttempt && !acknowledgeDelayedCopy)
+          !recoverableFundedAttemptId &&
+          (!acceptedDelayed ||
+            directHandoffBinding ||
+            (copyAttempt && !acknowledgeDelayedCopy))
         )
           throw error;
         input.log?.warn?.(
@@ -4987,6 +5047,12 @@ export async function submitLimitlessClientSignedOrder(input: {
           recoveryState: "pending",
           clientOrderId,
           copyIdempotencyKey: copyKey,
+          ...(recoverableFundedAttemptId
+            ? {
+                recoveryId: fundedRecovery(recoverableFundedAttemptId)
+                  .recoveryId,
+              }
+            : {}),
           executionStatus: "DELAYED",
           payload: null,
         },
@@ -5033,13 +5099,17 @@ export async function submitLimitlessClientSignedOrder(input: {
       decision.kind === "transient_balance_or_indexing" && collateralBuy
         ? { collateralBuy }
         : {};
-    if (copyAttempt && decision.disposition !== "ambiguous")
-      await markCopyDefinitiveProviderRejection(
+    if (copyAttempt && decision.disposition !== "ambiguous") {
+      const saved = await markCopyDefinitiveProviderRejection(
         input.pool,
         input.userId,
         copyAttempt,
         decision.disposition === "fok_no_fill" ? "no_fill" : "failed",
-      );
+      )
+        .then(() => true)
+        .catch(retainFundedPendingOnWriteError);
+      if (!saved) return pendingOrder();
+    }
     const operationSupportMetadataPatch =
       buildLimitlessTradeSubmissionEvidencePatch({
         clientOrderId,
@@ -5064,8 +5134,8 @@ export async function submitLimitlessClientSignedOrder(input: {
         upstream.payload,
         venueOrderId,
       ).catch((error: unknown) => {
-        if (!journalId) throw error;
-        return keepDirectPendingOnPersistenceError();
+        if (!journalId && !recoverableFundedAttemptId) throw error;
+        return keepFokPendingOnPersistenceError(error);
       });
       if (!noFill) return pendingOrder();
       return {
@@ -5080,7 +5150,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       return pendingOrder();
     if (fundingReservation && fundingTradeAttemptId) {
       if (decision.disposition === "ambiguous") {
-        await recordFundingTradeAttemptOutcome(input.pool, {
+        const recorded = await recordFundingTradeAttemptOutcome(input.pool, {
           userId: input.userId,
           attemptId: fundingTradeAttemptId,
           outcome: "ambiguous",
@@ -5088,24 +5158,29 @@ export async function submitLimitlessClientSignedOrder(input: {
           errorCode: decision.errorCode,
           broadcastMayHaveOccurred: true,
           operationSupportMetadataPatch,
-        });
+        }).catch(retainFundedPendingOnWriteError);
+        if (!recorded) return pendingOrder();
       } else {
-        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
-          userId: input.userId,
-          link: fundingReservation,
-          tradeAttemptId: fundingTradeAttemptId,
-          outcomeReason: "trade_rejected",
-          errorCode: decision.errorCode,
-          externalReference: clientOrderId,
-          broadcastMayHaveOccurred: true,
-          operationSupportMetadataPatch,
-          handoffFailure: {
-            code: decision.errorCode,
-            message:
-              upstreamMessage ??
-              `Limitless rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
-          },
-        });
+        const released =
+          await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+            userId: input.userId,
+            link: fundingReservation,
+            tradeAttemptId: fundingTradeAttemptId,
+            outcomeReason: "trade_rejected",
+            errorCode: decision.errorCode,
+            externalReference: clientOrderId,
+            broadcastMayHaveOccurred: true,
+            operationSupportMetadataPatch,
+            handoffFailure: {
+              code: decision.errorCode,
+              message:
+                upstreamMessage ??
+                `Limitless rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
+            },
+          })
+            .then(() => true)
+            .catch(retainFundedPendingOnWriteError);
+        if (!released) return pendingOrder();
       }
     }
     if (
@@ -5141,7 +5216,10 @@ export async function submitLimitlessClientSignedOrder(input: {
         };
       }
     }
-    if (decision.disposition === "ambiguous" && journalId)
+    if (
+      decision.disposition === "ambiguous" &&
+      (journalId || recoverableFundedAttemptId)
+    )
       return pendingOrder();
     // A timeout, conflict, throttle, 5xx, or a failed terminal write is not
     // proof that a CLOB request did not reach the venue. Those direct
@@ -5236,6 +5314,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         { error, clientOrderId, userId: input.userId },
         "Limitless terminal order result remains reconciling",
       );
+      if (recoverableFundedAttemptId) return pendingOrder();
       return {
         ok: false,
         statusCode: 409,
@@ -5257,19 +5336,23 @@ export async function submitLimitlessClientSignedOrder(input: {
 
   if (input.body.orderType === "FOK" && parsedResult.explicitNoFill) {
     if (!(await closeDirectJournal("no_fill"))) return pendingOrder();
-    if (copyAttempt)
-      await markCopyDefinitiveProviderRejection(
+    if (copyAttempt) {
+      const saved = await markCopyDefinitiveProviderRejection(
         input.pool,
         input.userId,
         copyAttempt,
         "no_fill",
-      );
+      )
+        .then(() => true)
+        .catch(retainFundedPendingOnWriteError);
+      if (!saved) return pendingOrder();
+    }
     const noFill = await finalizeCurrentFokNoFill(
       upstream.payload,
       venueOrderId,
     ).catch((error: unknown) => {
-      if (!journalId) throw error;
-      return keepDirectPendingOnPersistenceError();
+      if (!journalId && !recoverableFundedAttemptId) throw error;
+      return keepFokPendingOnPersistenceError(error);
     });
     if (!noFill) return pendingOrder();
     return {
@@ -5288,9 +5371,10 @@ export async function submitLimitlessClientSignedOrder(input: {
         externalReference: clientOrderId,
         errorCode: "limitless_order_id_missing",
         broadcastMayHaveOccurred: true,
-      });
+      }).catch(retainFundedPendingOnWriteError);
     }
-    if (copyKey && isFrozenCollateralFok) return pendingOrder();
+    if (recoverableFundedAttemptId || (copyKey && isFrozenCollateralFok))
+      return pendingOrder();
     return {
       ok: false,
       statusCode: 502,
@@ -5389,9 +5473,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         broadcastMayHaveOccurred: true,
       }).catch(() => {});
     }
-    return journalId
-      ? keepDirectPendingOnPersistenceError()
-      : keepCopyPendingOnPersistenceError(error);
+    return keepFokPendingOnPersistenceError(error);
   });
   if (!stored) return pendingOrder();
 
@@ -5423,11 +5505,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       orderHash: parsedResult.txHash,
     })
       .then(() => true)
-      .catch(
-        journalId
-          ? keepDirectPendingOnPersistenceError
-          : keepCopyPendingOnPersistenceError,
-      );
+      .catch(keepFokPendingOnPersistenceError);
     if (!updated) return pendingOrder();
   }
 

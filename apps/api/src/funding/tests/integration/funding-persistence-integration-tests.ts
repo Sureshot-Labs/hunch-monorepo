@@ -91,6 +91,7 @@ import {
   attachRecoveredPolymarketAttemptOrderInTransaction,
   claimLimitlessTradeAttemptForReconciliation,
   fetchFundingLimitlessClobSubmission,
+  findLimitlessFundedRecoveryId,
   FundingTradeAttemptError,
   markFundingTradeAttemptSubmissionStartedInTransaction,
   readLimitlessFundedCopyTerminalStatus,
@@ -105,6 +106,7 @@ import {
 } from "../../persistence/funding-trade-attempt-repository.js";
 import {
   buildLimitlessClobSubmissionContext,
+  limitlessClobOrderStructHash,
   limitlessClobFrozenContext,
   readLimitlessHistoryTxHashes,
   type RetainedLimitlessClobSubmission,
@@ -8475,6 +8477,19 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
         await fetchFundingLimitlessClobSubmission(setup, claim.attempt),
         undefined,
       );
+      const orderStructHash = limitlessClobOrderStructHash(signedFields);
+      assert.ok(orderStructHash);
+      assert.notEqual(orderStructHash, retainedSubmission.context.orderHash);
+      const recoveryLookup = {
+        userId,
+        reservationId,
+        signer: signedFields.signer,
+        orderStructHash,
+      };
+      assert.equal(
+        await findLimitlessFundedRecoveryId(setup, recoveryLookup),
+        null,
+      );
       await markFundingTradeAttemptSubmissionStartedInTransaction(setup, {
         userId,
         operationId,
@@ -8491,6 +8506,24 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
       assert.equal(replay.attempt.id, claim.attempt.id);
       assert.equal(replay.attempt.state, "submission_started");
       assert.equal(replay.attempt.externalReference, clientOrderId);
+      assert.equal(
+        await findLimitlessFundedRecoveryId(setup, recoveryLookup),
+        `hunch-funded-${attemptId}`,
+      );
+      for (const mismatch of [
+        { userId: crypto.randomUUID() },
+        { reservationId: crypto.randomUUID() },
+        { signer: `0x${"f".repeat(40)}` },
+        { orderStructHash: retainedSubmission.context.orderHash },
+      ]) {
+        assert.equal(
+          await findLimitlessFundedRecoveryId(setup, {
+            ...recoveryLookup,
+            ...mismatch,
+          }),
+          null,
+        );
+      }
       assert.deepEqual(
         await readLimitlessFundedOrderStatus(setup, {
           userId,
@@ -8616,6 +8649,14 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
           terminalLookup,
         ),
         "no_fill",
+      );
+      assert.deepEqual(
+        await readLimitlessFundedOrderStatus(mergeClient, {
+          userId,
+          attemptId,
+          signer: retainedSubmission.order.signer,
+        }),
+        { recoveryState: "no_fill" },
       );
       assert.equal(
         await readLimitlessFundedCopyTerminalStatus(mergeClient, {
@@ -8783,6 +8824,19 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
           signer: retainedSubmission.order.signer,
         }),
         { recoveryState: "filled", orderId: clientOrderId },
+      );
+      const recoveredStructHash = limitlessClobOrderStructHash(
+        retainedSubmission.order,
+      );
+      assert.ok(recoveredStructHash);
+      assert.equal(
+        await findLimitlessFundedRecoveryId(mergeClient, {
+          userId,
+          reservationId,
+          signer: retainedSubmission.order.signer,
+          orderStructHash: recoveredStructHash,
+        }),
+        `hunch-funded-${attemptId}`,
       );
       assert.deepEqual(
         limitlessClobFrozenContext(merged.order_payload),
