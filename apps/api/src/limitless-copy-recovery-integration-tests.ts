@@ -16,6 +16,7 @@ import type { PreparedTrade } from "./services/trading-types.js";
 import type { VerifiedBuyObserverDependencies } from "./services/verified-buy-observer.js";
 import { repairUnrecordedCopies } from "./services/verified-copy-repair.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { parseLimitlessDirectHistoryPage } from "./funding/reconciliation/limitless-trade-attempt-reconciler.js";
 
 const pool = await createIntegrationTestPool({ max: 1 });
 const client = await pool.connect();
@@ -73,6 +74,7 @@ async function fixture(
     path?: "embedded" | "client";
     exchange?: string;
     legacy?: boolean;
+    collateralFee?: boolean;
     metadata?: unknown;
   } = {},
 ) {
@@ -102,7 +104,11 @@ async function fixture(
     clientOrderId,
     requestAuth: { secret: "fixture-auth-not-retained" },
   };
-  const context = buildLimitlessClobSubmissionContext(exchange, order);
+  const context = buildLimitlessClobSubmissionContext(
+    exchange,
+    order,
+    input.collateralFee ? position : undefined,
+  );
   const instrument = {
     venue: "limitless" as const,
     marketId,
@@ -190,6 +196,7 @@ async function fixture(
         preparedFingerprint: context.orderHash,
         orderType: "FOK",
         limitlessPositionContract: position,
+        ...(input.collateralFee ? { limitlessProviderOwnerId: 7 } : {}),
         ...(!input.legacy
           ? {
               limitlessClobOrder: order,
@@ -377,6 +384,7 @@ async function fixture(
     instrument,
     evidence,
     snapshot: snapshot.source_snapshot,
+    deps,
     retain,
     repair,
     reads: () => ({ providerReads, receiptReads }),
@@ -550,6 +558,52 @@ try {
       [current.marketId, JSON.stringify({ venueExchange: alternateExchange })],
     );
     await current.repair("confirmed");
+  });
+
+  await test("an exact mature not_found closes Copy only with explicit end of history", async () => {
+    const current = await fixture({ path: "client", collateralFee: true });
+    await client.query(
+      "update copy_attributions set submission_started_at=now()-interval '10 minutes' where copier_user_id=$1 and idempotency_key=$2",
+      [copier, current.key],
+    );
+    for (const [hasEnd, exact, expected] of [
+      [false, true, "pending"],
+      [true, false, "pending"],
+      [true, true, "failed"],
+    ] as const) {
+      await client.query(
+        "update copy_attributions set repair_due_at=now() where copier_user_id=$1 and idempotency_key=$2",
+        [copier, current.key],
+      );
+      const { checked, leaseLost } = await repairUnrecordedCopies(
+        db,
+        {
+          ...current.deps,
+          readLimitlessOrder: async () => ({
+            status: "not_found",
+            clientOrderId: exact ? current.order.clientOrderId : randomUUID(),
+          }),
+          readLimitlessHistoryPage: async (scope) => {
+            assert.equal(scope.ownerId, 7);
+            assert.equal(scope.clientOrderId, current.order.clientOrderId);
+            return parseLimitlessDirectHistoryPage(
+              { data: [], ...(hasEnd ? { nextCursor: null } : {}) },
+              scope,
+            );
+          },
+          readEvmReceipt: async () => {
+            throw new Error("absence does not invent a receipt");
+          },
+        },
+        policy,
+      );
+      assert.equal(checked, 1);
+      assert.equal(leaseLost, 0);
+      const result = await getCopyAttributionStatus(db, copier, current.key);
+      assert.equal(result?.state, expected);
+      assert.equal(result?.executionStatus, expected);
+      assert.equal(result?.purchaseRef, null);
+    }
   });
 
   assert.equal(

@@ -1085,7 +1085,7 @@ try {
                 createdAt: new Date(pollTime.getTime() - 1).toISOString(),
               },
             ],
-            totalCount: 30,
+            nextCursor: null,
           }
         : {
             data: [
@@ -1139,6 +1139,31 @@ try {
     false,
   );
   assert.equal(headCoverage(fullHistory, 25), false);
+  for (const data of [[], fullHistory.slice(0, 4), fullHistory]) {
+    const page = parseLimitlessDirectHistoryPage(
+      { data, nextCursor: null },
+      portfolioScope,
+    );
+    assert.equal(page?.coversSubmission, true);
+    assert.equal(page?.hasLaterPage, false);
+    assert.equal(
+      parseLimitlessDirectHistoryPage(
+        { data, nextCursor: null },
+        { ...portfolioScope, historyScan: { page: 2, cursor: "tail" } },
+      )?.coversSubmission,
+      false,
+    );
+  }
+  const exactTerminalPage = parseLimitlessDirectHistoryPage(
+    {
+      data: [
+        { ...fullHistory[0], clientOrderId: portfolioScope.clientOrderId },
+      ],
+      nextCursor: null,
+    },
+    portfolioScope,
+  );
+  assert.equal(exactTerminalPage?.exactClientFound, true);
   for (const payload of [
     { data: [{ ...fullHistory[0], clientOrderId: [] }], totalCount: 1 },
     {
@@ -1149,6 +1174,12 @@ try {
     { data: [{ ...fullHistory[0] }] },
     { data: [], totalCount: 0, hasMore: false, has_more: true },
     { data: [], totalCount: 0, nextCursor: "", next_cursor: "more" },
+    { data: [], nextCursor: null, next_cursor: "more" },
+    { data: [], nextCursor: null, hasMore: true },
+    { data: [], nextCursor: null, hasMore: "false" },
+    { data: [], nextCursor: null, totalCount: "0" },
+    { data: fullHistory, totalCount: 30, nextCursor: null },
+    { data: [{ createdAt: true }], nextCursor: null },
     { data: fullHistory, totalCount: 30, hasMore: false },
     {
       data: [],
@@ -1741,7 +1772,7 @@ try {
               },
             },
           ],
-          totalCount: 6,
+          nextCursor: null,
         },
         request,
       );

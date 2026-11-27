@@ -839,6 +839,10 @@ export function parseLimitlessDirectHistoryPage(
     ? (value.nextCursor ?? value.next_cursor)
     : null;
   const hasMore = isRecord(value) ? (value.hasMore ?? value.has_more) : null;
+  const cursorExhausted =
+    isRecord(value) &&
+    Object.hasOwn(value, "nextCursor") &&
+    value.nextCursor === null;
   const conflictingMetadata =
     isRecord(value) &&
     ([value.data, value.history, value.items, value.results].filter(
@@ -847,6 +851,7 @@ export function parseLimitlessDirectHistoryPage(
       (value.nextCursor != null &&
         value.next_cursor != null &&
         value.nextCursor !== value.next_cursor) ||
+      (cursorExhausted && (value.next_cursor != null || hasMore === true)) ||
       (value.hasMore != null &&
         value.has_more != null &&
         value.hasMore !== value.has_more));
@@ -870,7 +875,8 @@ export function parseLimitlessDirectHistoryPage(
     hasLaterPage:
       Boolean(nextCursor) ||
       hasMore === true ||
-      (collection.length > 0 &&
+      (!cursorExhausted &&
+        collection.length > 0 &&
         (totalCount === null
           ? collection.length === DIRECT_HISTORY_PAGE_SIZE
           : totalCount > pageNumber * DIRECT_HISTORY_PAGE_SIZE)),
@@ -1018,6 +1024,13 @@ export function parseLimitlessDirectHistoryPage(
     (totalCount !== null &&
       totalCount >= collection.length &&
       (!(nextCursor || hasMore) || totalCount > collection.length));
+  // The cursor API no longer returns totalCount; an explicit null, unlike
+  // an omitted cursor, is a terminal page. Keep the legacy count contract.
+  const completeHead =
+    !nextCursor &&
+    hasMore !== true &&
+    (totalCount === collection.length ||
+      (cursorExhausted && declaredCount === undefined));
   result.coversSubmission =
     !input.historyScan &&
     !conflictingMetadata &&
@@ -1027,7 +1040,8 @@ export function parseLimitlessDirectHistoryPage(
     !malformedTimestamp &&
     !malformedIdentity &&
     orderedTimestamps &&
-    ((!nextCursor && hasMore !== true && totalCount === collection.length) ||
+    (!cursorExhausted || completeHead) &&
+    (completeHead ||
       (collection.length === DIRECT_HISTORY_PAGE_SIZE &&
         !hasUnknownTimestamp &&
         oldestTimestamp < input.postedAt.getTime()));
