@@ -220,6 +220,44 @@ try {
     );
   await db.query("insert into users(id) values($1)", [userId]);
 
+  await test("the canonical SELL market is exposed only for an exact, owned admission", async () => {
+    const marketContextId = "limitless:475188";
+    const run = await prepare({
+      ...request(),
+      purpose: "sell",
+      marketContextId,
+    });
+    const grant = await admit(run, randomUUID(), "privy_authorization");
+    assert.ok(grant.executionKey);
+    const checked = await inspectEmbeddedPreparationAdmission(
+      db,
+      userId,
+      grant.executionKey,
+      payload(),
+    );
+    assert.equal(checked?.sellMarketId, marketContextId);
+    await assert.rejects(
+      () =>
+        inspectEmbeddedPreparationAdmission(
+          db,
+          randomUUID(),
+          grant.executionKey ?? undefined,
+          payload(),
+        ),
+      /does not match this owned action/,
+    );
+    await assert.rejects(
+      () =>
+        inspectEmbeddedPreparationAdmission(
+          db,
+          userId,
+          grant.executionKey ?? undefined,
+          { ...payload(), signer: token },
+        ),
+      /does not match its committed action/,
+    );
+  });
+
   await test("changing a Limitless Buy amount cannot replace a dispatched fee approval", async () => {
     const scope = {
       ...request(),

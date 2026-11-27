@@ -91,6 +91,36 @@ try {
     ),
     false,
   );
+  const isScopedOperator = (id: string, address: string) =>
+    embeddedEvmSponsorshipTestHooks.isLimitlessApprovalOperatorForMarket(
+      client,
+      id,
+      address,
+    );
+  assert.equal(await isScopedOperator(marketId, adapterAddress), true);
+  assert.equal(await isScopedOperator(marketId, marketExchangeAddress), true);
+  assert.equal(await isScopedOperator(marketId, otherAdapterAddress), false);
+  assert.equal(
+    await isScopedOperator(`${marketId}-other`, adapterAddress),
+    false,
+  );
+  const secondMarketId = `${marketId}-second`;
+  const secondMarketAdapter = "0x7777777777777777777777777777777777777777";
+  await client.query(
+    `insert into unified_markets (
+       id, venue, venue_market_id, event_id, title, status, market_type,
+       condition_id, metadata
+     ) values (
+       $1, 'limitless', $1, $2, 'Other scope', 'SETTLED', 'binary', $3,
+       jsonb_build_object('venueAdapter', $4::text)
+     )`,
+    [secondMarketId, eventId, otherConditionId, secondMarketAdapter],
+  );
+  assert.equal(
+    await isScopedOperator(secondMarketId, secondMarketAdapter),
+    true,
+  );
+  assert.equal(await isScopedOperator(marketId, secondMarketAdapter), false);
   assert.equal(
     await embeddedEvmSponsorshipTestHooks.isKnownLimitlessNegRiskRedemption(
       client,
@@ -232,11 +262,26 @@ try {
 
   const marketAdapterAddress = "0x3333333333333333333333333333333333333333";
   await client.query(
+    `update unified_markets set condition_id = null where id = $1`,
+    [marketId],
+  );
+  assert.equal(await isScopedOperator(marketId, adapterAddress), true);
+  assert.equal(
+    await embeddedEvmSponsorshipTestHooks.isKnownLimitlessNegRiskRedemption(
+      client,
+      adapterAddress,
+      conditionId,
+    ),
+    false,
+  );
+  await client.query(
     `update unified_markets
-     set metadata = jsonb_build_object('venueAdapter', $2::text)
+     set metadata = jsonb_build_object('venueAdapter', $2::text), condition_id = $3
      where id = $1::text`,
-    [marketId, marketAdapterAddress],
+    [marketId, marketAdapterAddress, conditionId],
   );
+  assert.equal(await isScopedOperator(marketId, marketAdapterAddress), true);
+  assert.equal(await isScopedOperator(marketId, adapterAddress), false);
   assert.equal(
     await embeddedEvmSponsorshipTestHooks.isKnownLimitlessNegRiskAdapter(
       client,
@@ -267,6 +312,18 @@ try {
     ),
     false,
   );
+  await client.query(
+    `update unified_markets
+     set metadata = jsonb_build_object(
+       'venue', jsonb_build_object('adapter_address', $2::text, 'exchange', $3::text),
+       'ammAddress', $4::text
+     )
+     where id = $1`,
+    [marketId, marketAdapterAddress, marketExchangeAddress, signer],
+  );
+  assert.equal(await isScopedOperator(marketId, marketAdapterAddress), true);
+  assert.equal(await isScopedOperator(marketId, marketExchangeAddress), true);
+  assert.equal(await isScopedOperator(marketId, signer), true);
 
   const storedOrder = await storeOrderInTransaction(client, {
     errorMessage:
