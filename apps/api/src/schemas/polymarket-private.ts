@@ -309,6 +309,7 @@ export const polymarketQuoteBodySchema = z
     // funding clients can skip this optional, RPC-heavy preview because they
     // prepare the exact shortfall through /funding instead.
     includeFundingPlan: z.boolean().optional().default(true),
+    includeSellAvailability: z.boolean().optional(),
   })
   .refine(
     (value) => {

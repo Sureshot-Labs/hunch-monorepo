@@ -25,6 +25,7 @@ import type {
   PreparationPurpose,
 } from "../funding/domain/types.js";
 import { parseMoneyJson } from "../funding/domain/money-json.js";
+import { needsManualSellApprovalRecovery } from "../funding/preparation/approval-receipt.js";
 import type { PreparationResult } from "../funding/domain/contracts.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
 import {
@@ -442,18 +443,20 @@ function publicPreparationRun(run: FundingPreparationRun) {
     );
   }
   const requiresAdmission = run.request.executionJournal?.version === 1;
+  const manualRecovery = needsManualSellApprovalRecovery(run);
   return {
     runId: run.runId,
     status: run.status,
     inspectionRevision: run.inspectionRevision,
-    actions: requiresAdmission
-      ? []
-      : run.actions.map((attempt) => attempt.action),
+    actions:
+      requiresAdmission || manualRecovery
+        ? []
+        : run.actions.map((attempt) => attempt.action),
     actionAttempts: run.actions.map((attempt) => ({
       actionId: attempt.actionId,
       ordinal: attempt.ordinal,
       actionFingerprint: attempt.actionFingerprint,
-      action: requiresAdmission ? null : attempt.action,
+      action: requiresAdmission || manualRecovery ? null : attempt.action,
       state: attempt.state,
       broadcastMayHaveOccurred: attempt.broadcastMayHaveOccurred,
       transactionReference: attempt.transactionReference,
@@ -464,6 +467,14 @@ function publicPreparationRun(run: FundingPreparationRun) {
     expiresAt: run.expiresAt.toISOString(),
     resolvedAt: run.resolvedAt?.toISOString() ?? null,
     replayed: run.replayed,
+    ...(manualRecovery
+      ? {
+          recovery: {
+            code: "approval_reference_missing" as const,
+            automaticPolling: false as const,
+          },
+        }
+      : {}),
     ...(run.request.limitlessMarketBuyRaw === undefined
       ? {}
       : { limitlessFeePreparation: true as const }),

@@ -1,6 +1,7 @@
 import { tx, type Pool } from "@hunch/infra";
 import { parsePolymarketAssetContext } from "@hunch/shared";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import { readLimitlessFundedCopyTerminalStatus } from "../funding/persistence/funding-trade-attempt-repository.js";
 import {
   verifiedBuyFactsSchema,
   type SocialSourceRef,
@@ -11,7 +12,10 @@ import { resolveSocialPolicy } from "./social-policy.js";
 import { SocialError } from "./social-primitives.js";
 import type { PersistedTrade, PreparedTrade } from "./trading-types.js";
 import { isRecord } from "../lib/type-guards.js";
-import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
+import {
+  normalizeLimitlessRawTokenId,
+  normalizeLimitlessScopedTokenId,
+} from "../lib/limitless-token.js";
 import type { PolymarketAssetContext } from "@hunch/shared";
 import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
 import type { LimitlessClobSubmissionContext } from "./limitless-clob-evidence-identity.js";
@@ -41,6 +45,12 @@ export class LimitlessCopyAlreadySubmittedError extends SocialError {
   }
 }
 
+export class LimitlessCopyBlockedBeforeSubmissionError extends SocialError {
+  constructor() {
+    super("limitless_prior_submission_reconciling", 409);
+  }
+}
+
 const frozenLimitlessFokCopySql = `source_snapshot #>> '{submission,orderType}'='FOK'
   and (source_snapshot #> '{submission,limitlessClob,context}') ? 'collateralFeeModule'`;
 
@@ -56,16 +66,18 @@ export async function inspectDispatchedLimitlessCopy(
     marketSlug: string;
     sourceRef: SocialSourceRef;
   },
-): Promise<"none" | "matching" | "conflict"> {
+): Promise<"none" | "matching" | "not_submitted" | "conflict"> {
   const { rows } = await db.query<{
     matches_replay: boolean;
+    execution_outcome: string | null;
   }>(
     `select coalesce(
         provider_reference=$3 and prepared_fingerprint=$4
         and lower(source_snapshot #>> '{submission,walletAddress}')=lower($5)
         and coalesce(source_snapshot #>> '{submission,limitlessProviderMarketSlug}',$6)=$6
         and coalesce(source_thesis_id::text,source_ai_note_id::text)=$7
-        and ($8='thesis')=(source_thesis_id is not null), false) as matches_replay
+        and ($8='thesis')=(source_thesis_id is not null), false) as matches_replay,
+        source_snapshot #>> '{submission,limitlessExecutionOutcome}' as execution_outcome
       from copy_attributions
       where copier_user_id=$1 and idempotency_key=$2 and submission_started_at is not null
         and provider_reference like 'limitless:clob:8453:%' and ${frozenLimitlessFokCopySql}`,
@@ -81,7 +93,11 @@ export async function inspectDispatchedLimitlessCopy(
     ],
   );
   const row = rows[0];
-  return !row ? "none" : row.matches_replay ? "matching" : "conflict";
+  if (!row) return "none";
+  if (!row.matches_replay) return "conflict";
+  return row.execution_outcome === "not_submitted"
+    ? "not_submitted"
+    : "matching";
 }
 
 /** Adapts an already-validated venue request to the same Copy contract. */
@@ -158,7 +174,13 @@ export async function retainClientCopyBeforeSubmission(
     preparedFingerprint: input.preparedFingerprint,
     limitlessPositionContract: input.limitlessPositionContract,
   });
-  await markCopySubmissionStarted(pool, input.userId, attempt);
+  try {
+    await markCopySubmissionStarted(pool, input.userId, attempt);
+  } catch (error) {
+    if (error instanceof LimitlessCopyBlockedBeforeSubmissionError)
+      await markCopyDefinitelyNotBroadcast(pool, input.userId, attempt);
+    throw error;
+  }
   input.onRetained?.(attempt);
   // An explicit client retry can submit exactly the same economic identity.
   // The unique provider reference/fingerprint above forbids creating another buy.
@@ -170,6 +192,12 @@ export type CopyAttributionStatus = {
   state: "pending" | "confirmed" | "revoked" | "failed";
   sourceRef: SocialSourceRef;
   purchaseRef: { kind: "order" | "execution"; id: string } | null;
+  executionStatus?:
+    | "pending"
+    | "filled"
+    | "no_fill"
+    | "failed"
+    | "not_submitted";
   createdAt: string;
   confirmedAt: string | null;
   updatedAt: string;
@@ -191,9 +219,28 @@ export async function getCopyAttributionStatus(
     created_at: Date;
     confirmed_at: Date | null;
     updated_at: Date;
+    frozen_limitless: boolean;
+    submission_started_at: Date | null;
+    provider_reference: string;
+    token_id: string | null;
+    wallet_address: string | null;
+    execution_outcome: string | null;
+    execution_facts: unknown;
+    instrument: unknown;
+    canonical_purchase_key: string | null;
+    frozen_order_hash: string | null;
   }>(
     `
-    select id,state,source_thesis_id,source_ai_note_id,order_id,execution_id,created_at,confirmed_at,updated_at
+    select id,state,source_thesis_id,source_ai_note_id,order_id,execution_id,created_at,confirmed_at,updated_at,
+      provider_reference like 'limitless:clob:8453:%'
+        and coalesce((${frozenLimitlessFokCopySql}),false) as frozen_limitless,
+      submission_started_at, provider_reference,
+      source_snapshot #>> '{submission,limitlessClob,order,tokenId}' as token_id,
+      source_snapshot #>> '{submission,limitlessClob,order,maker}' as wallet_address,
+      source_snapshot #>> '{submission,limitlessExecutionOutcome}' as execution_outcome,
+      case when state='confirmed' and order_id is null then execution_facts end as execution_facts,
+      instrument,canonical_purchase_key,
+      source_snapshot #>> '{submission,limitlessClob,context,orderHash}' as frozen_order_hash
     from copy_attributions where copier_user_id=$1 and idempotency_key=$2`,
     [userId, idempotencyKey],
   );
@@ -205,10 +252,108 @@ export async function getCopyAttributionStatus(
       ? { kind: "hunch", id: row.source_ai_note_id }
       : null;
   if (!sourceRef) return null;
+  let executionStatus: CopyAttributionStatus["executionStatus"];
+  if (row.frozen_limitless) {
+    executionStatus =
+      row.state === "failed"
+        ? row.submission_started_at
+          ? "failed"
+          : "not_submitted"
+        : "pending";
+    if (row.submission_started_at && row.execution_outcome === "no_fill")
+      executionStatus = "no_fill";
+    if (row.execution_outcome === "not_submitted")
+      executionStatus = "not_submitted";
+    const tokenId =
+      row.token_id && normalizeLimitlessScopedTokenId(row.token_id);
+    const clientOrderId = row.provider_reference.match(
+      /^limitless:clob:8453:([^:]+)$/,
+    )?.[1];
+    if (
+      row.submission_started_at &&
+      executionStatus !== "not_submitted" &&
+      clientOrderId &&
+      tokenId &&
+      row.wallet_address
+    ) {
+      const { rows } = await db.query<{
+        status: string;
+        verified_buy_state: string | null;
+        has_prior_proof: boolean;
+      }>(
+        `select order_row.status, order_row.verified_buy_state,
+          order_row.verified_buy_facts is not null as has_prior_proof from orders order_row
+          where order_row.user_id = $1 and order_row.venue = 'limitless'
+            and order_row.side = 'BUY' and order_row.order_type = 'FOK'
+            and lower(order_row.wallet_address) = lower($3)
+            and order_row.token_id in ($4, $5)
+            and coalesce(order_payload->>'clientOrderId',order_payload->'submitted'->>'clientOrderId',order_payload->'_hunchSubmitted'->>'clientOrderId') = $2
+            and ($6::uuid is null or order_row.id = $6)
+            and order_row.venue_order_id not like 'history:%'
+          limit 2`,
+        [
+          userId,
+          clientOrderId,
+          row.wallet_address,
+          normalizeLimitlessRawTokenId(row.token_id),
+          tokenId,
+          row.order_id,
+        ],
+      );
+      const order = rows.length === 1 ? rows[0] : undefined;
+      const status = order?.status;
+      if (
+        status === "filled" &&
+        (order?.verified_buy_state === "verified" ||
+          (row.state !== "revoked" &&
+            order?.verified_buy_state !== "revoked" &&
+            !order?.has_prior_proof))
+      ) {
+        executionStatus = "filled";
+      }
+      if (status === "failed") executionStatus = "failed";
+      // The order journal stores a terminal FOK no-fill as expired.
+      if (status === "expired" || status === "no_fill")
+        executionStatus = "no_fill";
+      if (
+        executionStatus === "pending" &&
+        rows.length === 0 &&
+        !row.order_id &&
+        row.state === "confirmed"
+      ) {
+        const facts = verifiedBuyFactsSchema.safeParse(row.execution_facts);
+        if (
+          facts.success &&
+          facts.data.instrument.venue === "limitless" &&
+          /[1-9]/u.test(facts.data.grossShares) &&
+          facts.data.owner.toLowerCase() === row.wallet_address.toLowerCase() &&
+          facts.data.canonicalPurchaseKey === row.canonical_purchase_key &&
+          canonicalJsonHash(facts.data.instrument) ===
+            canonicalJsonHash(row.instrument)
+        )
+          executionStatus = "filled";
+      }
+      if (
+        executionStatus === "pending" &&
+        rows.length === 0 &&
+        !row.order_id &&
+        row.frozen_order_hash
+      )
+        executionStatus =
+          (await readLimitlessFundedCopyTerminalStatus(db, {
+            userId,
+            clientOrderId,
+            orderHash: row.frozen_order_hash,
+          })) ?? "pending";
+    }
+    if (executionStatus === "pending" && row.state === "revoked")
+      executionStatus = undefined;
+  }
   return {
     id: row.id,
     state: row.state,
     sourceRef,
+    ...(executionStatus ? { executionStatus } : {}),
     purchaseRef: row.order_id
       ? { kind: "order", id: row.order_id }
       : row.execution_id
@@ -544,7 +689,7 @@ export async function markCopySubmissionStarted(
   return tx(pool, async (db) => {
     await lockLimitlessFokScope(db, scope);
     if (await readOtherPendingLimitlessFok(db, scope))
-      throw new SocialError("limitless_submit_reconciling", 409);
+      throw new LimitlessCopyBlockedBeforeSubmissionError();
     await mark(db);
   });
 }
@@ -563,17 +708,23 @@ export async function markCopyDefinitelyNotBroadcast(
   );
 }
 
-/** Only a first-attempt authoritative rejection proves no earlier submit succeeded. */
+/** Only an authoritative first-attempt rejection or local pre-dispatch failure is terminal. */
 export async function markCopyDefinitiveProviderRejection(
   db: Db,
   userId: string,
   attempt: RetainedCopyAttempt,
+  executionOutcome?: "no_fill" | "failed" | "not_submitted",
 ): Promise<void> {
   if (attempt.priorSubmissionUncertain) return;
   await db.query(
-    `update copy_attributions set state='failed',updated_at=now()
+    `update copy_attributions set state='failed',updated_at=now(),
+      repair_due_at=case when $4::text='not_submitted' then 'infinity' else repair_due_at end,
+      repair_lease_token=case when $4::text='not_submitted' then null else repair_lease_token end,
+      repair_lease_until=case when $4::text='not_submitted' then null else repair_lease_until end,
+      source_snapshot=case when $4::text is null then source_snapshot
+        else jsonb_set(source_snapshot,'{submission,limitlessExecutionOutcome}',to_jsonb($4::text)) end
     where id=$1 and copier_user_id=$2 and submission_attempt_token=$3 and state='pending'`,
-    [attempt.id, userId, attempt.attemptToken],
+    [attempt.id, userId, attempt.attemptToken, executionOutcome ?? null],
   );
 }
 

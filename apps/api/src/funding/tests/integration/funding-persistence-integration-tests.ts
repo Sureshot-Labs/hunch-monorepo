@@ -93,9 +93,11 @@ import {
   fetchFundingLimitlessClobSubmission,
   FundingTradeAttemptError,
   markFundingTradeAttemptSubmissionStartedInTransaction,
+  readLimitlessFundedCopyTerminalStatus,
   readLimitlessFundedOrderStatus,
   noteFundingLimitlessClobLocator,
   proveAmbiguousLimitlessTradeAttemptAbsentInTransaction,
+  proveAmbiguousLimitlessFokNoFillInTransaction,
   proveAmbiguousLimitlessTerminalRejectionInTransaction,
   recoverFundingTradeAttemptForOrderInTransaction,
   recordFundingTradeAttemptOutcomeInTransaction,
@@ -8587,6 +8589,51 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
     const mergeClient = await pool.connect();
     try {
       await mergeClient.query("begin");
+      await mergeClient.query("savepoint funded_copy_no_fill_projection");
+      assert.ok(retainedSubmission);
+      const terminalLookup = {
+        userId,
+        clientOrderId,
+        orderHash: retainedSubmission.context.orderHash,
+      };
+      assert.equal(
+        await readLimitlessFundedCopyTerminalStatus(
+          mergeClient,
+          terminalLookup,
+        ),
+        null,
+      );
+      await proveAmbiguousLimitlessFokNoFillInTransaction(mergeClient, {
+        userId,
+        attemptId,
+        clientOrderId,
+        expectedClaimToken: crashTakeover.claimToken,
+        now: takeoverNow,
+      });
+      assert.equal(
+        await readLimitlessFundedCopyTerminalStatus(
+          mergeClient,
+          terminalLookup,
+        ),
+        "no_fill",
+      );
+      assert.equal(
+        await readLimitlessFundedCopyTerminalStatus(mergeClient, {
+          ...terminalLookup,
+          orderHash: `0x${"f".repeat(64)}`,
+        }),
+        null,
+      );
+      assert.equal(
+        await readLimitlessFundedCopyTerminalStatus(mergeClient, {
+          ...terminalLookup,
+          userId: crypto.randomUUID(),
+        }),
+        null,
+      );
+      await mergeClient.query(
+        "rollback to savepoint funded_copy_no_fill_projection",
+      );
       await mergeClient.query("savepoint exact_history_conflict");
       const historyTx = `0x${"b".repeat(64)}`;
       await mergeClient.query(

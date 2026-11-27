@@ -265,8 +265,12 @@ export function polymarketL2Request(inputs: {
 }
 
 export function extractOrderArray(payload: unknown): unknown[] {
+  return readOpenOrderArray(payload) ?? [];
+}
+
+function readOpenOrderArray(payload: unknown): unknown[] | null {
   if (Array.isArray(payload)) return payload;
-  if (!isRecord(payload)) return [];
+  if (!isRecord(payload)) return null;
 
   const candidates = [
     payload.orders,
@@ -277,7 +281,46 @@ export function extractOrderArray(payload: unknown): unknown[] {
   for (const value of candidates) {
     if (Array.isArray(value)) return value;
   }
-  return [];
+  return null;
+}
+
+/** Availability must not infer zero locks from a malformed or partial page. */
+export function readCompletePolymarketOpenOrderPage(
+  payload: unknown,
+): unknown[] | null {
+  if (
+    !isRecord(payload) ||
+    payload.next_cursor !== "LTE=" ||
+    !Array.isArray(payload.data)
+  )
+    return null;
+  const orders: unknown[] = payload.data;
+  const sharesRaw = (value: string | null): bigint | null => {
+    const digits = /^(\d{1,40})(?:\.(\d{1,6}))?$/u.exec(value ?? "");
+    return digits
+      ? BigInt(`${digits[1]}${(digits[2] ?? "").padEnd(6, "0")}`)
+      : null;
+  };
+  for (const raw of orders) {
+    const order = normalizeOpenOrder(raw);
+    if (!order || !["BUY", "SELL"].includes(order.side?.toUpperCase() ?? ""))
+      return null;
+    if (order.side?.toUpperCase() === "SELL") {
+      const kind = order.type?.trim().toUpperCase();
+      const original = sharesRaw(order.originalSize);
+      const matched = sharesRaw(order.sizeMatched);
+      if (
+        !/^\d+$/u.test(order.assetId ?? "") ||
+        !/^0x[0-9a-f]{40}$/iu.test(order.makerAddress ?? order.owner ?? "") ||
+        (kind && kind !== "GTC" && kind !== "GTD") ||
+        original === null ||
+        matched === null ||
+        matched > original
+      )
+        return null;
+    }
+  }
+  return orders;
 }
 
 export function extractOrderId(order: unknown): string | null {

@@ -212,16 +212,49 @@ Use the original `copyIdempotencyKey` from the request if it was supplied and
 the response didn't return one. Do not retry `POST /trade/limitless/order` to
 obtain status. This route reads the original Copy and never sends an order.
 
+For Copy-aware clients, `copyExecutionResponseVersion: 1` opts into
+`202 { ok: true, status: "pending", executionStatus: "DELAYED",
+copyIdempotencyKey }` for a venue-accepted delayed FOK Copy. Use that key
+with the same status route. Older clients still get the legacy 409 recovery
+response. `limitless_prior_submission_reconciling` with
+`executionStatus: "not_submitted"` means the new Copy was blocked before it
+was sent; do not poll it as a live order or retry automatically.
+
+On the GET, optional `executionStatus` is separate from the existing Copy
+attribution `state`. `filled` means the exact order already filled; the
+attribution can still be `pending`. `pending` means keep following the
+original attempt; `no_fill`, `failed` and `not_submitted` stop the order
+wait. When the new field is absent, use the existing contract:
+
 - `pending`: keep the existing attempt; do not make a replacement Buy.
 - `confirmed`: the purchase was verified. Use `purchaseRef` when present; a
   worker-verified Copy can be confirmed without a local order or execution ID.
 - `failed` with `purchaseRef: null`: close this attempt without treating it
   as a purchase. Any new order requires a fresh user confirmation.
 - `revoked`: the attribution was revoked; this is not proof of no purchase.
-  A 404 or a failed status request also isn't proof of no purchase.
+  An exact linked order can still report `filled`; without independent
+  evidence, the API leaves execution status unspecified. A 404 or failed
+  status request also isn't proof of no purchase.
 
 The same status route works for an existing Copy if the client kept its key.
 Non-Copy direct order recovery still uses `GET /trade/limitless/orders/:orderId`.
+
+## Limitless SELL wallet preparation
+
+An expired admission-backed Base SELL run with possible approval broadcast
+and no transaction reference can return
+`recovery: { code: "approval_reference_missing", automaticPolling: false }`.
+Its durable status remains `ambiguous` or `submitted`, with no executable
+action in the response. Stop automatic polling, keep the same run and
+admission key, and do not send another approval. When an exact transaction
+or Privy reference is recovered, report it against the original admission
+and check that same run to verify its receipt.
+
+For Polymarket SELL, `POST /trade/polymarket/quote` optionally accepts
+`includeSellAvailability: true` for `sellAvailability` (exact raw requested,
+available, and locked shares, plus `quantityFits`). Null means temporarily
+unavailable; it is not zero. Submission still validates the latest balance
+and can return `POLYMARKET_SELL_BALANCE_CHANGED`.
 
 ## Finance-worker
 

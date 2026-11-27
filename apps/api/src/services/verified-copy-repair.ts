@@ -165,6 +165,7 @@ export async function repairUnrecordedCopies(
         };
         let feeOrder: StoreOrderInput | null = null;
         let provenAbsent = false;
+        let provenNoFill = false;
         let historyCapacityDeferred = false;
         let priorLocator: Record<string, unknown> | null = null;
         const recoveryEvidence: {
@@ -482,6 +483,10 @@ export async function repairUnrecordedCopies(
                         providerOrderId,
                       })
                     ).length === 0;
+                  provenNoFill =
+                    provenAbsent &&
+                    status.status === "found" &&
+                    parsedStatus.explicitNoFill;
                 }
               }
               if (
@@ -540,9 +545,12 @@ export async function repairUnrecordedCopies(
           execution_facts=case when $3='confirmed' then $6::jsonb else execution_facts end,
           confirmed_at=case when $3='confirmed' and ${timelyPurchase} then coalesce(confirmed_at,now()) else confirmed_at end,
           order_id=coalesce($9::uuid,order_id),
-          source_snapshot=case when $10::jsonb is not null
-            then jsonb_set(source_snapshot,'{submission,limitlessLocator}',
-              ${appendLimitlessObservedLocatorSql("source_snapshot #> '{submission,limitlessLocator}'", "($10::jsonb->>'providerOrderId')", "($10::jsonb->>'txHash')", "($10::jsonb->'history')")})
+          source_snapshot=case when $10::jsonb is not null or $13::boolean
+            then jsonb_set(source_snapshot,'{submission}', (source_snapshot->'submission')
+              || case when $10::jsonb is not null then jsonb_build_object('limitlessLocator',
+                ${appendLimitlessObservedLocatorSql("source_snapshot #> '{submission,limitlessLocator}'", "($10::jsonb->>'providerOrderId')", "($10::jsonb->>'txHash')", "($10::jsonb->'history')")})
+                else '{}'::jsonb end
+              || case when $13::boolean then '{"limitlessExecutionOutcome":"no_fill"}'::jsonb else '{}'::jsonb end)
             else source_snapshot end,
           repair_due_at=case when $12::boolean then repair_due_at else now()+$7*interval '1 second' end,
           repair_lease_token=null,repair_lease_until=null,updated_at=now()
@@ -571,6 +579,7 @@ export async function repairUnrecordedCopies(
                 : null,
               priorLocator ? JSON.stringify(priorLocator) : null,
               historyCapacityDeferred,
+              provenNoFill,
             ],
           );
         const recovered = feeOrder;

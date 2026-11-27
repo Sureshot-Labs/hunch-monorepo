@@ -565,9 +565,14 @@ try {
   });
   await assert.rejects(
     () => markCopySubmissionStarted(db, copier, replacementCopy),
-    /limitless_submit_reconciling/,
+    /limitless_prior_submission_reconciling/,
   );
   await markCopyDefinitelyNotBroadcast(db, copier, replacementCopy);
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, replacementClientId))
+      ?.executionStatus,
+    "not_submitted",
+  );
   assert.equal(
     await claimLimitlessDirectOrderJournal(
       db,
@@ -694,6 +699,153 @@ try {
   await client.query("rollback to savepoint frozen_copy_http_replay");
   const statusBefore = await getCopyAttributionStatus(db, copier, expectedKey);
   assert.equal(statusBefore?.state, "pending");
+  assert.equal(statusBefore?.executionStatus, "pending");
+  await client.query("savepoint copy_execution_status");
+  const insertFill = (userId: string, wallet: string) =>
+    client.query(
+      `insert into orders (user_id, wallet_address, venue, venue_order_id,
+        token_id, side, order_type, status, order_payload)
+       values ($1,$2,'limitless',$3,$4,'BUY','FOK','filled',$5::jsonb)`,
+      [
+        userId,
+        wallet,
+        randomUUID(),
+        collateralSigned.tokenId,
+        JSON.stringify({ clientOrderId: collateralClientId }),
+      ],
+    );
+  await insertFill(author, owner);
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "pending",
+  );
+  const fillFacts = {
+    version: 1,
+    canonicalPurchaseKey: "copy-execution-status-fixture",
+    owner,
+    grossNotionalUsd: "1",
+    grossShares: "2",
+    netShares: "2",
+    entryPrice: "0.5",
+    feesUsd: null,
+    purchasedAt: new Date().toISOString(),
+    verifiedAt: new Date().toISOString(),
+    evidenceIds: ["copy-execution-status-fact"],
+    evidenceRevision: "copy-execution-verified",
+  };
+  const confirmUnlinked = () =>
+    client.query(
+      `update copy_attributions set state='confirmed', canonical_purchase_key=$2, facts_revision=$3,
+      confirmed_at=now(), execution_facts=$4::jsonb||jsonb_build_object('instrument',instrument) where id=$1`,
+      [
+        collateralCopy.id,
+        fillFacts.canonicalPurchaseKey,
+        fillFacts.evidenceRevision,
+        JSON.stringify(fillFacts),
+      ],
+    );
+  await client.query("savepoint copy_execution_unlinked");
+  await confirmUnlinked();
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "filled",
+  );
+  await client.query("rollback to savepoint copy_execution_unlinked");
+  await insertFill(copier, owner);
+  const executedCopy = await getCopyAttributionStatus(db, copier, expectedKey);
+  assert.equal(executedCopy?.executionStatus, "filled");
+  assert.equal(executedCopy?.state, "pending");
+  assert.equal(executedCopy?.purchaseRef, null);
+  await client.query("savepoint copy_execution_revoked");
+  await client.query(
+    `update orders set verified_buy_state='revoked' where user_id=$1
+      and order_payload->>'clientOrderId'=$2`,
+    [copier, collateralClientId],
+  );
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "pending",
+  );
+  await confirmUnlinked();
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "pending",
+    "revoked proof on an exact order cannot be overridden by old confirmed Copy facts",
+  );
+  await client.query(
+    "update copy_attributions set state='revoked' where id=$1",
+    [collateralCopy.id],
+  );
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    undefined,
+  );
+  await client.query("rollback to savepoint copy_execution_revoked");
+  await insertFill(copier, owner);
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "pending",
+  );
+  await client.query("rollback to savepoint copy_execution_status");
+  await client.query("savepoint copy_execution_terminal");
+  await markCopyDefinitiveProviderRejection(
+    db,
+    copier,
+    collateralCopy,
+    "no_fill",
+  );
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "no_fill",
+  );
+  await client.query("rollback to savepoint copy_execution_terminal");
+  await markCopyDefinitiveProviderRejection(
+    db,
+    copier,
+    collateralCopy,
+    "failed",
+  );
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "failed",
+  );
+  await client.query("rollback to savepoint copy_execution_terminal");
+  await markCopyDefinitiveProviderRejection(
+    db,
+    copier,
+    collateralCopy,
+    "not_submitted",
+  );
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "not_submitted",
+  );
+  await client.query("rollback to savepoint copy_execution_terminal");
+  await repairCollateralCopy({
+    ...deps,
+    readLimitlessOrder: async (scope) => ({
+      status: "found",
+      clientOrderId: scope.clientOrderId,
+      orderId: collateralVenueOrder,
+      data: {
+        order: {
+          order: { status: "expired" },
+          execution: { matched: false, settlementStatus: "NO_FILL" },
+        },
+      },
+    }),
+    readLimitlessHistoryPage: async () => ({
+      coversSubmission: true,
+      exactClientFound: false,
+      locators: [],
+    }),
+  });
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "no_fill",
+    "worker retains an exact explicit no-fill even with no order row",
+  );
+  await client.query("rollback to savepoint copy_execution_terminal");
   const historyDeps: VerifiedBuyObserverDependencies = {
     ...deps,
     readLimitlessOrder: async (scope) => {
@@ -733,6 +885,11 @@ try {
     "the original Copy reaches a terminal result without submitting a new order",
   );
   assert.equal(await getCopyAttributionStatus(db, author, expectedKey), null);
+  assert.equal(
+    (await getCopyAttributionStatus(db, copier, expectedKey))?.executionStatus,
+    "failed",
+    "a definitive no-order failure must not look pending forever",
+  );
   await assert.rejects(
     () => retainCopyBeforeSubmission(db, collateralCopyInput),
     (error) =>

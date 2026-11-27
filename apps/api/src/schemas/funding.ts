@@ -731,6 +731,13 @@ const fundingPreparationRunResponseFields = {
   replayed: z.boolean(),
   limitlessFeePreparation: z.literal(true).optional(),
   admissionProtocolVersion: z.literal(1).nullable().optional(),
+  recovery: z
+    .object({
+      code: z.literal("approval_reference_missing"),
+      automaticPolling: z.literal(false),
+    })
+    .strict()
+    .optional(),
 } as const;
 
 export const fundingPreparationPrepareResponseSchema = z
