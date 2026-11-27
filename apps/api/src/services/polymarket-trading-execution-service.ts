@@ -9,6 +9,14 @@ import {
 } from "./social-copy.js";
 import { rawDecimal } from "./verified-buy.js";
 import { notifyPolymarketDefinitiveRejection } from "./polymarket-order-rejection.js";
+import {
+  advanceDirectFok,
+  claimDirectFok,
+  directFokView,
+  observeDirectFok,
+  readDirectFok,
+  type DirectFokKey,
+} from "./polymarket-direct-fok-attempt.js";
 import { fetchPolymarketAssetBindings } from "@hunch/db";
 import { selectPolymarketTradeAsset } from "./polymarket-trade-asset-selection.js";
 import { isRpcRateLimit } from "@hunch/shared";
@@ -371,6 +379,7 @@ type PolymarketOrderHashBody = {
 };
 
 type PolymarketMaxSpendBody = {
+  assetContext?: PolymarketAssetContext;
   limitPrice?: number;
   verifyFunding?: boolean;
   connectedExternalWalletRefs?: string[];
@@ -557,6 +566,8 @@ export type PolymarketClientSignedOrderResult =
         orderHash: string;
         status: string;
         stored: string;
+        state?: ReturnType<typeof directFokView>["state"];
+        nextAction?: ReturnType<typeof directFokView>["nextAction"];
         referralFirstTrade?: unknown;
         payload: unknown;
       };
@@ -3648,6 +3659,7 @@ export async function quotePolymarketOrderRoute(input: {
             availabilityBudgetMs,
           ).then(
             (available) => ({
+              funderAddress: available.funder,
               requestedSharesRaw: quote.makerAmount,
               availableSharesRaw: available.availableRaw.toString(),
               lockedSharesRaw: available.lockedRaw.toString(),
@@ -4187,6 +4199,32 @@ export async function computePolymarketOrderHashRoute(input: {
   }
 }
 
+async function emptyPolymarketFokFunds(
+  pool: Pool,
+  tokenId: string,
+  funder: string,
+  requested?: PolymarketAssetContext,
+) {
+  // Collateral is fungible, but a fresh Review still belongs to the original
+  // position ledger. Zero needs no venue book or further on-chain reads.
+  const assetContext = requested
+    ? await resolvePolymarketAssetContext(
+        pool,
+        tokenId,
+        await fetchPolymarketMarketInfo(pool, { tokenId }),
+        requested,
+      )
+    : null;
+  return {
+    ...polymarketMaxSpendUnavailable(
+      "no_executable_funds",
+      "No executable Polymarket funds are available.",
+    ),
+    funderAddress: funder,
+    ...(assetContext ? { assetContext } : {}),
+  };
+}
+
 export async function computePolymarketMaxSpendRoute(input: {
   body: PolymarketMaxSpendBody;
   log?: PolymarketRouteLogger | null;
@@ -4375,19 +4413,21 @@ export async function computePolymarketMaxSpendRoute(input: {
     };
   }
 
-  if (funds.executableFundsRaw <= 0n) {
-    return {
-      ok: true,
-      payload: polymarketMaxSpendUnavailable(
-        "no_executable_funds",
-        "No executable Polymarket funds are available.",
-      ),
-    };
-  }
-
   try {
+    if (funds.executableFundsRaw <= 0n) {
+      return {
+        ok: true,
+        payload: await emptyPolymarketFokFunds(
+          input.pool,
+          tokenId,
+          funder,
+          body.assetContext,
+        ),
+      };
+    }
     const maxSpend = await findMaxPolymarketMarketBuyUsdForFunds(input.pool, {
       tokenId,
+      assetContext: body.assetContext,
       executableFundsRaw: funds.executableFundsRaw,
       slippageBps: body.slippageBps ?? undefined,
       logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
@@ -4420,6 +4460,8 @@ export async function computePolymarketMaxSpendRoute(input: {
         orderType: "FOK",
         amountType: "usd",
         maxAmountUsd: Number(maxSpend.maxAmountUsdRaw) / 1_000_000,
+        funderAddress: funder,
+        ...(quote.assetContext ? { assetContext: quote.assetContext } : {}),
         maxAmountUsdRaw: maxSpend.maxAmountUsdRaw,
         totalRequiredUsdcRaw: quote.totalRequiredUsdcRaw ?? "0",
         totalFeeEstimateRaw: quote.totalFeeEstimateRaw,
@@ -4444,7 +4486,21 @@ export async function computePolymarketMaxSpendRoute(input: {
       },
     };
   } catch (error) {
+    if (error instanceof PolymarketAssetContextError) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: error.message, code: error.code },
+      };
+    }
     if (error instanceof PolymarketQuoteError) {
+      if (error.statusCode === 409 && body.assetContext) {
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: { error: error.publicMessage, code: error.reason },
+        };
+      }
       if (error.reason === "missing_top_of_book") {
         return {
           ok: true,
@@ -6295,6 +6351,7 @@ function readPolymarketSharesAmountRaw(intent: TradeIntent): bigint {
 }
 
 export const polymarketTradingExecutionTestHooks = {
+  emptyPolymarketFokFunds,
   resolveOrderExchangeAddress: resolvePolymarketOrderExchangeAddress,
   resolveReadinessAssetContext,
   resolveReadinessOutcome,
@@ -7214,6 +7271,8 @@ async function signPolymarketOrder(input: {
 }
 
 export async function submitPolymarketClientSignedOrder(input: {
+  onIdentified?: (orderHash: string, exchangeAddress: string) => Promise<void>;
+  onAccepted?: (orderId: string) => Promise<void>;
   /** Internal callers can durably claim the exact hash at the send boundary. */
   beforeSubmit?: (orderHash: string) => Promise<void>;
   onDefinitiveRejection?: () => Promise<void>;
@@ -7465,6 +7524,7 @@ export async function submitPolymarketClientSignedOrder(input: {
     orderDomainVersion: assetContext?.orderDomainVersion,
     order: normalizedForHash,
   });
+  await input.onIdentified?.(orderHash, exchangeAddress);
   if (directHandoffBinding && orderType !== "FOK") {
     return {
       ok: false,
@@ -8177,6 +8237,7 @@ export async function submitPolymarketClientSignedOrder(input: {
   const tokenId = extractTokenId(order);
   const statusRaw =
     extractPolymarketOrderStatus(upstream.payload) ?? "submitted";
+  await input.onAccepted?.(venueOrderId);
   const immediateFill = extractPolymarketImmediateFill({
     payload: upstream.payload,
     side,
@@ -8386,6 +8447,273 @@ export async function submitPolymarketClientSignedOrder(input: {
       payload: upstream.payload,
     },
   };
+}
+
+// Only the ordinary HTTP FOK path needs this journal. Funded, Copy, house
+// trader and sealed handoffs have their own execution fences.
+export async function submitPolymarketHttpOrder(
+  input: Parameters<typeof submitPolymarketClientSignedOrder>[0],
+  submit = submitPolymarketClientSignedOrder,
+): Promise<PolymarketClientSignedOrderResult> {
+  const { body, pool: db, signer, userId } = input;
+  if (
+    body.orderType !== "FOK" ||
+    body.fundingReservationId ||
+    body.sourceRef ||
+    body.telegramAppHandoffId
+  )
+    return submit(input);
+  let hash = "";
+  let claimed = false;
+  let rejected = false;
+  const side = normalizeOrderSide(body.order.side);
+  const normalized = side ? normalizeOrderForHash(body.order, side) : null;
+  const binding: DirectFokKey["binding"] =
+    normalized && side
+      ? {
+          maker: normalized.maker.toLowerCase(),
+          tokenId: normalized.tokenId,
+          side,
+          makerAmount: normalized.makerAmount,
+        }
+      : undefined;
+  // For clients which supplied the signing domain, even an early config or
+  // wallet validation failure can be correlated with the actual signed hash.
+  const suppliedDomain =
+    body.assetContext?.exchangeAddress ?? body.exchangeAddress;
+  if (normalized && suppliedDomain) {
+    try {
+      hash = computePolymarketOrderHashV2({
+        order: normalized,
+        exchangeAddress: suppliedDomain,
+        orderDomainVersion: body.assetContext?.orderDomainVersion,
+      });
+    } catch {
+      /* The original validator supplies the public invalid-order error. */
+    }
+  }
+  const key = (): DirectFokKey => ({
+    userId,
+    signer,
+    orderHash: hash,
+    binding,
+  });
+  const existing = new Error("direct FOK already recorded");
+  const readView = async () =>
+    directFokView(
+      hash,
+      (await readDirectFok(db, key())) ?? { state: "unknown", orderId: null },
+    );
+  const fromView = (
+    view: Awaited<ReturnType<typeof readView>>,
+  ): PolymarketClientSignedOrderResult => {
+    if ((view.state === "accepted" || view.state === "filled") && view.orderId)
+      return {
+        ok: true,
+        payload: {
+          ...view,
+          ok: true,
+          venue: "polymarket",
+          orderId: view.orderId,
+          status: view.state === "filled" ? "matched" : "submitted",
+          stored: "existing",
+          payload: null,
+        },
+      };
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: {
+        ...view,
+        code:
+          view.nextAction === "new_review"
+            ? "polymarket_previous_order_closed"
+            : "polymarket_submit_state_unknown",
+        error:
+          view.nextAction === "new_review"
+            ? "The previous attempt is closed. Review a new order."
+            : "Check the original order before placing another.",
+      },
+    };
+  };
+  const replay = async () => fromView(await readView());
+  try {
+    const result = await submit({
+      ...input,
+      onIdentified: async (identified, exchange) => {
+        hash = identified;
+        if (binding) binding.exchangeAddress = exchange;
+        if (await readDirectFok(db, key())) throw existing;
+      },
+      beforeSubmit: async () => {
+        claimed = await claimDirectFok(db, key(), "unknown");
+        if (!claimed) throw existing;
+      },
+      onDefinitiveRejection: async () => {
+        await advanceDirectFok(db, key(), { state: "no_fill", orderId: null });
+        rejected = true;
+      },
+      onAccepted: async (orderId) => {
+        if (orderId.toLowerCase() !== hash.toLowerCase())
+          throw new Error("unexpected Polymarket order ID");
+        await advanceDirectFok(db, key(), { state: "accepted", orderId });
+      },
+    });
+    if (!hash) return result;
+    if (!result.ok) {
+      if (!claimed) {
+        if (!(await claimDirectFok(db, key(), "not_submitted")))
+          return replay();
+      } else if (
+        !rejected &&
+        result.payload.code === POLYMARKET_TRADING_PAUSED_CODE &&
+        isSimplePolymarketPause(result.payload.payload)
+      ) {
+        await advanceDirectFok(db, key(), { state: "no_fill", orderId: null });
+        rejected = true;
+      } else if (!rejected) {
+        return replay();
+      }
+      const view = await readView();
+      if (view.state !== (claimed ? "no_fill" : "not_submitted"))
+        return fromView(view);
+      return {
+        ...result,
+        payload: { ...result.payload, ...view },
+      };
+    }
+    // A closed label alone does not say how much executed. An exact lookup
+    // distinguishes a closed order with missing size from a proven zero fill.
+    const state = result.payload.status === "matched" ? "filled" : "accepted";
+    if (state !== "accepted")
+      await advanceDirectFok(db, key(), {
+        state,
+        orderId: result.payload.orderId,
+      });
+    const view = await readView();
+    if (view.state !== state || view.orderId !== result.payload.orderId)
+      return fromView(view);
+    return {
+      ...result,
+      payload: {
+        ...result.payload,
+        ...view,
+        orderId: result.payload.orderId,
+      },
+    };
+  } catch (error) {
+    if (error === existing || claimed) return replay();
+    throw error;
+  }
+}
+
+function isSimplePolymarketPause(payload: unknown) {
+  // Do not discard an order ID, positive fill or duplicate/acceptance signal
+  // just because one of the provider's fields mentions a maintenance pause.
+  const message =
+    typeof payload === "string"
+      ? payload
+      : isRecord(payload) && Object.keys(payload).length === 1
+        ? (payload.error ?? payload.message)
+        : null;
+  return (
+    typeof message === "string" &&
+    isPolymarketTradingPausedResponse({ status: 503, message })
+  );
+}
+
+export async function getPolymarketDirectFokStatus(
+  db: DbQuery,
+  k: DirectFokKey,
+  readers = {
+    credentials: AuthService.getVenueCredentials.bind(AuthService),
+    venue: fetchPolymarketOrderByHash,
+    chain: fetchPolymarketOrderStatusV2,
+  },
+) {
+  const prior = await readDirectFok(db, k);
+  if (prior && prior.state !== "unknown" && prior.state !== "accepted")
+    return directFokView(k.orderHash, prior);
+  const orderId = prior?.orderId ?? k.orderHash;
+  const credentials = await readers.credentials(
+    k.userId,
+    "polymarket",
+    k.signer,
+  );
+  let result = prior ?? { state: "unknown" as const, orderId: null };
+  if (
+    credentials?.apiKey &&
+    credentials.apiSecret &&
+    credentials.apiPassphrase
+  ) {
+    const { apiKey, apiSecret, apiPassphrase } = credentials;
+    const upstream = await readers
+      .venue({
+        baseUrl: env.polymarketClobBase,
+        timeoutMs: 5000,
+        address: k.signer,
+        creds: { apiKey, apiSecret, apiPassphrase },
+        orderHash: orderId,
+      })
+      .catch(() => null);
+    if (upstream?.ok)
+      result = observeDirectFok(
+        prior,
+        upstream.order,
+        orderId,
+        prior?.binding?.maker ?? credentials.funderAddress ?? k.signer,
+      );
+  }
+  if (result.state === "filled" || prior?.binding?.exchangeAddress) {
+    // Match POST semantics: a venue match alone does not prove settlement.
+    // A legacy exact owned match may predate the journal; its exchange was
+    // not retained, so only check the known Polygon exchange deployments.
+    const { exchangeV2, negRiskExchangeV2, exchangeV3 } =
+      POLYMARKET_PROTOCOL_CONTRACTS;
+    const contracts = [exchangeV2, negRiskExchangeV2, exchangeV3].filter(
+      (addr) =>
+        !prior?.binding?.exchangeAddress ||
+        addr.toLowerCase() === prior.binding.exchangeAddress.toLowerCase(),
+    );
+    const confirmed = await Promise.all(
+      contracts.map(async (exchangeAddress) => {
+        const chain = await readers
+          .chain({
+            exchangeAddress,
+            orderHash: k.orderHash,
+            rpcUrl: env.polygonRpcUrl,
+            timeoutMs: env.polygonRpcTimeoutMs,
+          })
+          .catch(() => null);
+        if (!chain) return false;
+        if (result.state !== "filled")
+          return chain.filled && chain.remaining === 0n;
+        return prior?.binding?.makerAmount
+          ? summarizePolymarketV2OnchainOrderExecution({
+              ...chain,
+              makerAmount: BigInt(prior.binding.makerAmount),
+            }).hasExecution
+          : chain.filled && chain.remaining === 0n;
+      }),
+    );
+    if (confirmed.includes(true)) result = { state: "filled", orderId };
+    else if (result.state === "filled") result = { state: "accepted", orderId };
+  }
+  if (
+    result !== prior &&
+    result.state !== "unknown" &&
+    result.state !== prior?.state
+  ) {
+    // Remember affirmative venue evidence even for a legacy lookup. A late
+    // original HTTP POST then encounters this fence instead of dispatching.
+    if (!prior) await claimDirectFok(db, k, "unknown");
+    await advanceDirectFok(db, k, result);
+    result = (await readDirectFok(db, k)) ?? {
+      state: "unknown",
+      orderId: null,
+    };
+  }
+  return directFokView(k.orderHash, result);
 }
 
 async function resolveReadinessAssetContext(

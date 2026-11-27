@@ -3585,8 +3585,8 @@ const tests: TestCase[] = [
       );
       assert.doesNotMatch(polymarketBalanceSyncBlock, /polymarketL2Request/);
 
-      assert.match(polymarketRoute, /submitPolymarketClientSignedOrder/);
-      assert.match(polymarketOrderBlock, /submitPolymarketClientSignedOrder/);
+      assert.match(polymarketRoute, /submitPolymarketHttpOrder/);
+      assert.match(polymarketOrderBlock, /submitPolymarketHttpOrder/);
       assert.doesNotMatch(polymarketOrderBlock, /polymarketL2Request/);
       assert.doesNotMatch(polymarketOrderBlock, /storeOrder/);
 

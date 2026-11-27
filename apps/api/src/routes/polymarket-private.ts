@@ -10,6 +10,9 @@ import { pool } from "../db.js";
 import { getRedis } from "../redis.js";
 import {
   polymarketBalanceAllowanceSyncBodySchema,
+  polymarketDirectAttemptParams,
+  polymarketDirectAttemptAuthError,
+  polymarketDirectAttemptResponse,
   polymarketCancelOrderBodySchema,
   polymarketFunderDeriveBatchBodySchema,
   polymarketAccountQuerySchema,
@@ -47,7 +50,8 @@ import {
   prepareEmbeddedPolymarketOrderSignatureRoute,
   prepareEmbeddedPolymarketTypedDataSignatureRoute,
   quotePolymarketOrderRoute,
-  submitPolymarketClientSignedOrder,
+  submitPolymarketHttpOrder,
+  getPolymarketDirectFokStatus,
   syncPolymarketBalanceAllowanceRoute,
   syncPolymarketOrdersRoute,
 } from "../services/polymarket-trading-execution-service.js";
@@ -894,6 +898,33 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  z.get(
+    "/order-attempts/:orderHash",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: polymarketDirectAttemptParams,
+        response: {
+          200: polymarketDirectAttemptResponse,
+          401: polymarketDirectAttemptAuthError,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer)
+        return reply.code(401).send({ error: "Unauthorized" });
+      reply.header("Cache-Control", "private, no-store");
+      const status = await getPolymarketDirectFokStatus(pool, {
+        userId: user.id,
+        signer,
+        orderHash: request.params.orderHash.toLowerCase(),
+      });
+      return reply.send({ ok: true, ...status });
+    },
+  );
+
   /**
    * POST /order
    * Place a signed Polymarket order using stored L2 credentials.
@@ -930,7 +961,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       // Global exception logging also uses the redacted request logger.
       request.log = log;
       log.info("Polymarket order submission requested");
-      const result = await submitPolymarketClientSignedOrder({
+      const result = await submitPolymarketHttpOrder({
         assertTelegramAppHandoffV2Scope: async (sealed) => {
           return matchesTelegramAppHandoffV2CurrentScope({
             db: sealed.db,

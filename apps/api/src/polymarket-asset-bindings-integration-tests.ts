@@ -20,6 +20,7 @@ import {
 } from "./services/polymarket-asset-context.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { polymarketTradingExecutionTestHooks as executionHooks } from "./services/polymarket-trading-execution-service.js";
+import { polymarketMaxSpendBodySchema } from "./schemas/polymarket-private.js";
 
 const db = await createIntegrationTestPool({
   max: 4,
@@ -254,6 +255,34 @@ try {
     tokenId: firstId,
   });
   assert.equal(collisionInfo?.neg_risk, false);
+  const frozen = polymarketMaxSpendBodySchema.parse({
+    tokenId: firstId,
+    side: "BUY",
+    assetContext: oldContext,
+  }).assetContext;
+  assert.ok(frozen);
+  const maker = "0x0000000000000000000000000000000000000012";
+  const zero = await executionHooks.emptyPolymarketFokFunds(
+    db,
+    firstId,
+    maker,
+    frozen,
+  );
+  assert.equal(zero.reason, "no_executable_funds");
+  assert.equal(zero.funderAddress, maker);
+  assert.equal(
+    zero.assetContext?.protocolVersion,
+    "v1",
+    "zero is for the original CTF ledger, not the colliding V2 token",
+  );
+  await assert.rejects(
+    () =>
+      executionHooks.emptyPolymarketFokFunds(db, firstId, maker, {
+        ...frozen,
+        marketId: "polymarket:other",
+      }),
+    /context changed/,
+  );
   assert.equal(
     await executionHooks.resolveOrderExchangeAddress(
       { tokenId: firstId, orderPayload: { tokenId: firstId } },
