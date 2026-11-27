@@ -173,6 +173,11 @@ export const limitlessOrderIdParamsSchema = z.object({
   orderId: zRequiredString("orderId is required"),
 });
 
+export const limitlessFundedRecoveryParamsSchema = z.object({
+  reservationId: z.string().uuid(),
+  orderStructHash: z.string().regex(/^0x[0-9a-f]{64}$/i),
+});
+
 export const limitlessOpenOrdersQuerySchema = z.object({
   slug: zLimitlessSlug,
 });

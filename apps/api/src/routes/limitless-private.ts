@@ -7,7 +7,10 @@ import { getRedis } from "../redis.js";
 import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 import { readLimitlessDirectOrderJournal } from "../repos/orders-repo.js";
-import { readLimitlessFundedOrderStatus } from "../funding/persistence/funding-trade-attempt-repository.js";
+import {
+  findLimitlessFundedRecoveryId,
+  readLimitlessFundedOrderStatus,
+} from "../funding/persistence/funding-trade-attempt-repository.js";
 import {
   isLimitlessPartnerHmacConfigured,
   type LimitlessRequestAuthInputs,
@@ -85,6 +88,7 @@ import {
   limitlessEmbeddedEnsureReadyExecuteBodySchema,
   limitlessEmbeddedSignOrderExecuteBodySchema,
   limitlessEmbeddedSignOrderPrepareBodySchema,
+  limitlessFundedRecoveryParamsSchema,
   limitlessHistoryQuerySchema,
   limitlessMarketExchangeErrorSchema,
   limitlessMarketExchangeQuerySchema,
@@ -1455,6 +1459,29 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(result.payload);
+    },
+  );
+
+  z.get(
+    "/orders/funded-recovery/:reservationId/:orderStructHash",
+    {
+      preHandler: createAuthMiddleware({ touchSession: false }),
+      schema: { params: limitlessFundedRecoveryParamsSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer)
+        return reply.code(401).send({ error: "Unauthorized" });
+      const recoveryId = await findLimitlessFundedRecoveryId(pool, {
+        userId: user.id,
+        signer,
+        ...request.params,
+      });
+      return reply.header("Cache-Control", "private, no-store").send({
+        ok: true,
+        recoveryId,
+      });
     },
   );
 

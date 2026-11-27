@@ -177,6 +177,18 @@ digest, signature, JSON hash, or a new salt.
 Copy and funded attempts must follow their original Copy/funding IDs, not
 be converted into a direct order.
 
+For a funded COLLATERAL FOK, keep the original funding reservation ID and
+the full **EIP-712 CLOB Order struct hash** (with `0x`, excluding the domain)
+before submission. A recoverable HTTP 409 includes
+`recoveryId: "hunch-funded-<attemptId>"`; keep the existing Copy key too
+when the order is a Copy. If the whole response was lost, use
+`GET /trade/limitless/orders/funded-recovery/{reservationId}/{orderStructHash}`
+with the original wallet. It returns `{ ok: true, recoveryId }` or a null
+ID if an exact attempt is not observable. Null is not proof of no send.
+With a recovered ID, poll the existing order-status GET. Neither GET
+can send an order. This lookup applies to frozen COLLATERAL FOK attempts,
+not legacy fee-mode orders.
+
 ## iOS: redeem payout seen vs finalized
 
 After reporting the wallet submission, follow the original operation with

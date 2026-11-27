@@ -12,7 +12,10 @@ import {
   lockLimitlessFokScope,
   readOtherPendingLimitlessFok,
 } from "../../repos/limitless-fok-submit-fence.js";
-import type { RetainedLimitlessClobSubmission } from "../../services/limitless-clob-evidence-identity.js";
+import {
+  limitlessClobOrderStructHash,
+  type RetainedLimitlessClobSubmission,
+} from "../../services/limitless-clob-evidence-identity.js";
 import { legacyEvidencePollingPausedSql } from "../legacy/evidence-polling-control.js";
 import {
   deriveFundingLifecycle,
@@ -473,6 +476,40 @@ export async function readLimitlessFundedCopyTerminalStatus(
   )
     return "failed";
   return null;
+}
+
+/** Find the durable dispatch fence by the original signed fields, regardless
+ * of changes to the exchange domain metadata. */
+export async function findLimitlessFundedRecoveryId(
+  db: Pick<Pool, "query">,
+  input: {
+    userId: string;
+    signer: string;
+    reservationId: string;
+    orderStructHash: string;
+  },
+): Promise<string | null> {
+  const { rows } = await db.query<{ id: string; signed_fields: unknown }>(
+    `select attempt_row.id, evidence_row.saved #> '{submission,order}' as signed_fields
+       from funding_trade_attempts attempt_row
+       join funding_operations operation_row
+         on operation_row.id=attempt_row.operation_id and operation_row.user_id=attempt_row.user_id
+       cross join lateral (select operation_row.support_metadata
+         -> concat('limitlessClobSubmissionV1:',attempt_row.id) as saved) evidence_row
+       where attempt_row.reservation_id=$1 and attempt_row.user_id=$2
+         and attempt_row.venue_id='limitless'
+         and attempt_row.execution_path='limitless_clob'
+         and attempt_row.broadcast_may_have_occurred
+         and lower(evidence_row.saved #>> '{submission,order,signer}')=lower($3::text)`,
+    [input.reservationId, input.userId, input.signer],
+  );
+  const matches = rows.filter(
+    (row) =>
+      isRecord(row.signed_fields) &&
+      limitlessClobOrderStructHash(row.signed_fields) ===
+        input.orderStructHash.toLowerCase(),
+  );
+  return matches.length === 1 ? `hunch-funded-${matches[0]!.id}` : null;
 }
 
 /** Status-only view of the exact attempt even after acceptance replaces its

@@ -100,24 +100,30 @@ function orderHash(exchangeAddress: string, order: Record<string, unknown>) {
     order,
   );
 }
-export function directLimitlessClobClientOrderId(
+export function limitlessClobOrderStructHash(
   order: Record<string, unknown>,
 ): string | null {
   try {
     // Domain-free so the exact submitted order remains findable even if
     // today's market metadata changed. EIP-712 ignores unsigned extras and
     // normalizes equivalent uint/address encodings.
-    const structHash = TypedDataEncoder.hashStruct(
+    return TypedDataEncoder.hashStruct(
       "Order",
       {
         Order: LIMITLESS_CLOB_ORDER_TYPES.Order.map((field) => ({ ...field })),
       },
       order,
     );
-    return `hunch-direct-${structHash.slice(2, 34)}`;
   } catch {
     return null;
   }
+}
+
+export function directLimitlessClobClientOrderId(
+  order: Record<string, unknown>,
+): string | null {
+  const structHash = limitlessClobOrderStructHash(order);
+  return structHash ? `hunch-direct-${structHash.slice(2, 34)}` : null;
 }
 
 /** Call only with the server-resolved exchange actually used to sign this order. */
