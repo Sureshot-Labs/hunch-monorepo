@@ -130,7 +130,12 @@ export async function inspectEmbeddedPreparationAdmission(
       "invalid_state_transition",
       "Preparation needs status recovery, not another send",
     );
-  return { scope, acceptedReference };
+  return {
+    scope,
+    acceptedReference,
+    sellMarketId:
+      run.request.purpose === "sell" ? run.request.marketContextId : null,
+  };
 }
 
 export async function beginPreparationProviderDispatch(

@@ -2708,7 +2708,23 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
+        const preparationAdmission = await inspectEmbeddedPreparationAdmission(
+          pool,
+          user.id,
+          request.body.executionKey,
+          {
+            kind: "ethereum",
+            signer: context.signer,
+            ...request.body,
+          },
+        );
+        if (preparationAdmission?.acceptedReference)
+          throw new FundingPersistenceError(
+            "invalid_state_transition",
+            "This preparation is already submitted; read its status instead of signing again",
+          );
         const sponsorship = await assertEmbeddedEvmSponsorshipAllowed({
+          admittedSellMarketId: preparationAdmission?.sellMarketId,
           userId: user.id,
           signer: context.signer,
           chainId: request.body.chainId,
@@ -2727,21 +2743,6 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             "Prepared previous-frontend sponsored withdrawal",
           );
         }
-        const preparationAdmission = await inspectEmbeddedPreparationAdmission(
-          pool,
-          user.id,
-          request.body.executionKey,
-          {
-            kind: "ethereum",
-            signer: context.signer,
-            ...request.body,
-          },
-        );
-        if (preparationAdmission?.acceptedReference)
-          throw new FundingPersistenceError(
-            "invalid_state_transition",
-            "This preparation is already submitted; read its status instead of signing again",
-          );
         const requests = prepareEmbeddedEthereumTransactionRequests({
           context,
           chainId: request.body.chainId,
@@ -2827,7 +2828,28 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               embeddedEvmResult(context.signer, request.body.chainId, prior),
             );
         }
+        const preparationSubmission = request.body.fundingContext
+          ? null
+          : await inspectEmbeddedPreparationAdmission(
+              pool,
+              user.id,
+              request.body.executionKey,
+              {
+                kind: "ethereum",
+                signer: context.signer,
+                ...request.body,
+              },
+            );
+        if (preparationSubmission?.acceptedReference)
+          return reply.send(
+            embeddedEvmResult(
+              context.signer,
+              request.body.chainId,
+              preparationSubmission.acceptedReference,
+            ),
+          );
         const sponsorship = await assertEmbeddedEvmSponsorshipAllowed({
+          admittedSellMarketId: preparationSubmission?.sellMarketId,
           userId: user.id,
           signer: context.signer,
           chainId: request.body.chainId,
@@ -2892,24 +2914,6 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             embeddedEvmResult(context.signer, request.body.chainId, reference),
           );
         }
-        const preparationSubmission = await inspectEmbeddedPreparationAdmission(
-          pool,
-          user.id,
-          request.body.executionKey,
-          {
-            kind: "ethereum",
-            signer: context.signer,
-            ...request.body,
-          },
-        );
-        if (preparationSubmission?.acceptedReference)
-          return reply.send(
-            embeddedEvmResult(
-              context.signer,
-              request.body.chainId,
-              preparationSubmission.acceptedReference,
-            ),
-          );
         const positionSubmission = await admitEmbeddedPositionSubmission(
           pool,
           user.id,

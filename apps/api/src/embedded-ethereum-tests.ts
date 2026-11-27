@@ -872,6 +872,61 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "admitted Limitless SELL checks only its market for a conditional-token approval",
+    run: async () => {
+      const marketId = "limitless:475188";
+      const adapter = "0x3333333333333333333333333333333333333333";
+      const otherAdapter = "0x4444444444444444444444444444444444444444";
+      const globalLookup = async () => {
+        throw new Error("must not scan other Limitless markets");
+      };
+      const calls: string[][] = [];
+      const approval = new ethers.Interface([
+        "function setApprovalForAll(address operator,bool approved)",
+      ]);
+      const check = (operator: string, approved = true) =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          admittedSellMarketId: marketId,
+          chainId: 8453,
+          userId: TEST_USER_ID,
+          signer: walletContext.signer,
+          transactions: [
+            {
+              id: "approval",
+              label: "Approve adapter",
+              to: env.limitlessConditionalTokensAddress,
+              data: approval.encodeFunctionData("setApprovalForAll", [
+                operator,
+                approved,
+              ]),
+            },
+          ],
+          dependencies: {
+            ...denyDynamicDependencies,
+            isKnownLimitlessMarket: globalLookup,
+            isKnownLimitlessNegRiskAdapter: globalLookup,
+            isLimitlessApprovalOperatorForMarket: async (id, candidate) => {
+              calls.push([id, candidate]);
+              return id === marketId && candidate === adapter;
+            },
+          },
+        });
+      await assert.doesNotReject(() => check(adapter));
+      await assert.rejects(
+        () => check(otherAdapter),
+        /not an allowed Hunch operation/,
+      );
+      await assert.rejects(
+        () => check(adapter, false),
+        /not an allowed Hunch operation/,
+      );
+      assert.deepEqual(calls, [
+        [marketId, adapter],
+        [marketId, otherAdapter],
+      ]);
+    },
+  },
+  {
     name: "Limitless neg-risk redemption requires the exact adapter and condition",
     run: async () => {
       const adapter = "0x3333333333333333333333333333333333333333";

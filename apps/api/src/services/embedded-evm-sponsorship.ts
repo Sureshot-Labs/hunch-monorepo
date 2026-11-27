@@ -8,10 +8,15 @@ import { env } from "../env.js";
 import { deriveFundingLifecycleBeforeActionBroadcast } from "../funding/lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
+import { readLimitlessAmmMarketAddress } from "./limitless-amm-address.js";
 import {
   fetchLimitlessClobMarket,
   marketLimitlessFeePolicy,
 } from "./limitless-clob-fee-runtime.js";
+import {
+  extractLimitlessMarketExchangeAddress,
+  resolveLimitlessMarketAdapter,
+} from "./limitless-market-contracts.js";
 import {
   isPolymarketV2ApprovalCall,
   isPolymarketV2RedemptionCall,
@@ -64,6 +69,10 @@ type SponsoredTransaction = Readonly<{
 export type EmbeddedEvmSponsorshipDependencies = Readonly<{
   isAuthorizedDestination: (address: string) => Promise<boolean>;
   isKnownLimitlessMarket: (address: string) => Promise<boolean>;
+  isLimitlessApprovalOperatorForMarket?: (
+    marketId: string,
+    address: string,
+  ) => Promise<boolean>;
   isLimitlessFeeModuleForMarket?: (
     slug: string,
     address: string,
@@ -296,6 +305,7 @@ async function validateErc20Call(input: {
 async function validateApprovalForAll(input: {
   chainId: number;
   dependencies: EmbeddedEvmSponsorshipDependencies;
+  admittedSellMarketId?: string | null;
   transaction: EmbeddedEthereumTransactionSpec;
 }): Promise<boolean> {
   const decoded = parsedTransaction(erc1155Interface, input.transaction);
@@ -321,12 +331,18 @@ async function validateApprovalForAll(input: {
     input.chainId === BASE_CHAIN_ID &&
     addressesEqual(target, env.limitlessConditionalTokensAddress)
   ) {
+    if (limitlessOperators().has(operator.toLowerCase())) return true;
+    if (input.admittedSellMarketId) {
+      return (
+        (await input.dependencies.isLimitlessApprovalOperatorForMarket?.(
+          input.admittedSellMarketId,
+          operator,
+        )) === true
+      );
+    }
     return (
-      (await isAllowedOperator({
-        address: operator,
-        staticOperators: limitlessOperators(),
-        dependencies: input.dependencies,
-      })) || (await input.dependencies.isKnownLimitlessNegRiskAdapter(operator))
+      (await input.dependencies.isKnownLimitlessMarket(operator)) ||
+      (await input.dependencies.isKnownLimitlessNegRiskAdapter(operator))
     );
   }
   return false;
@@ -870,12 +886,7 @@ async function isKnownLimitlessMarket(
        and event_row.venue = 'limitless'
       where market_row.venue = 'limitless'
         and (
-          lower(
-            coalesce(
-              nullif(btrim(market_row.metadata->>'address'), ''),
-              nullif(btrim(market_row.metadata->>'marketAddress'), '')
-            )
-          ) = lower($1)
+          lower(${LIMITLESS_MARKET_ADDRESS_SQL}) = lower($1)
           or lower(${LIMITLESS_EFFECTIVE_VENUE_EXCHANGE_SQL}) = lower($1)
         )
       limit 1
@@ -884,6 +895,11 @@ async function isKnownLimitlessMarket(
   );
   return Boolean(rowCount);
 }
+
+const LIMITLESS_MARKET_ADDRESS_SQL = `coalesce(
+  nullif(btrim(market_row.metadata->>'address'), ''),
+  nullif(btrim(market_row.metadata->>'marketAddress'), '')
+)`;
 
 /**
  * The market's execution exchange is an approved Limitless operator just as
@@ -911,6 +927,52 @@ const LIMITLESS_EFFECTIVE_VENUE_ADAPTER_SQL = `coalesce(
   nullif(btrim(market_row.metadata->>'venueAdapter'), ''),
   nullif(btrim(event_row.metadata->>'venueAdapter'), '')
 )`;
+
+async function isLimitlessApprovalOperatorForMarket(
+  db: SponsorshipDb,
+  marketId: string,
+  address: string,
+): Promise<boolean> {
+  const operator = normalizedAddress(address);
+  if (!operator) return false;
+  // The admitted sell already has a canonical market ID. Check that row and
+  // its event, not every Limitless market's JSON before checking the adapter.
+  // SELL can be prepared from indexed outcome tokens without a condition ID.
+  const { rows } = await db.query<{
+    market_metadata: unknown;
+    indexed_operator: boolean | null;
+  }>(
+    `
+      select market_row.metadata as market_metadata,
+        (
+          lower(${LIMITLESS_MARKET_ADDRESS_SQL}) = $2
+          or lower(${LIMITLESS_EFFECTIVE_VENUE_EXCHANGE_SQL}) = $2
+          or (
+            event_row.id is not null
+            and lower(${LIMITLESS_EFFECTIVE_VENUE_ADAPTER_SQL}) = $2
+          )
+        ) as indexed_operator
+      from unified_markets market_row
+      left join unified_events event_row
+        on event_row.id = market_row.event_id
+       and event_row.venue = 'limitless'
+      where market_row.id = $1
+        and market_row.venue = 'limitless'
+    `,
+    [marketId, operator.toLowerCase()],
+  );
+  const market = rows[0];
+  if (!market) return false;
+  if (market.indexed_operator) return true;
+  // Match the preparation runtime's accepted local aliases, including older
+  // payloads that were not projected to the scalar venue fields.
+  const metadata = market.market_metadata;
+  return (
+    addressesEqual(resolveLimitlessMarketAdapter(metadata).address, operator) ||
+    addressesEqual(extractLimitlessMarketExchangeAddress(metadata), operator) ||
+    addressesEqual(readLimitlessAmmMarketAddress(metadata), operator)
+  );
+}
 
 async function isKnownLimitlessNegRiskAdapter(
   db: SponsorshipDb,
@@ -1022,6 +1084,8 @@ function defaultDependencies(
     isAuthorizedDestination: (address) =>
       isAuthorizedDestination(userId, address),
     isKnownLimitlessMarket: (address) => isKnownLimitlessMarket(db, address),
+    isLimitlessApprovalOperatorForMarket: (marketId, address) =>
+      isLimitlessApprovalOperatorForMarket(db, marketId, address),
     isLimitlessFeeModuleForMarket: async (slug, address) => {
       try {
         const policy = marketLimitlessFeePolicy(
@@ -1077,6 +1141,8 @@ export function buildEmbeddedEvmTransactionFingerprint(input: {
 }
 
 export async function assertEmbeddedEvmSponsorshipAllowed(input: {
+  /** From a validated, owned preparation admission, never the wallet request. */
+  admittedSellMarketId?: string | null;
   chainId: number;
   dependencies?: EmbeddedEvmSponsorshipDependencies;
   executionMode?: "sequential" | "atomic";
@@ -1136,6 +1202,7 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
       (await validateApprovalForAll({
         chainId: input.chainId,
         dependencies,
+        admittedSellMarketId: input.admittedSellMarketId,
         transaction,
       })) ||
       (input.chainId === POLYGON_CHAIN_ID &&
@@ -1168,6 +1235,7 @@ export const embeddedEvmSponsorshipTestHooks = {
   fundingActionSignerMatches,
   fundingActionMatchesTransaction,
   isKnownLimitlessMarket,
+  isLimitlessApprovalOperatorForMarket,
   matchesFundingAction,
   matchesPositionAction,
   isKnownLimitlessNegRiskAdapter,
