@@ -793,8 +793,11 @@ export async function reportFundingPreparationAction(
     }
     if (grant?.phase === "not_started") {
       if (
-        action.report?.outcome === input.report.outcome &&
-        action.transactionReference === input.report.transactionReference
+        (action.report?.outcome === input.report.outcome &&
+          action.transactionReference === input.report.transactionReference) ||
+        (action.report?.serverDispatchNotStarted === true &&
+          input.report.outcome === "ambiguous" &&
+          input.report.transactionReference === null)
       )
         return mapRun(client, run, true, true);
       throw new FundingPersistenceError(
@@ -802,25 +805,50 @@ export async function reportFundingPreparationAction(
         "This admission was explicitly closed without execution",
       );
     }
+    // Both reporting and embedded execution take this exact run/action lock.
+    // Closing a still-reserved grant fences even an execute already en route.
+    const serverDispatchNotStarted =
+      grant?.delivery === "embedded" &&
+      grant.phase === "reserved" &&
+      input.report.outcome === "ambiguous" &&
+      input.report.transactionReference === null;
+    const report: FundingPreparationActionReport = serverDispatchNotStarted
+      ? {
+          ...input.report,
+          outcome: "cancelled",
+          notStartedReason: "wallet_not_invoked",
+        }
+      : input.report;
     const negative =
-      input.report.outcome === "failed" || input.report.outcome === "cancelled";
+      report.outcome === "failed" || report.outcome === "cancelled";
+    if (
+      grant?.delivery === "embedded" &&
+      grant.phase === "reserved" &&
+      !negative
+    ) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Embedded preparation has not started server dispatch",
+      );
+    }
     if (
       grant &&
       negative &&
       (((grant.delivery === "embedded" || grant.phase === "reported") &&
         action.broadcastMayHaveOccurred &&
         !internal) ||
-        !input.report.notStartedReason)
+        !report.notStartedReason)
     ) {
       // A client timeout or generic failure cannot undo a server dispatch.
       return mapRun(client, run, true, true);
     }
     const reportSnapshot: JsonRecord = {
-      outcome: input.report.outcome,
-      transactionReference: input.report.transactionReference,
-      networkFeeRaw: input.report.networkFeeRaw,
-      ...(input.report.notStartedReason
-        ? { notStartedReason: input.report.notStartedReason }
+      outcome: report.outcome,
+      transactionReference: report.transactionReference,
+      networkFeeRaw: report.networkFeeRaw,
+      ...(serverDispatchNotStarted ? { serverDispatchNotStarted: true } : {}),
+      ...(report.notStartedReason
+        ? { notStartedReason: report.notStartedReason }
         : {}),
     };
     const pendingAdmission = Boolean(
@@ -828,8 +856,7 @@ export async function reportFundingPreparationAction(
       (action.report?.admissionPending === true ||
         (action.state === "ambiguous" &&
           action.transactionReference === null &&
-          ((internal && negative) ||
-            input.report.transactionReference !== null))) &&
+          ((internal && negative) || report.transactionReference !== null))) &&
       ["started", "reported"].includes(grant.phase),
     );
     if (action.report) {
@@ -839,14 +866,14 @@ export async function reportFundingPreparationAction(
       if (
         grant &&
         action.transactionReference &&
-        input.report.transactionReference === null &&
-        input.report.outcome === "ambiguous"
+        report.transactionReference === null &&
+        report.outcome === "ambiguous"
       )
         return mapRun(client, run, true, true);
       const sameAcceptedReference = Boolean(
         grant &&
-        action.report.outcome === input.report.outcome &&
-        action.transactionReference === input.report.transactionReference,
+        action.report.outcome === report.outcome &&
+        action.transactionReference === report.transactionReference,
       );
       if (
         !pendingAdmission &&
@@ -866,7 +893,7 @@ export async function reportFundingPreparationAction(
         "funding preparation action is not awaiting a report",
       );
     }
-    const state = actionStateForReport(input.report);
+    const state = actionStateForReport(report);
     const broadcastMayHaveOccurred =
       state === "submitted" || state === "ambiguous";
     const now = input.now ?? new Date();
@@ -890,19 +917,28 @@ export async function reportFundingPreparationAction(
         action.state,
         state,
         broadcastMayHaveOccurred,
-        input.report.transactionReference,
+        report.transactionReference,
         reportSnapshot,
         now,
       ],
     );
+    // Close the exact grant without letting a late report reopen an expired
+    // run or make a sibling grant eligible for dispatch again.
+    const preserveExpiry =
+      run.status === "expired" &&
+      grant?.delivery === "embedded" &&
+      grant.phase === "reserved";
     const updatedActions = await loadActions(client, run.id, true);
-    const status = runStatusForActions(updatedActions);
-    const resolvedAt =
-      status === "failed" &&
-      updatedActions.some(
-        (attempt) =>
-          attempt.state === "failed" && attempt.broadcastMayHaveOccurred,
-      )
+    const status = preserveExpiry
+      ? run.status
+      : runStatusForActions(updatedActions);
+    const resolvedAt = preserveExpiry
+      ? run.resolved_at
+      : status === "failed" &&
+          updatedActions.some(
+            (attempt) =>
+              attempt.state === "failed" && attempt.broadcastMayHaveOccurred,
+          )
         ? now
         : null;
     const updatedRun = await client.query<RunRow>(

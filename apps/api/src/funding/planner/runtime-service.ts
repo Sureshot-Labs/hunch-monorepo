@@ -635,8 +635,7 @@ export class FundingPlanningRuntime {
   private async reconcilePendingPreparationRun(
     run: FundingPreparationRun,
   ): Promise<FundingPreparationRun> {
-    // Nothing to look up on a passive read. The explicit reconcile endpoint
-    // and late provider-reference reporting remain available.
+    // Nothing to look up. Late provider-reference reporting remains available.
     if (needsManualSellApprovalRecovery(run)) return run;
     if (
       run.status !== "submitted" &&
@@ -675,6 +674,9 @@ export class FundingPlanningRuntime {
   private async reconcilePreparationRunSnapshot(
     run: FundingPreparationRun,
   ): Promise<FundingPreparationRun> {
+    // An expired, reference-less SELL approval already asks the client to
+    // stop polling. Explicit reconcile must honor the same read-only response.
+    if (needsManualSellApprovalRecovery(run)) return run;
     // Another process may have resolved this run while this API instance
     // still holds pre-approval readiness. Refresh locally without re-reading
     // receipts, changing the terminal journal, or submitting another action.

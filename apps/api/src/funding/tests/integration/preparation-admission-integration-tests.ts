@@ -529,6 +529,106 @@ try {
     assert.deepEqual((await read(run)).actions, run.actions);
   });
 
+  await test("embedded timeout before dispatch cannot permanently lock a preparation", async () => {
+    const { scope, run, key, parsed } = await embeddedFixture();
+    const actionId = first(run).actionId;
+    const report = (transactionReference: string | null) =>
+      reportFundingPreparationAction(db, {
+        userId,
+        runId: run.runId,
+        actionId,
+        report: {
+          outcome: transactionReference ? "submitted" : "ambiguous",
+          transactionReference,
+          networkFeeRaw: null,
+          admissionKey: key,
+        },
+      });
+    await assert.rejects(report(hash), /has not started server dispatch/);
+    const timedOut = await report(null);
+    assert.equal(timedOut.status, "cancelled");
+    assert.equal(first(timedOut).broadcastMayHaveOccurred, false);
+    assert.equal(first(timedOut).transactionReference, null);
+    assert.equal(
+      timedOut.request.executionJournal?.admissions[actionId]?.phase,
+      "not_started",
+    );
+    assert.equal((await report(null)).replayed, true);
+    const next = await prepare(scope);
+    assert.notEqual(next.runId, run.runId);
+    await assert.rejects(
+      beginPreparationProviderDispatch(db, userId, parsed, payload()),
+      /status recovery/,
+    );
+    assert.equal(first(await read(run)).broadcastMayHaveOccurred, false);
+  });
+
+  await test("late timeout cannot reopen a retired run or dispatch its reserved sibling", async () => {
+    const scope = request();
+    const run = await prepare(scope, 1, future(), async (runId) => ({
+      controllerWalletRef: controllerId,
+      actions: [
+        action(runId),
+        action(`${runId}_second`),
+        action(`${runId}_third`),
+      ],
+    }));
+    const granted = [];
+    for (const attempt of run.actions) {
+      const requestKey = randomUUID();
+      const grant = await admitFundingPreparationAction(db, {
+        userId,
+        runId: run.runId,
+        actionId: attempt.actionId,
+        requestKey,
+        inspectionRevision: run.inspectionRevision,
+        controllerWalletRef: controllerId,
+        executionMode: "privy_authorization",
+        signer,
+      });
+      assert.ok(grant.executionKey);
+      granted.push({ attempt, requestKey, executionKey: grant.executionKey });
+    }
+    const [late, sibling, stopped] = granted;
+    assert.ok(late && sibling && stopped);
+    const report = (saved: typeof late, outcome: "cancelled" | "ambiguous") =>
+      reportFundingPreparationAction(db, {
+        userId,
+        runId: run.runId,
+        actionId: saved.attempt.actionId,
+        report: {
+          outcome,
+          transactionReference: null,
+          networkFeeRaw: null,
+          admissionKey: saved.requestKey,
+          ...(outcome === "cancelled"
+            ? { notStartedReason: "wallet_not_invoked" as const }
+            : {}),
+        },
+      });
+    await report(stopped, "cancelled");
+    const next = await prepare(scope);
+    assert.notEqual(next.runId, run.runId);
+    assert.ok(run.expiresAt > new Date());
+    const retired = await read(run);
+    const lateReport = await report(late, "ambiguous");
+    assert.equal(lateReport.status, "expired");
+    assert.deepEqual(lateReport.resolvedAt, retired.resolvedAt);
+    assert.equal(
+      lateReport.request.executionJournal?.admissions[late.attempt.actionId]
+        ?.phase,
+      "not_started",
+    );
+    assert.equal((await report(late, "ambiguous")).replayed, true);
+    const parsed = parsePreparationExecutionKey(sibling.executionKey);
+    assert.ok(parsed);
+    await assert.rejects(
+      beginPreparationProviderDispatch(db, userId, parsed, payload()),
+      /status recovery/,
+    );
+    assert.equal((await read(run)).status, "expired");
+  });
+
   await test("two real dispatch paths call the mocked provider once, beyond Redis/idempotency windows", async () => {
     const { run, grant, parsed } = await embeddedFixture();
     let providerCalls = 0;
