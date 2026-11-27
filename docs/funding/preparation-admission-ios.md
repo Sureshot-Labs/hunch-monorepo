@@ -113,6 +113,14 @@ A reserved action that never reached server dispatch may expire and be replaced;
 the old execution key then cannot dispatch. Provider idempotency or Redis cache
 retention is not relied upon for this guarantee.
 
+For embedded delivery, an `ambiguous` report without a reference also closes
+an admission as `cancelled` if it is still reserved when the report acquires
+the server lock. The old action has `broadcastMayHaveOccurred: false`; its
+execution key is closed. Inspect/prepare can create a fresh run with its
+own admission through the normal flow; do not retry the old execution
+request. If server dispatch won the race, the same report stays pending
+and cannot unlock or resend the action.
+
 ### Client/direct wallet execution
 
 Admission immediately records that execution may occur before exposing the

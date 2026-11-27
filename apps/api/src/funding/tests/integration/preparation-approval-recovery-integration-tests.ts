@@ -435,9 +435,13 @@ try {
   const stalled = await read(originalSell);
   assert.equal(needsManualSellApprovalRecovery(stalled), true);
   assert.equal(
+    (await runtime.reconcilePreparationRun(userId, originalSell.runId))?.status,
+    "ambiguous",
+  );
+  assert.equal(
     inspections,
     beforePassive,
-    "no passive RPC refresh for missing receipt reference",
+    "neither passive read nor explicit polling refreshes missing receipt evidence",
   );
   assert.equal(
     (await admitFundingPreparationAction(db, admission)).admitted,
