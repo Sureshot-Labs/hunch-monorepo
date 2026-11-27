@@ -442,6 +442,39 @@ function limitlessSubmissionKey(attemptId: string): string {
   return `limitlessClobSubmissionV1:${attemptId}`;
 }
 
+/** A Copy can surface the funding worker's terminal observation without
+ * independently polling the venue. The retained economic identity must match. */
+export async function readLimitlessFundedCopyTerminalStatus(
+  db: Pick<Pool, "query">,
+  input: { userId: string; clientOrderId: string; orderHash: string },
+): Promise<"no_fill" | "failed" | null> {
+  const { rows } = await db.query<{ error_code: string | null }>(
+    `select attempt_row.error_code from funding_trade_attempts attempt_row
+      join funding_operations operation_row on operation_row.id=attempt_row.operation_id
+        and operation_row.user_id=attempt_row.user_id
+      cross join lateral (select operation_row.support_metadata
+        -> concat('limitlessClobSubmissionV1:',attempt_row.id) as saved) evidence_row
+      where attempt_row.venue_id='limitless' and attempt_row.external_reference=$2
+        and attempt_row.user_id=$1 and attempt_row.execution_path='limitless_clob'
+        and attempt_row.state='definitive_failure' and attempt_row.broadcast_may_have_occurred
+        and evidence_row.saved->>'clientOrderId'=$2
+        and evidence_row.saved #>> '{submission,context,orderHash}'=$3
+        and (evidence_row.saved #> '{submission,context}') ? 'collateralFeeModule'
+      limit 1`,
+    [input.userId, input.clientOrderId, input.orderHash],
+  );
+  const code = rows[0]?.error_code;
+  if (code === "trade_no_fill") return "no_fill";
+  if (
+    code &&
+    /^limitless_exact_status_(?:not_found|rejected|failed|cancelled|canceled|expired)$/u.test(
+      code,
+    )
+  )
+    return "failed";
+  return null;
+}
+
 /** Status-only view of the exact attempt even after acceptance replaces its
  * external reference with the venue order ID. Never expose the frozen order. */
 export async function readLimitlessFundedOrderStatus(

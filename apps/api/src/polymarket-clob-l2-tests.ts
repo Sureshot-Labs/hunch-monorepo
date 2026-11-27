@@ -7,6 +7,7 @@ import {
   extractSingleOrder,
   normalizeOpenOrder,
   polymarketL2Request,
+  readCompletePolymarketOpenOrderPage,
 } from "./services/polymarket-clob-l2.js";
 
 const originalFetch = globalThis.fetch;
@@ -17,6 +18,61 @@ const credentials = {
 };
 
 try {
+  await test("sell preview distinguishes an empty complete page from incomplete or malformed locks", () => {
+    const sell = {
+      id: "sell",
+      side: "SELL",
+      asset_id: "123",
+      maker_address: `0x${"a".repeat(40)}`,
+      original_size: "10",
+      size_matched: "1.25",
+    };
+    assert.deepEqual(
+      readCompletePolymarketOpenOrderPage({ data: [], next_cursor: "LTE=" }),
+      [],
+    );
+    assert.deepEqual(
+      readCompletePolymarketOpenOrderPage({
+        data: [sell],
+        next_cursor: "LTE=",
+      }),
+      [sell],
+    );
+    assert.equal(
+      readCompletePolymarketOpenOrderPage({
+        data: [sell],
+        next_cursor: "Mg==",
+      }),
+      null,
+    );
+    assert.equal(readCompletePolymarketOpenOrderPage({}), null);
+    assert.equal(readCompletePolymarketOpenOrderPage([]), null);
+    assert.equal(readCompletePolymarketOpenOrderPage({ data: [] }), null);
+    for (const badSell of [
+      { ...sell, type: "GCT" },
+      { ...sell, size_matched: "10.000001" },
+    ])
+      assert.equal(
+        readCompletePolymarketOpenOrderPage({
+          data: [badSell],
+          next_cursor: "LTE=",
+        }),
+        null,
+      );
+    assert.equal(
+      readCompletePolymarketOpenOrderPage({
+        data: [{ ...sell, original_size: "unknown" }],
+      }),
+      null,
+    );
+    assert.equal(
+      readCompletePolymarketOpenOrderPage({
+        data: [{ ...sell, maker_address: "unknown" }],
+      }),
+      null,
+    );
+  });
+
   await test("extractSingleOrder accepts raw order response", () => {
     const payload = {
       id: "0xabc",

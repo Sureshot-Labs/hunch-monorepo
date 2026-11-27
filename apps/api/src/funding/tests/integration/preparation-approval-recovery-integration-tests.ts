@@ -8,8 +8,12 @@ import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
 import { FundingPlanningRuntime } from "../../planner/runtime-service.js";
 import type { PreparationResult } from "../../domain/contracts.js";
-import type { PreparationReceiptReader } from "../../preparation/approval-receipt.js";
 import {
+  needsManualSellApprovalRecovery,
+  type PreparationReceiptReader,
+} from "../../preparation/approval-receipt.js";
+import {
+  admitFundingPreparationAction,
   createOrReplayFundingPreparationRun,
   fetchFundingPreparationRun,
   reportFundingPreparationAction,
@@ -32,6 +36,8 @@ const hash = `0x${"ab".repeat(32)}`;
 const iface = new ethers.Interface([
   "function approve(address spender,uint256 amount)",
   "event Approval(address indexed owner,address indexed spender,uint256 value)",
+  "function setApprovalForAll(address operator,bool approved)",
+  "event ApprovalForAll(address indexed account,address indexed operator,bool approved)",
 ]);
 const data = iface.encodeFunctionData("approve", [spender, 99n]);
 const event = iface.encodeEventLog("Approval", [owner, spender, 99n]);
@@ -350,6 +356,120 @@ try {
   assert.equal(finishedMixed.actions[1]?.state, "succeeded");
 
   outcome = "unknown";
+  const approvalData = iface.encodeFunctionData("setApprovalForAll", [
+    spender,
+    true,
+  ]);
+  const approvalEvent = iface.encodeEventLog("ApprovalForAll", [
+    owner,
+    spender,
+    true,
+  ]);
+  const originalSell = await createOrReplayFundingPreparationRun(db, {
+    userId,
+    admissionProtocolVersion: 1,
+    request: {
+      venueBindingOptionId: `binding_${randomUUID()}`,
+      purpose: "sell",
+      marketContextId: null,
+      marketClass: "clob",
+      positionActionRef: null,
+      controllerWalletRef: controllerId,
+      expectedInspectionRevision: randomUUID(),
+    },
+    expiresAt: new Date(Date.now() + 60_000),
+    materialize: async (runId) => ({
+      controllerWalletRef: controllerId,
+      actions: [
+        {
+          kind: "evm_transaction",
+          actionId: `approval_${runId}`,
+          networkId: "evm:8453",
+          senderWalletId: stableWalletOpaqueId({
+            walletType: "ethereum",
+            networkId: "evm:8453",
+            address: owner,
+          }),
+          to: token,
+          data: approvalData,
+          valueRaw: "0",
+          gasLimitRaw: null,
+        },
+      ],
+    }),
+  });
+  const actionId = actionAt(originalSell).actionId;
+  const requestKey = "a".repeat(32);
+  const admission = {
+    userId,
+    runId: originalSell.runId,
+    actionId,
+    requestKey,
+    inspectionRevision: originalSell.inspectionRevision,
+    controllerWalletRef: controllerId,
+    executionMode: "web_client" as const,
+    signer: owner,
+  };
+  assert.equal(
+    (await admitFundingPreparationAction(db, admission)).admitted,
+    true,
+  );
+  const report = (transactionReference: string | null) =>
+    reportFundingPreparationAction(db, {
+      userId,
+      runId: originalSell.runId,
+      actionId,
+      report: {
+        outcome: transactionReference ? "submitted" : "ambiguous",
+        transactionReference,
+        networkFeeRaw: null,
+        admissionKey: requestKey,
+      },
+    });
+  await report(null);
+  await db.query(
+    "update funding_preparation_runs set expires_at=now()-interval '1 day' where id=$1",
+    [originalSell.runId],
+  );
+  const beforePassive = inspections;
+  const stalled = await read(originalSell);
+  assert.equal(needsManualSellApprovalRecovery(stalled), true);
+  assert.equal(
+    inspections,
+    beforePassive,
+    "no passive RPC refresh for missing receipt reference",
+  );
+  assert.equal(
+    (await admitFundingPreparationAction(db, admission)).admitted,
+    false,
+  );
+  assert.equal(needsManualSellApprovalRecovery(await report(hash)), false);
+  const lateRuntime = new FundingPlanningRuntime(db, {
+    preparationReceiptReader: async (_chain, reference) => {
+      assert.equal(reference, hash);
+      return {
+        transaction: { ...transaction, data: approvalData },
+        receipt: {
+          ...receipt,
+          logs: [
+            {
+              address: token,
+              data: approvalEvent.data,
+              topics: approvalEvent.topics,
+            },
+          ],
+        },
+      };
+    },
+  });
+  Object.defineProperty(lateRuntime, "preparationRuntime", {
+    value: Reflect.get(runtime, "preparationRuntime"),
+  });
+  assert.equal(
+    (await lateRuntime.reconcilePreparationRun(userId, originalSell.runId))
+      ?.status,
+    "succeeded",
+  );
   const unknown = await create();
   await db.query(
     "update funding_preparation_runs set expires_at = now() - interval '1 day' where id=$1",

@@ -104,6 +104,9 @@ export const socialCopyStatusResponse = z.object({
   state: z.enum(["pending", "confirmed", "revoked", "failed"]),
   sourceRef: socialSourceRefSchema,
   purchaseRef: socialPurchaseRef.nullable(),
+  executionStatus: z
+    .enum(["pending", "filled", "no_fill", "failed", "not_submitted"])
+    .optional(),
   createdAt: timestamp,
   confirmedAt: timestamp.nullable(),
   updatedAt: timestamp,

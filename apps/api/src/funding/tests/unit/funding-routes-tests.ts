@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { Interface } from "ethers";
 import Fastify from "fastify";
 import {
   serializerCompiler,
@@ -2118,6 +2119,65 @@ await test("admission derives its owner from auth and rejects execution authorit
         ).statusCode,
         400,
       );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("expired Limitless SELL recovery hides the executable approval on both status routes", async () => {
+  const fresh = preparationRun();
+  const approval = fresh.actions[0];
+  assert.ok(approval);
+  assert.equal(approval.action.kind, "evm_transaction");
+  const data = new Interface([
+    "function setApprovalForAll(address,bool)",
+  ]).encodeFunctionData("setApprovalForAll", [ASSET.assetId, true]);
+  const run = {
+    ...fresh,
+    status: "ambiguous" as const,
+    expiresAt: new Date(0),
+    request: {
+      ...fresh.request,
+      purpose: "sell" as const,
+      executionJournal: { version: 1 as const, admissions: {} },
+    },
+    actions: [
+      {
+        ...approval,
+        state: "ambiguous" as const,
+        broadcastMayHaveOccurred: true,
+        action: {
+          ...approval.action,
+          networkId: "evm:8453",
+          data,
+          valueRaw: "0",
+        },
+      },
+    ],
+  };
+  const app = await buildApp({
+    preparationRun: async () => run,
+    reconcilePreparationRun: async () => run,
+  });
+  try {
+    const url = `/funding/preparation/runs/${run.runId}`;
+    for (const response of [
+      await app.inject({ method: "GET", url }),
+      await app.inject({ method: "POST", url: `${url}/reconcile` }),
+    ]) {
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().status, "ambiguous");
+      assert.deepEqual(response.json().recovery, {
+        code: "approval_reference_missing",
+        automaticPolling: false,
+      });
+      assert.deepEqual(response.json().actions, []);
+      assert.equal(response.json().actionAttempts[0].action, null);
+      assert.equal(
+        response.json().actionAttempts[0].broadcastMayHaveOccurred,
+        true,
+      );
+    }
   } finally {
     await app.close();
   }

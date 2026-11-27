@@ -3,6 +3,7 @@ import type { Pool } from "@hunch/infra";
 import type { SocialSourceRef } from "../schemas/social-trade.js";
 import {
   LimitlessCopyAlreadySubmittedError,
+  LimitlessCopyBlockedBeforeSubmissionError,
   inspectDispatchedLimitlessCopy,
   retainClientCopyBeforeSubmission,
   linkPersistedCopy,
@@ -302,6 +303,7 @@ type LimitlessRouteLogger = {
 
 type LimitlessClientOrderBody = {
   pendingResponseVersion?: 1;
+  copyExecutionResponseVersion?: 1;
   sourceRef?: SocialSourceRef;
   copyIdempotencyKey?: string;
   requireStandardFeeReserve?: boolean;
@@ -506,6 +508,7 @@ export type LimitlessClientSignedOrderResult =
         clientOrderId?: string;
         recoveryId?: string;
         recoveryState?: "pending";
+        copyIdempotencyKey?: string;
         orderId?: string;
         status?: string;
         referralFirstTrade?: unknown;
@@ -3388,6 +3391,7 @@ export async function submitLimitlessClientSignedOrder(input: {
     payload: {
       code: "limitless_prior_submission_reconciling",
       clientOrderId,
+      executionStatus: "not_submitted",
       error:
         "Another Limitless order for this position is being checked. No new order was sent.",
     },
@@ -3716,6 +3720,17 @@ export async function submitLimitlessClientSignedOrder(input: {
       sourceRef: input.body.sourceRef,
     });
     if (replay === "matching") return copyPending(key);
+    if (replay === "not_submitted")
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          code: "limitless_copy_not_submitted",
+          error:
+            "The original Copy was stopped before it was sent to Limitless.",
+          executionStatus: "not_submitted",
+        },
+      };
     if (replay === "conflict")
       return {
         ok: false,
@@ -4674,12 +4689,17 @@ export async function submitLimitlessClientSignedOrder(input: {
         });
       if (error instanceof LimitlessCopyAlreadySubmittedError)
         return copyPending(error.copyIdempotencyKey);
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        error.code === "limitless_submit_reconciling"
-      )
-        return directHandoffAlreadyClaimed;
+      if (error instanceof LimitlessCopyBlockedBeforeSubmissionError)
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: {
+            code: error.code,
+            error:
+              "Another Limitless order is being checked. No new order was sent.",
+            executionStatus: "not_submitted",
+          },
+        };
       return {
         ok: false,
         statusCode: 409,
@@ -4707,10 +4727,30 @@ export async function submitLimitlessClientSignedOrder(input: {
             : undefined,
       });
     } catch (error) {
+      // The Copy fence was persisted, but no provider placement was attempted.
+      // Keep that fence on the old key and close only this exact retained row.
+      if (copyAttempt)
+        await markCopyDefinitiveProviderRejection(
+          input.pool,
+          input.userId,
+          copyAttempt,
+          "not_submitted",
+        ).catch((writeError: unknown) => {
+          input.log?.warn?.(
+            {
+              errorName:
+                writeError instanceof Error ? writeError.name : "UnknownError",
+            },
+            "Limitless Copy pre-dispatch status could not be saved",
+          );
+        });
       return {
         ok: false,
         statusCode: 409,
-        payload: toPublicFundingTradeError(error),
+        payload: {
+          ...toPublicFundingTradeError(error),
+          ...(copyAttempt ? { executionStatus: "not_submitted" } : {}),
+        },
       };
     }
   }
@@ -4823,6 +4863,12 @@ export async function submitLimitlessClientSignedOrder(input: {
     !parsedResult.hasConflictingMatch &&
     !parsedResult.explicitNoFill &&
     !isLimitlessTerminalRejectedStatus(parsedResult.status);
+  const acknowledgeDelayedCopy =
+    acceptedDelayed &&
+    copyAttempt &&
+    copyKey &&
+    !directHandoffBinding &&
+    input.body.copyExecutionResponseVersion === 1;
   const mustReconcileFrozenFok =
     isFrozenCollateralFok &&
     (upstream.ok
@@ -4859,7 +4905,11 @@ export async function submitLimitlessClientSignedOrder(input: {
         attemptId: fundingTradeAttemptId,
         clientOrderId,
       }).catch((error: unknown) => {
-        if (!acceptedDelayed || directHandoffBinding || copyAttempt)
+        if (
+          !acceptedDelayed ||
+          directHandoffBinding ||
+          (copyAttempt && !acknowledgeDelayedCopy)
+        )
           throw error;
         input.log?.warn?.(
           { clientOrderId },
@@ -4882,7 +4932,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       )
         .then(() => true)
         .catch(keepCopyPendingOnPersistenceError);
-      if (!retainedLocator) return pendingOrder();
+      if (!retainedLocator && !acknowledgeDelayedCopy) return pendingOrder();
     }
   }
   if (mustReconcileFrozenFok) {
@@ -4927,6 +4977,20 @@ export async function submitLimitlessClientSignedOrder(input: {
         );
       }
     }
+    if (acknowledgeDelayedCopy && copyKey)
+      return {
+        ok: true,
+        statusCode: 202,
+        payload: {
+          ok: true,
+          status: "pending",
+          recoveryState: "pending",
+          clientOrderId,
+          copyIdempotencyKey: copyKey,
+          executionStatus: "DELAYED",
+          payload: null,
+        },
+      };
     if (
       acceptedDelayed &&
       !copyKey &&
@@ -4974,6 +5038,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         input.pool,
         input.userId,
         copyAttempt,
+        decision.disposition === "fok_no_fill" ? "no_fill" : "failed",
       );
     const operationSupportMetadataPatch =
       buildLimitlessTradeSubmissionEvidencePatch({
@@ -5110,10 +5175,20 @@ export async function submitLimitlessClientSignedOrder(input: {
   const submittedOrder = extractLimitlessSubmittedOrder(upstream.payload);
   const venueOrderId = submittedOrder.venueOrderId;
 
-  if (isLimitlessTerminalRejectedStatus(parsedResult.status)) {
+  if (
+    isLimitlessTerminalRejectedStatus(parsedResult.status) &&
+    !(isFrozenCollateralFok && parsedResult.explicitNoFill)
+  ) {
     const errorCode = `limitless_exact_status_${parsedResult.status}`;
     try {
       if (!(await closeDirectJournal("failed"))) return pendingOrder();
+      if (copyAttempt)
+        await markCopyDefinitiveProviderRejection(
+          input.pool,
+          input.userId,
+          copyAttempt,
+          "failed",
+        );
       if (fundingReservation && fundingTradeAttemptId) {
         if (reconciledExactStatus) {
           await releaseFundingReservationForProvenLimitlessTerminalRejection(
@@ -5187,6 +5262,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         input.pool,
         input.userId,
         copyAttempt,
+        "no_fill",
       );
     const noFill = await finalizeCurrentFokNoFill(
       upstream.payload,

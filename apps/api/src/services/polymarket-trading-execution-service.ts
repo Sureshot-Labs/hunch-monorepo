@@ -126,6 +126,7 @@ import {
   fetchPolymarketOrderByHash,
   normalizeOpenOrder,
   polymarketL2Request,
+  readCompletePolymarketOpenOrderPage,
   type PolymarketL2Credentials,
 } from "./polymarket-clob-l2.js";
 import {
@@ -400,6 +401,7 @@ type PolymarketQuoteBody = {
   amountType?: "usd" | "shares" | null;
   amountUsd?: number | null;
   includeFundingPlan?: boolean | null;
+  includeSellAvailability?: boolean;
   limitPrice?: number | null;
   orderType?: PolymarketOrderType | null;
   postOnly?: boolean | null;
@@ -412,6 +414,7 @@ const POLYMARKET_INTERACTIVE_QUOTE_TIMEOUT_MS = 12_000;
 
 async function withinPolymarketInteractiveQuoteDeadline<T>(
   promise: Promise<T>,
+  timeoutMs = POLYMARKET_INTERACTIVE_QUOTE_TIMEOUT_MS,
 ): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
   const deadline = new Promise<never>((_, reject) => {
@@ -424,7 +427,7 @@ async function withinPolymarketInteractiveQuoteDeadline<T>(
             "quote_timeout",
           ),
         ),
-      POLYMARKET_INTERACTIVE_QUOTE_TIMEOUT_MS,
+      timeoutMs,
     );
   });
   try {
@@ -3546,6 +3549,7 @@ export async function quotePolymarketOrderRoute(input: {
   const amountSharesInput = amountType === "shares" ? body.amount : null;
 
   try {
+    const quoteStartedAt = performance.now();
     const quote = await withinPolymarketInteractiveQuoteDeadline(
       quotePolymarketOrder(input.pool, {
         tokenId,
@@ -3624,12 +3628,43 @@ export async function quotePolymarketOrderRoute(input: {
       }
     }
 
+    const availabilityBudgetMs = Math.floor(
+      POLYMARKET_INTERACTIVE_QUOTE_TIMEOUT_MS -
+        (performance.now() - quoteStartedAt),
+    );
+    const wantsSellAvailability =
+      body.side === "SELL" && body.includeSellAvailability === true;
+    const sellAvailability =
+      wantsSellAvailability && availabilityBudgetMs > 0
+        ? await withinPolymarketInteractiveQuoteDeadline(
+            resolvePolymarketAvailablePositionRaw({
+              pool: input.pool,
+              signer: input.signer,
+              tokenId: quote.tokenId,
+              userId: input.userId,
+              assetContext: quote.assetContext,
+              requireCompleteQuoteEvidence: true,
+            }),
+            availabilityBudgetMs,
+          ).then(
+            (available) => ({
+              requestedSharesRaw: quote.makerAmount,
+              availableSharesRaw: available.availableRaw.toString(),
+              lockedSharesRaw: available.lockedRaw.toString(),
+              quantityFits: BigInt(quote.makerAmount) <= available.availableRaw,
+            }),
+            () => null,
+          )
+        : wantsSellAvailability
+          ? null
+          : undefined;
     return {
       ok: true,
       payload: {
         ...quote,
         fundingPlan,
         fundingPlanError,
+        ...(sellAvailability !== undefined ? { sellAvailability } : {}),
       },
     };
   } catch (error) {
@@ -6329,6 +6364,7 @@ export async function resolvePolymarketAvailablePositionRaw(inputs: {
   tokenId: string;
   userId: string;
   assetContext?: PolymarketAssetContext | null;
+  requireCompleteQuoteEvidence?: boolean;
 }): Promise<{
   availableRaw: bigint;
   balanceRaw: bigint;
@@ -6379,6 +6415,15 @@ export async function resolvePolymarketAvailablePositionRaw(inputs: {
       venue: "polymarket",
     });
   }
+  if (
+    inputs.requireCompleteQuoteEvidence &&
+    funder.toLowerCase() !== (creds.funderAddress ?? signer).toLowerCase()
+  )
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Polymarket sell funder could not be verified.",
+      venue: "polymarket",
+    });
   const l2Creds: PolymarketL2Credentials = {
     apiKey: creds.apiKey,
     apiSecret: creds.apiSecret,
@@ -6418,14 +6463,37 @@ export async function resolvePolymarketAvailablePositionRaw(inputs: {
       venue: "polymarket",
     });
   }
+  const observedBalance = balances.get(inputs.tokenId);
+  const orders = inputs.requireCompleteQuoteEvidence
+    ? readCompletePolymarketOpenOrderPage(upstream.payload)
+    : extractOrderArray(upstream.payload);
+  if (
+    !orders ||
+    (inputs.requireCompleteQuoteEvidence && observedBalance === undefined)
+  )
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Polymarket sell availability could not be verified.",
+      venue: "polymarket",
+    });
   const key = polymarketPositionLockKey(funder, inputs.tokenId);
   const liveLocks = computePolymarketClobOpenPositionLocks({
-    orders: extractOrderArray(upstream.payload),
+    orders,
     wallet: funder,
     conditionId: assetContext?.conditionId,
   });
   const lockedRaw = maxRaw(localLocks.get(key), liveLocks.get(key));
-  const balanceRaw = balances.get(inputs.tokenId) ?? 0n;
+  if (
+    inputs.requireCompleteQuoteEvidence &&
+    (localLocks.get(key) ?? 0n) > 0n &&
+    (liveLocks.get(key) ?? 0n) > 0n
+  )
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Local and venue sell reservations could not be matched.",
+      venue: "polymarket",
+    });
+  const balanceRaw = observedBalance ?? 0n;
   return {
     availableRaw: balanceRaw > lockedRaw ? balanceRaw - lockedRaw : 0n,
     balanceRaw,
@@ -7064,7 +7132,6 @@ function derivePriceAndSize(
   return { price, size };
 }
 
-
 function normalizePolymarketOrderForPrivyPolicy(
   order: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -7428,7 +7495,14 @@ export async function submitPolymarketClientSignedOrder(input: {
       });
       if (availability.availableRaw < requestedSharesRaw) {
         input.log?.warn?.(
-          { side, reason: POLYMARKET_SELL_BALANCE_CHANGED_CODE },
+          {
+            side,
+            reason: POLYMARKET_SELL_BALANCE_CHANGED_CODE,
+            requestedSharesRaw: requestedSharesRaw.toString(),
+            availableSharesRaw: availability.availableRaw.toString(),
+            balanceSharesRaw: availability.balanceRaw.toString(),
+            lockedSharesRaw: availability.lockedRaw.toString(),
+          },
           "Polymarket order rejected before submission",
         );
         return {

@@ -123,6 +123,7 @@ export const limitlessEmbeddedSignOrderExecuteBodySchema = z.object({
 export const limitlessOrderBodySchema = z
   .object({
     pendingResponseVersion: z.literal(1).optional(),
+    copyExecutionResponseVersion: z.literal(1).optional(),
     sourceRef: socialSourceRefSchema.optional(),
     copyIdempotencyKey: z.string().uuid().optional(),
     requireStandardFeeReserve: z.boolean().optional(),

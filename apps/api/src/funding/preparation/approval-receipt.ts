@@ -31,6 +31,50 @@ const approvalInterface = new ethers.Interface([
   "event ApprovalForAll(address indexed account,address indexed operator,bool approved)",
 ]);
 
+/** Missing evidence is not proof of no broadcast; never use this to reopen execution. */
+export function needsManualSellApprovalRecovery(
+  run: FundingPreparationRun,
+  now = new Date(),
+): boolean {
+  if (
+    run.request.executionJournal?.version !== 1 ||
+    run.request.purpose !== "sell" ||
+    (run.status !== "ambiguous" && run.status !== "submitted") ||
+    run.expiresAt > now ||
+    run.resolvedAt
+  )
+    return false;
+  const pending = run.actions.filter(
+    (attempt) => attempt.state === "submitted" || attempt.state === "ambiguous",
+  );
+  return (
+    pending.length > 0 &&
+    pending.every((attempt) => {
+      const action = attempt.action;
+      if (
+        !attempt.broadcastMayHaveOccurred ||
+        attempt.transactionReference ||
+        action.kind !== "evm_transaction" ||
+        action.networkId !== "evm:8453" ||
+        action.valueRaw !== "0"
+      )
+        return false;
+      try {
+        const call = approvalInterface.parseTransaction({ data: action.data });
+        return (
+          call?.name === "setApprovalForAll" &&
+          call.args[1] === true &&
+          approvalInterface
+            .encodeFunctionData(call.fragment, call.args)
+            .toLowerCase() === action.data.toLowerCase()
+        );
+      } catch {
+        return false;
+      }
+    })
+  );
+}
+
 export type PreparationReceiptReader = (
   networkId: string,
   transactionHash: string,

@@ -4,6 +4,7 @@ import { ethers } from "ethers";
 import type { UserWallet } from "../../../auth.js";
 import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import {
+  needsManualSellApprovalRecovery,
   verifyPreparationApprovalReceipts,
   type PreparationReceiptReader,
 } from "../../preparation/approval-receipt.js";
@@ -106,6 +107,85 @@ function fixture(operator = false) {
   };
   return { run, evidence };
 }
+
+test("manual recovery applies only to expired Base SELL operator approvals without a reference", () => {
+  const run = fixture(true).run;
+  const attempt = run.actions[0];
+  assert.ok(attempt);
+  const missing: FundingPreparationRun = {
+    ...run,
+    request: {
+      ...run.request,
+      purpose: "sell",
+      executionJournal: { version: 1, admissions: {} },
+    },
+    actions: [{ ...attempt, transactionReference: null }],
+  };
+  assert.equal(needsManualSellApprovalRecovery(missing, new Date(1)), true);
+  assert.equal(needsManualSellApprovalRecovery(run, new Date(1)), false);
+  assert.equal(
+    needsManualSellApprovalRecovery(
+      {
+        ...missing,
+        request: { ...run.request, purpose: "sell" },
+      },
+      new Date(1),
+    ),
+    false,
+  );
+  assert.equal(
+    needsManualSellApprovalRecovery(
+      {
+        ...missing,
+        actions: [
+          ...missing.actions,
+          { ...attempt, actionId: "also-referenced" },
+        ],
+      },
+      new Date(1),
+    ),
+    false,
+  );
+  assert.equal(
+    needsManualSellApprovalRecovery(
+      { ...missing, expiresAt: new Date(2) },
+      new Date(1),
+    ),
+    false,
+  );
+  assert.equal(
+    needsManualSellApprovalRecovery(
+      { ...missing, actions: [attempt] },
+      new Date(1),
+    ),
+    false,
+  );
+  assert.equal(
+    needsManualSellApprovalRecovery(
+      {
+        ...missing,
+        actions: [
+          {
+            ...attempt,
+            transactionReference: null,
+            broadcastMayHaveOccurred: false,
+          },
+        ],
+      },
+      new Date(1),
+    ),
+    false,
+  );
+  const erc20 = fixture(false).run.actions[0];
+  assert.ok(erc20);
+  assert.equal(
+    needsManualSellApprovalRecovery(
+      { ...missing, actions: [{ ...erc20, transactionReference: null }] },
+      new Date(1),
+    ),
+    false,
+  );
+});
 
 test("settled-market ERC20 and operator approvals resolve from exact receipts", async () => {
   for (const operator of [false, true]) {

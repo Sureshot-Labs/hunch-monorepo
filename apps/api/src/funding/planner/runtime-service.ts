@@ -6,6 +6,7 @@ import {
 import { isRecord } from "../../lib/type-guards.js";
 import { AuthService } from "../../auth.js";
 import {
+  needsManualSellApprovalRecovery,
   readPreparationReceipt,
   verifyPreparationApprovalReceipts,
   type PreparationReceiptReader,
@@ -634,6 +635,9 @@ export class FundingPlanningRuntime {
   private async reconcilePendingPreparationRun(
     run: FundingPreparationRun,
   ): Promise<FundingPreparationRun> {
+    // Nothing to look up on a passive read. The explicit reconcile endpoint
+    // and late provider-reference reporting remain available.
+    if (needsManualSellApprovalRecovery(run)) return run;
     if (
       run.status !== "submitted" &&
       run.status !== "ambiguous" &&
