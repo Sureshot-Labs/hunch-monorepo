@@ -2878,6 +2878,8 @@ type AuthMiddlewareOptions = {
   requireWallet?: boolean;
   /** For high-volume streams, record only bounded rejection reasons. */
   logUnauthorized?: boolean;
+  /** Opt-in correlation after session/user validation, before wallet selection. */
+  accountLogKey?: (userId: string) => string;
 };
 
 type AdminMiddlewareOptions = AuthMiddlewareOptions & {
@@ -3020,6 +3022,10 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
       }
       return reject("inactive_user", "User not found or inactive");
     }
+    if (options.accountLogKey)
+      request.log = request.log.child({
+        accountKey: options.accountLogKey(user.id),
+      });
 
     // Default to the wallet captured on session creation (typically the Privy primary wallet).
     // Clients can override this per-request via `X-HUNCH-WALLET`.
