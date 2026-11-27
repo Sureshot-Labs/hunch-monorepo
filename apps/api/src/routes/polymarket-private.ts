@@ -1,4 +1,8 @@
-import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
+import type {
+  FastifyBaseLogger,
+  FastifyPluginAsync,
+  RouteShorthandOptions,
+} from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { stableOpaqueId } from "../account-value/canonical.js";
@@ -87,6 +91,80 @@ export function polymarketOrderSubmitLogger(
       },
     },
   );
+}
+
+type WalletReadPath = "/account" | "/funder-derive";
+
+function walletReadResultCode(path: WalletReadPath, status: number): string {
+  if (status >= 200 && status < 300) return "wallet_read_ok";
+  if (status === 400) return "wallet_read_invalid_request";
+  if (status === 401) return "wallet_read_unauthorized";
+  if (status === 403) return "wallet_not_linked";
+  if (status === 429) return "wallet_read_rate_limited";
+  if (status === 504) return "wallet_read_timeout";
+  if (path === "/account" && status === 502)
+    return "account_snapshot_unavailable";
+  return status >= 500 ? "wallet_read_interrupted" : "wallet_read_rejected";
+}
+
+function polymarketWalletReadLogging(
+  path: WalletReadPath,
+): Pick<
+  RouteShorthandOptions,
+  "childLoggerFactory" | "onSend" | "preHandler" | "onResponse"
+> {
+  const stage =
+    path === "/account" ? "polymarket_account" : "polymarket_funder_derive";
+  const serializeError = (error: unknown) =>
+    error instanceof TradingServiceError
+      ? { code: error.code, status: error.statusCode }
+      : { code: "wallet_read_interrupted" };
+  return {
+    // Install before Fastify logs the inbound URL, whose query can include
+    // a signer or funder. Both regular and error logging keep reqId.
+    childLoggerFactory: (logger, bindings, opts, rawRequest) =>
+      logger.child(
+        { ...bindings, stage },
+        {
+          ...opts,
+          serializers: {
+            ...opts.serializers,
+            req: () => ({
+              method: rawRequest.method === "HEAD" ? "HEAD" : "GET",
+              url: `/trade/polymarket${path}`,
+            }),
+            err: serializeError,
+            error: serializeError,
+          },
+          redact: {
+            paths: [
+              "userId",
+              "signer",
+              "funder",
+              "sessionAgent",
+              "requestAgent",
+            ],
+            remove: true,
+          },
+        },
+      ),
+    onSend: async (request, reply) => {
+      reply.header("x-hunch-request-id", request.id);
+    },
+    preHandler: createAuthMiddleware({
+      accountLogKey: (userId) => stableOpaqueId("trade", userId),
+    }),
+    onResponse: async (request, reply) => {
+      request.log.info(
+        {
+          status: reply.statusCode,
+          code: walletReadResultCode(path, reply.statusCode),
+          durationMs: Math.round(reply.elapsedTime),
+        },
+        "Polymarket wallet read completed",
+      );
+    },
+  };
 }
 
 // Mounted under /trade/polymarket.
@@ -224,7 +302,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/funder-derive",
     {
-      preHandler: createAuthMiddleware(),
+      ...polymarketWalletReadLogging("/funder-derive"),
       schema: { querystring: polymarketFunderDeriveQuerySchema },
     },
     async (request, reply) => {
@@ -244,6 +322,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(result.payload);
       }
 
+      const { candidates, recommended, warnings } = result.payload;
+      request.log = request.log.child({
+        candidateCount: Array.isArray(candidates)
+          ? candidates.length
+          : undefined,
+        hasRecommendedFunder: recommended != null,
+        warningCount: Array.isArray(warnings) ? warnings.length : undefined,
+      });
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(result.payload);
     },
@@ -375,7 +461,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/account",
     {
-      preHandler: createAuthMiddleware(),
+      ...polymarketWalletReadLogging("/account"),
       schema: { querystring: polymarketAccountQuerySchema },
     },
     async (request, reply) => {
@@ -404,6 +490,21 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(result.payload);
       }
 
+      const { funderSource, funderIsContract, hasCredentials, protocolV2 } =
+        result.payload;
+      request.log = request.log.child({
+        funderSource:
+          funderSource === "query" ||
+          funderSource === "credentials" ||
+          funderSource === "signer"
+            ? funderSource
+            : undefined,
+        funderIsContract:
+          typeof funderIsContract === "boolean" ? funderIsContract : undefined,
+        hasCredentials:
+          typeof hasCredentials === "boolean" ? hasCredentials : undefined,
+        hasProtocolV2Snapshot: protocolV2 != null,
+      });
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(result.payload);
     },
